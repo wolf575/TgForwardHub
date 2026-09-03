@@ -142,6 +142,8 @@ FLASK_SECRET_KEY=replace-with-a-long-random-string
 docker pull ghcr.io/wolf575/tg-forward-hub:latest
 ```
 
+> GHCR 包默认是私有的。如果不想在服务器上登录，可以在 GitHub Packages 页面把 `tg-forward-hub` 的可见性改为 Public；否则先执行 `docker login ghcr.io -u wolf575`，再粘贴一个具有 `read:packages` 权限的 token。
+
 在服务器上运行，并把宿主机端口改成 `10001`：
 
 ```bash
