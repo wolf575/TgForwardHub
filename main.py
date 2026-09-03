@@ -13,6 +13,7 @@ Main entry point - coordinates all modules
 """
 
 # 导入日志配置模块
+import asyncio
 import time
 
 from bot.utils.logger import setup_logging, get_logger
@@ -49,8 +50,15 @@ def _has_bot_credentials():
     )
 
 
+async def _idle_without_signals(bot):
+    """Keep the Pyrogram event loop alive without installing signal handlers."""
+    while bot.is_connected:
+        await asyncio.sleep(1)
+
+
 def main():
     """主函数：协调所有模块启动Bot"""
+    bot = None
     acc = None
 
     while not _has_bot_credentials():
@@ -91,8 +99,14 @@ def main():
         print_startup_config(acc)
 
         # 7. 启动Bot
-        logger.info("🎬 启动Bot主循环...")
-        bot.run()
+        # Pyrogram 的 ``run()`` 会调用 ``idle()``，而 ``idle()`` 需要在主线程中
+        # 注册 Unix 信号处理器。这里的 Bot 运行在 ``run.py`` 创建的后台线程里，
+        # 因此改用 ``start()`` 启动 dispatcher，并用不注册信号的 idle 保持事件循环。
+        logger.info("🎬 启动Bot客户端...")
+        bot.start()
+        logger.info("✅ Bot客户端已启动并开始监听消息")
+
+        asyncio.get_event_loop().run_until_complete(_idle_without_signals(bot))
 
     except KeyboardInterrupt:
         logger.info("\n⚠️ 收到中断信号，正在关闭...")
@@ -109,7 +123,14 @@ def main():
         except Exception as e:
             logger.error(f"⚠️ 停止校准调度器时出错: {e}")
 
-        if acc is not None:
+        if bot is not None and getattr(bot, "is_connected", False):
+            try:
+                bot.stop()
+                logger.info("✅ Bot客户端已停止")
+            except Exception as e:
+                logger.error(f"⚠️ 停止Bot客户端时出错: {e}")
+
+        if acc is not None and getattr(acc, "is_connected", False):
             try:
                 acc.stop()
                 logger.info("✅ User客户端已停止")
