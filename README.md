@@ -35,6 +35,8 @@ TG Forward Hub 是一个把「网页端批量转发」和「Telegram 自动监�
 ### 网页端
 
 - 统一 Flask 页面：批量转发、实时监控、记录笔记、系统设置。
+- 初始配置已嵌入统一设置页，不再跳转到旧项目页面。
+- 设置页会显示网页端、Bot 和用户客户端状态；网页与 Bot 共享配置和数据库，可同时操作。
 - 默认管理员账号：`admin` / `admin`，首次登录后建议在管理页面修改密码。
 - 内置 Telegram 配置向导，可填写 Bot Token、API ID、API Hash，并通过手机号验证码和两步验证生成 String Session。
 
@@ -81,7 +83,7 @@ TgForwardHub/
 | `PORT` | Web 服务监听端口，默认 `10000` | 可选 |
 | `TZ` | 时区，默认 `Asia/Shanghai` | 可选 |
 
-> 也可以通过网页端「设置 → 初始配置」生成 Session String，不必手动复制长字符串。
+> 也可以通过网页端「设置」页生成 Session String，不必手动复制长字符串。
 
 ## 本地运行
 
@@ -109,16 +111,13 @@ python run.py
 ```bash
 cd TgForwardHub
 
-# 复制配置模板并填写真实凭据
-cp .env.example .env
-
 docker compose up -d --build
 docker compose logs -f
 ```
 
 打开 `http://服务器IP:10000`。
 
-`.env` 示例：
+如果你愿意提前填写凭据，也可以创建可选的 `.env`：
 
 ```dotenv
 TOKEN=123456789:AA...
@@ -132,7 +131,14 @@ FLASK_SECRET_KEY=replace-with-a-long-random-string
 
 ## Docker Run 部署
 
-项目已经准备了 `docker run` 所需的条件：镜像暴露 `10000` 端口、声明 `/app/data` 和 `/app/downloads` 数据卷，并内置健康检查。
+项目已经准备好了“零配置启动”：
+
+1. 先用 `docker run` 把容器跑起来。
+2. 打开 Web 页面，登录 `admin` / `admin`。
+3. 进入「设置」页，直接在统一表单中填写 Bot Token、API ID、API Hash，并生成 Session String。
+4. 配置会持久化到 `/app/data/config/config.json`，重启容器不会丢失。
+
+你不需要提前创建 `.env` 文件。
 
 ### 使用云端镜像
 
@@ -153,7 +159,6 @@ docker run -d \
   -p 10001:10000 \
   -v /docker-data/tfh/data:/app/data \
   -v /docker-data/tfh/downloads:/app/downloads \
-  --env-file .env \
   -e DATA_DIR=/app/data \
   -e PORT=10000 \
   -e TZ=Asia/Shanghai \
@@ -175,9 +180,6 @@ docker run -d \
 ```powershell
 cd TgForwardHub
 
-Copy-Item .env.example .env -Force
-# 编辑 .env，填入 TOKEN / ID / HASH / STRING
-
 .\docker-run.ps1
 ```
 
@@ -185,9 +187,6 @@ Copy-Item .env.example .env -Force
 
 ```bash
 cd TgForwardHub
-
-cp .env.example .env
-# 编辑 .env，填入 TOKEN / ID / HASH / STRING
 
 chmod +x docker-run.sh
 ./docker-run.sh
@@ -204,7 +203,6 @@ docker run -d \
   -p 10000:10000 \
   -v "$(pwd)/data:/app/data" \
   -v "$(pwd)/downloads:/app/downloads" \
-  --env-file .env \
   -e DATA_DIR=/app/data \
   -e PORT=10000 \
   -e TZ=Asia/Shanghai \
@@ -220,7 +218,6 @@ docker run -d `
   -p 10000:10000 `
   -v "C:\path\to\TgForwardHub\data:/app/data" `
   -v "C:\path\to\TgForwardHub\downloads:/app/downloads" `
-  --env-file .env `
   -e DATA_DIR=/app/data `
   -e PORT=10000 `
   -e TZ=Asia/Shanghai `
@@ -231,11 +228,10 @@ docker run -d `
 
 1. 打开 `http://服务器IP:10000`。
 2. 使用 `admin` / `admin` 登录。
-3. 进入「设置」标签，点击「初始配置」。
-4. 填写 Bot Token、API ID、API Hash。
-5. 点击「生成 Session」并输入 Telegram 手机号。
-6. 输入 Telegram 收到的验证码；如账号开启两步验证，再输入两步验证密码。
-7. 配置完成后，后台 Bot 和用户客户端会自动启动。
+3. 进入「设置」标签，直接在设置页填写 Bot Token、API ID、API Hash。
+4. 点击「发送验证码并生成 Session String」，输入 Telegram 手机号。
+5. 输入 Telegram 收到的验证码；如账号开启两步验证，再输入两步验证密码。
+6. 配置完成后，后台 Bot 和用户客户端会自动启动。
 
 ## 主要接口
 

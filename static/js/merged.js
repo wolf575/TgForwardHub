@@ -20,6 +20,195 @@ async function apiFetch(url, options = {}) {
   return res.json();
 }
 
+let setupState = {
+  stage: "idle",
+  setupId: "",
+  phone: "",
+};
+
+function setSetupMessage(text) {
+  const el = $("setupMessage");
+  el.textContent = text;
+  el.hidden = !text;
+}
+
+function setSetupFieldEnabled(enabled) {
+  ["setupToken", "setupApiId", "setupApiHash", "setupPhone"].forEach((id) => {
+    $(id).disabled = !enabled;
+  });
+}
+
+function setSetupStage(stage) {
+  setupState.stage = stage;
+  $("setupStageIdle").hidden = stage !== "idle";
+  $("setupStageCode").hidden = stage !== "code";
+  $("setupStagePassword").hidden = stage !== "password";
+  $("setupStageDone").hidden = stage !== "done";
+  setSetupFieldEnabled(stage === "idle");
+}
+
+function updateSessionBadge(config) {
+  const badge = $("sessionBadge");
+  if (config && config.has_session) {
+    badge.textContent = `已配置 ${config.session_masked || ""}`;
+  } else {
+    badge.textContent = "未生成";
+  }
+}
+
+function readSetupCredentials() {
+  return {
+    token: $("setupToken").value.trim(),
+    api_id: $("setupApiId").value.trim(),
+    api_hash: $("setupApiHash").value.trim(),
+    phone_number: $("setupPhone").value.trim(),
+  };
+}
+
+async function loadSetupState() {
+  try {
+    const config = await apiFetch("/api/setup/state");
+    $("setupToken").value = config.token || "";
+    $("setupApiId").value = config.api_id || "";
+    $("setupApiHash").value = config.api_hash || "";
+    $("setupPhone").value = "";
+    $("setupCode").value = "";
+    $("setupPassword").value = "";
+    $("setupSession").value = "";
+    updateSessionBadge(config);
+    setSetupStage("idle");
+    setSetupMessage("");
+  } catch (error) {
+    setSetupMessage(error.message);
+  }
+}
+
+async function saveSetupConfig() {
+  const creds = readSetupCredentials();
+  if (!creds.token || !creds.api_id || !creds.api_hash) {
+    setSetupMessage("Bot Token、API ID 和 API Hash 均不能为空");
+    return;
+  }
+
+  setSetupMessage("");
+  try {
+    const result = await apiFetch("/api/setup/save", {
+      method: "POST",
+      body: JSON.stringify(creds),
+    });
+    updateSessionBadge(result);
+    setSetupStage("idle");
+    setSetupMessage(result.message || "配置已保存");
+    loadStatus();
+  } catch (error) {
+    setSetupStage("idle");
+    setSetupMessage(error.message);
+  }
+}
+
+async function startSetup() {
+  const creds = readSetupCredentials();
+  if (!creds.token || !creds.api_id || !creds.api_hash || !creds.phone_number) {
+    setSetupMessage("生成 Session String 需要填写 Bot Token、API ID、API Hash 和 Telegram 手机号");
+    return;
+  }
+
+  setSetupMessage("");
+  try {
+    const result = await apiFetch("/api/setup/start", {
+      method: "POST",
+      body: JSON.stringify(creds),
+    });
+    setupState.setupId = result.setup_id;
+    setupState.phone = result.phone_number || creds.phone_number;
+    $("setupCode").value = "";
+    setSetupStage("code");
+    setSetupMessage(result.message || `验证码已发送到 ${setupState.phone}`);
+  } catch (error) {
+    setSetupStage("idle");
+    setSetupMessage(error.message);
+  }
+}
+
+async function submitSetupCode() {
+  const code = $("setupCode").value.trim();
+  if (!setupState.setupId) {
+    setSetupMessage("登录流程已失效，请重新开始");
+    return;
+  }
+  if (!code) {
+    setSetupMessage("验证码不能为空");
+    return;
+  }
+
+  setSetupMessage("");
+  try {
+    const result = await apiFetch("/api/setup/code", {
+      method: "POST",
+      body: JSON.stringify({ setup_id: setupState.setupId, code }),
+    });
+
+    if (result.stage === "password") {
+      setSetupStage("password");
+      $("setupPassword").value = "";
+      setSetupMessage(result.message || "账号已开启两步验证，请输入密码");
+      return;
+    }
+
+    if (result.stage === "done" || result.session_string) {
+      $("setupSession").value = result.session_string || "";
+      updateSessionBadge(result.saved || {});
+      setSetupStage("done");
+      setSetupMessage(result.message || "Session String 已生成");
+      loadStatus();
+      return;
+    }
+
+    setSetupMessage(result.message || "登录状态已更新");
+  } catch (error) {
+    setSetupMessage(error.message);
+    if (error.message.includes("登录流程不存在")) {
+      loadSetupState();
+    }
+  }
+}
+
+async function submitSetupPassword() {
+  const password = $("setupPassword").value;
+  if (!setupState.setupId) {
+    setSetupMessage("登录流程已失效，请重新开始");
+    return;
+  }
+  if (!password) {
+    setSetupMessage("两步验证密码不能为空");
+    return;
+  }
+
+  setSetupMessage("");
+  try {
+    const result = await apiFetch("/api/setup/password", {
+      method: "POST",
+      body: JSON.stringify({ setup_id: setupState.setupId, password }),
+    });
+
+    if (result.stage === "done" || result.session_string) {
+      $("setupSession").value = result.session_string || "";
+      updateSessionBadge(result.saved || {});
+      setSetupStage("done");
+      setSetupMessage(result.message || "Session String 已生成");
+      loadStatus();
+      return;
+    }
+
+    setSetupMessage(result.message || "登录状态已更新");
+  } catch (error) {
+    setSetupMessage(error.message);
+    if (error.message.includes("登录流程不存在")) {
+      loadSetupState();
+    }
+  }
+}
+
 function switchTab(tabId) {
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.classList.toggle("active", tab.dataset.tab === tabId);
@@ -32,13 +221,39 @@ function switchTab(tabId) {
 async function loadStatus() {
   try {
     const status = await apiFetch("/api/status");
-    const pill = $("clientStatus");
-    pill.textContent = status.user_client_ready
+    const clientPill = $("clientStatus");
+    clientPill.textContent = status.user_client_running
       ? "用户客户端已连接"
-      : "用户客户端未就绪";
-    pill.style.color = status.user_client_ready ? "var(--success)" : "var(--danger)";
+      : status.user_client_ready
+        ? "用户客户端启动中"
+        : "用户客户端未就绪";
+    clientPill.style.color = status.user_client_running
+      ? "var(--success)"
+      : "var(--danger)";
+
+    const dualPill = $("dualStatus");
+    dualPill.textContent = status.dual_end_ready
+      ? "网页端 + Bot 双端在线"
+      : status.bot_running
+        ? "Bot 在线，用户客户端未就绪"
+        : "Bot 未运行";
+    dualPill.style.color = status.dual_end_ready ? "var(--success)" : "var(--danger)";
+
+    $("statusWeb").textContent = status.web_ready ? "在线" : "离线";
+    $("statusBot").textContent = status.bot_running
+      ? "在线"
+      : status.bot_ready
+        ? "启动中"
+        : "未运行";
+    $("statusUser").textContent = status.user_client_running
+      ? "在线"
+      : status.user_client_ready
+        ? "启动中"
+        : "未连接";
+    $("statusMonitors").textContent = status.monitored_sources_count ?? 0;
   } catch (error) {
     $("clientStatus").textContent = "状态读取失败";
+    $("dualStatus").textContent = "状态读取失败";
   }
 }
 
@@ -300,8 +515,14 @@ document.addEventListener("DOMContentLoaded", () => {
   $("noteSearch").addEventListener("keydown", (event) => {
     if (event.key === "Enter") loadNotes();
   });
+  $("setupSaveBtn").addEventListener("click", saveSetupConfig);
+  $("setupStartBtn").addEventListener("click", startSetup);
+  $("setupCodeBtn").addEventListener("click", submitSetupCode);
+  $("setupPasswordBtn").addEventListener("click", submitSetupPassword);
+  $("setupResetBtn").addEventListener("click", loadSetupState);
 
   loadStatus();
+  loadSetupState();
   loadHistory();
   loadWatchConfig();
   loadNotes();

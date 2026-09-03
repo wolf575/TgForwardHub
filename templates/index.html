@@ -168,9 +168,75 @@
     <section id="tab-settings" class="panel">
       <div class="panel-head">
         <h1>设置</h1>
+        <div class="status-pill" id="dualStatus">状态读取中...</div>
       </div>
-      <div class="link-grid">
-        <a class="link-card" href="/setup">初始配置 / String Session</a>
+
+      <div class="settings-layout">
+        <form id="setupForm" class="form-card">
+          <div class="panel-subhead">
+            <h2>Telegram 初始配置 / String Session</h2>
+            <span id="sessionBadge" class="muted">读取中...</span>
+          </div>
+
+          <div id="setupMessage" class="message" hidden></div>
+
+          <label>Bot Token
+            <input id="setupToken" placeholder="1234567890:ABCdefGHIjklMNOpqrsTUVwxyz">
+          </label>
+          <label>API ID
+            <input id="setupApiId" inputmode="numeric" placeholder="12345678">
+          </label>
+          <label>API Hash
+            <input id="setupApiHash" placeholder="0123456789abcdef0123456789abcdef">
+          </label>
+          <label>Telegram 手机号（仅生成 Session String 时需要）
+            <input id="setupPhone" placeholder="+8613800138000">
+          </label>
+
+          <div id="setupStageIdle" class="setup-actions">
+            <button id="setupSaveBtn" class="secondary" type="button">保存配置</button>
+            <button id="setupStartBtn" class="primary" type="button">发送验证码并生成 Session String</button>
+          </div>
+
+          <div id="setupStageCode" class="setup-actions" hidden>
+            <label>Telegram 验证码
+              <input id="setupCode" inputmode="numeric" autocomplete="one-time-code" placeholder="验证码">
+            </label>
+            <button id="setupCodeBtn" class="primary" type="button">验证并生成 Session String</button>
+          </div>
+
+          <div id="setupStagePassword" class="setup-actions" hidden>
+            <label>两步验证密码
+              <input id="setupPassword" type="password" autocomplete="current-password" placeholder="两步验证密码">
+            </label>
+            <button id="setupPasswordBtn" class="primary" type="button">完成两步验证</button>
+          </div>
+
+          <div id="setupStageDone" hidden>
+            <label>已生成的 Session String
+              <textarea id="setupSession" class="session-output" readonly></textarea>
+            </label>
+            <button id="setupResetBtn" class="secondary" type="button">重新配置</button>
+          </div>
+
+          <p class="muted">修改 Bot Token、API ID、API Hash 或 Session String 后，需要重启容器才会生效。</p>
+        </form>
+
+        <div class="list-card setup-status-card">
+          <div class="panel-subhead">
+            <h2>双端运行状态</h2>
+          </div>
+          <div class="status-grid">
+            <div class="status-item"><span>网页端</span><strong id="statusWeb">检查中</strong></div>
+            <div class="status-item"><span>Telegram Bot</span><strong id="statusBot">检查中</strong></div>
+            <div class="status-item"><span>用户客户端</span><strong id="statusUser">检查中</strong></div>
+            <div class="status-item"><span>监控源数量</span><strong id="statusMonitors">-</strong></div>
+          </div>
+          <p class="muted">网页端和 Telegram 机器人共享同一套配置、监控规则与数据库，可以同时操作。</p>
+        </div>
+      </div>
+
+      <div class="link-grid secondary-links">
         <a class="link-card" href="/admin/webdav">WebDAV 存储</a>
         <a class="link-card" href="/admin/calibration">自动校准</a>
         <a class="link-card" href="/admin">修改密码</a>

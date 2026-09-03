@@ -4,7 +4,7 @@ import json
 from flask import Flask, render_template, request, redirect, url_for, session, send_from_directory, flash, jsonify, Response
 from markupsafe import Markup, escape
 from database import init_database, get_notes, get_note_count, get_sources, verify_user, update_password, get_note_by_id, update_note, delete_note, DATA_DIR
-from config import load_webdav_config, load_viewer_config, save_viewer_config, load_watch_config, save_watch_config, reload_monitored_sources
+from config import load_webdav_config, load_viewer_config, save_viewer_config, load_watch_config, save_watch_config, reload_monitored_sources, get_monitored_sources
 from bot.storage.webdav_client import WebDAVClient, StorageManager
 from bot.handlers.instances import get_acc_instance, get_bot_instance
 from web_setup import load_visible_config, save_configuration, start_session_auth, submit_code, submit_password
@@ -96,6 +96,92 @@ def _setup_config_from_form(token='', api_id='', api_hash=''):
     config['api_id'] = api_id or config.get('api_id', '')
     config['api_hash'] = api_hash or config.get('api_hash', '')
     return config
+
+
+@app.route('/api/setup/state')
+def api_setup_state():
+    if 'username' not in session:
+        return jsonify({'error': '未登录'}), 401
+    return jsonify(load_visible_config())
+
+
+@app.route('/api/setup/save', methods=['POST'])
+def api_setup_save():
+    if 'username' not in session:
+        return jsonify({'error': '未登录'}), 401
+
+    data = request.get_json(silent=True) or {}
+    token = str(data.get('token') or '').strip()
+    api_id = str(data.get('api_id') or '').strip()
+    api_hash = str(data.get('api_hash') or '').strip()
+
+    if not token or not api_id or not api_hash:
+        return jsonify({'error': 'Bot Token、API ID 和 API Hash 均不能为空'}), 400
+
+    try:
+        int(api_id)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'API ID 必须是纯数字'}), 400
+
+    saved = save_configuration(
+        token,
+        api_id,
+        api_hash,
+        preserve_existing_session=True
+    )
+    saved['message'] = 'Bot 配置已保存。修改凭据后需要重启服务才会生效。'
+    return jsonify(saved)
+
+
+@app.route('/api/setup/start', methods=['POST'])
+def api_setup_start():
+    if 'username' not in session:
+        return jsonify({'error': '未登录'}), 401
+
+    data = request.get_json(silent=True) or {}
+    token = str(data.get('token') or '').strip()
+    api_id = str(data.get('api_id') or '').strip()
+    api_hash = str(data.get('api_hash') or '').strip()
+    phone_number = str(data.get('phone_number') or '').strip()
+
+    result = start_session_auth(token, api_id, api_hash, phone_number)
+    if 'error' in result:
+        return jsonify(result), 400
+    return jsonify(result)
+
+
+@app.route('/api/setup/code', methods=['POST'])
+def api_setup_code():
+    if 'username' not in session:
+        return jsonify({'error': '未登录'}), 401
+
+    data = request.get_json(silent=True) or {}
+    setup_id = str(data.get('setup_id') or '').strip()
+    code = str(data.get('code') or '').strip()
+    if not setup_id:
+        return jsonify({'error': '登录流程 ID 不能为空'}), 400
+
+    result = submit_code(setup_id, code)
+    if 'error' in result:
+        return jsonify(result), 400
+    return jsonify(result)
+
+
+@app.route('/api/setup/password', methods=['POST'])
+def api_setup_password():
+    if 'username' not in session:
+        return jsonify({'error': '未登录'}), 401
+
+    data = request.get_json(silent=True) or {}
+    setup_id = str(data.get('setup_id') or '').strip()
+    password = str(data.get('password') or '')
+    if not setup_id:
+        return jsonify({'error': '登录流程 ID 不能为空'}), 400
+
+    result = submit_password(setup_id, password)
+    if 'error' in result:
+        return jsonify(result), 400
+    return jsonify(result)
 
 
 @app.route('/setup')
@@ -923,9 +1009,18 @@ def api_status():
 
     acc = get_acc_instance()
     bot = get_bot_instance()
+    bot_running = bool(bot is not None and getattr(bot, 'is_connected', False))
+    user_client_running = bool(acc is not None and getattr(acc, 'is_connected', False))
+    dual_end_ready = bot_running and user_client_running
+
     return jsonify({
+        'web_ready': True,
         'bot_ready': bool(bot is not None),
+        'bot_running': bot_running,
         'user_client_ready': bool(acc is not None),
+        'user_client_running': user_client_running,
+        'dual_end_ready': dual_end_ready,
+        'monitored_sources_count': len(get_monitored_sources()),
         'data_dir': DATA_DIR,
     })
 
