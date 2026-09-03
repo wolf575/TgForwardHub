@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>TG Forward Hub</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/merged.css') }}?v=20260903-auth-worker">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/merged.css') }}?v=20260903-form-flow">
 </head>
 <body>
   <header class="topbar">
@@ -172,7 +172,7 @@
       </div>
 
       <div class="settings-layout">
-        <form id="setupForm" class="form-card">
+        <form id="setupForm" class="form-card" method="post" action="/setup/save">
           <div class="panel-subhead">
             <h2>Telegram 初始配置 / String Session</h2>
             <span id="sessionBadge" class="muted">读取中...</span>
@@ -181,35 +181,36 @@
           <div id="setupMessage" class="message" hidden></div>
 
           <label>Bot Token
-            <input id="setupToken" placeholder="1234567890:ABCdefGHIjklMNOpqrsTUVwxyz">
+            <input id="setupToken" name="token" placeholder="1234567890:ABCdefGHIjklMNOpqrsTUVwxyz">
           </label>
           <label>API ID
-            <input id="setupApiId" inputmode="numeric" placeholder="12345678">
+            <input id="setupApiId" name="api_id" inputmode="numeric" placeholder="12345678">
           </label>
           <label>API Hash
-            <input id="setupApiHash" placeholder="0123456789abcdef0123456789abcdef">
+            <input id="setupApiHash" name="api_hash" placeholder="0123456789abcdef0123456789abcdef">
           </label>
           <label>Telegram 手机号（仅生成 Session String 时需要）
-            <input id="setupPhone" placeholder="+8613800138000">
+            <input id="setupPhone" name="phone_number" placeholder="+8613800138000">
           </label>
+          <input id="setupIdInput" name="setup_id" type="hidden">
 
           <div id="setupStageIdle" class="setup-actions">
-            <button id="setupSaveBtn" class="secondary" type="button">保存配置</button>
-            <button id="setupStartBtn" class="primary" type="button">发送验证码并生成 Session String</button>
+            <button id="setupSaveBtn" class="secondary" type="submit" formaction="/setup/save">保存配置</button>
+            <button id="setupStartBtn" class="primary" type="submit" formaction="/setup/start">发送验证码并生成 Session String</button>
           </div>
 
           <div id="setupStageCode" class="setup-actions" hidden>
             <label>Telegram 验证码
-              <input id="setupCode" inputmode="numeric" autocomplete="one-time-code" placeholder="验证码">
+              <input id="setupCode" name="code" inputmode="numeric" autocomplete="one-time-code" placeholder="验证码">
             </label>
-            <button id="setupCodeBtn" class="primary" type="button">验证并生成 Session String</button>
+            <button id="setupCodeBtn" class="primary" type="submit" formaction="/setup/code">验证并生成 Session String</button>
           </div>
 
           <div id="setupStagePassword" class="setup-actions" hidden>
             <label>两步验证密码
-              <input id="setupPassword" type="password" autocomplete="current-password" placeholder="两步验证密码">
+              <input id="setupPassword" name="password" type="password" autocomplete="current-password" placeholder="两步验证密码">
             </label>
-            <button id="setupPasswordBtn" class="primary" type="button">完成两步验证</button>
+            <button id="setupPasswordBtn" class="primary" type="submit" formaction="/setup/password">完成两步验证</button>
           </div>
 
           <div id="setupStageDone" hidden>
@@ -317,6 +318,6 @@
     </section>
   </main>
 
-  <script src="{{ url_for('static', filename='js/merged.js') }}?v=20260903-auth-worker"></script>
+  <script src="{{ url_for('static', filename='js/merged.js') }}?v=20260903-form-flow"></script>
 </body>
 </html>

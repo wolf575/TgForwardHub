@@ -12,6 +12,7 @@ import batch_forward
 import math
 import requests
 import sys
+from urllib.parse import urlencode
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your-secret-key-change-this-in-production')
@@ -111,6 +112,24 @@ def _redirect_to_dashboard():
     if 'username' not in session:
         return redirect(url_for('login'))
     return redirect(url_for('home'))
+
+
+def _redirect_to_setup_dashboard(**values):
+    """Return to the merged dashboard with non-sensitive setup state."""
+    if 'username' not in session:
+        return redirect(url_for('login'))
+
+    query = urlencode({key: value for key, value in values.items() if value})
+    target = url_for('home') + (('?' + query) if query else '')
+    return redirect(target)
+
+
+def _restart_bot_instances():
+    try:
+        from bot.handlers.instances import stop_and_clear_instances
+        stop_and_clear_instances()
+    except Exception:
+        pass
 
 
 @app.route('/api/setup/state')
@@ -350,22 +369,117 @@ def setup():
 
 @app.route('/setup/save', methods=['POST'])
 def setup_save():
-    return _redirect_to_dashboard()
+    if 'username' not in session:
+        return redirect(url_for('login'))
+
+    token = str(request.form.get('token') or '').strip()
+    api_id = str(request.form.get('api_id') or '').strip()
+    api_hash = str(request.form.get('api_hash') or '').strip()
+
+    if not token or not api_id or not api_hash:
+        return _redirect_to_setup_dashboard(
+            setup_error='Bot Token、API ID 和 API Hash 均不能为空'
+        )
+
+    try:
+        int(api_id)
+    except (TypeError, ValueError):
+        return _redirect_to_setup_dashboard(setup_error='API ID 必须是纯数字')
+
+    save_configuration(
+        token,
+        api_id,
+        api_hash,
+        preserve_existing_session=True
+    )
+    _restart_bot_instances()
+    return _redirect_to_setup_dashboard(
+        setup_message='Bot 配置已保存，后台服务会自动重新加载。'
+    )
 
 
 @app.route('/setup/start', methods=['POST'])
 def setup_start():
-    return _redirect_to_dashboard()
+    if 'username' not in session:
+        return redirect(url_for('login'))
+
+    token = str(request.form.get('token') or '').strip()
+    api_id = str(request.form.get('api_id') or '').strip()
+    api_hash = str(request.form.get('api_hash') or '').strip()
+    phone_number = str(request.form.get('phone_number') or '').strip()
+
+    sys.stdout.write(
+        "[web-setup] POST /setup/start received client={} cf_ray={}\n".format(
+            request.headers.get('X-Forwarded-For') or request.remote_addr,
+            request.headers.get('CF-Ray'),
+        )
+    )
+    sys.stdout.flush()
+
+    result = start_session_auth(token, api_id, api_hash, phone_number)
+    if 'error' in result:
+        return _redirect_to_setup_dashboard(setup_error=result['error'])
+
+    return _redirect_to_setup_dashboard(
+        setup=result.get('setup_id'),
+        stage='code',
+        phone=result.get('phone_number') or phone_number,
+        action='start',
+    )
 
 
 @app.route('/setup/code', methods=['POST'])
 def setup_code():
-    return _redirect_to_dashboard()
+    if 'username' not in session:
+        return redirect(url_for('login'))
+
+    setup_id = str(request.form.get('setup_id') or '').strip()
+    code = str(request.form.get('code') or '').strip()
+    phone_number = str(request.form.get('phone_number') or '').strip()
+
+    result = submit_code(setup_id, code)
+    if 'error' in result:
+        return _redirect_to_setup_dashboard(
+            setup=result.get('setup_id') or setup_id,
+            stage=result.get('stage') or 'code',
+            phone=phone_number,
+            action='code',
+            setup_error=result['error'],
+        )
+
+    return _redirect_to_setup_dashboard(
+        setup=result.get('setup_id') or setup_id,
+        stage=result.get('stage') or 'code',
+        phone=phone_number,
+        action='code',
+    )
 
 
 @app.route('/setup/password', methods=['POST'])
 def setup_password():
-    return _redirect_to_dashboard()
+    if 'username' not in session:
+        return redirect(url_for('login'))
+
+    setup_id = str(request.form.get('setup_id') or '').strip()
+    password = str(request.form.get('password') or '')
+    phone_number = str(request.form.get('phone_number') or '').strip()
+
+    result = submit_password(setup_id, password)
+    if 'error' in result:
+        return _redirect_to_setup_dashboard(
+            setup=result.get('setup_id') or setup_id,
+            stage=result.get('stage') or 'password',
+            phone=phone_number,
+            action='password',
+            setup_error=result['error'],
+        )
+
+    return _redirect_to_setup_dashboard(
+        setup=result.get('setup_id') or setup_id,
+        stage='password',
+        phone=phone_number,
+        action='password',
+    )
 
 
 def extract_all_magnets_from_text(message_text):

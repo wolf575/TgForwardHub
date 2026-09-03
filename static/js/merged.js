@@ -112,21 +112,122 @@ function readSetupCredentials() {
   };
 }
 
+function readPendingSetup() {
+  const params = new URLSearchParams(window.location.search);
+  return {
+    setupId: params.get("setup") || "",
+    stage: params.get("stage") || "idle",
+    phone: params.get("phone") || "",
+    action: params.get("action") || "",
+    message: params.get("setup_message") || "",
+    error: params.get("setup_error") || "",
+  };
+}
+
+function setPendingSetupFields(setupId, phone) {
+  setupState.setupId = setupId;
+  setupState.phone = phone;
+  $("setupIdInput").value = setupId;
+  $("setupPhone").value = phone;
+  $("setupCode").value = "";
+  $("setupPassword").value = "";
+}
+
+function clearSetupQuery() {
+  if (window.history && window.history.replaceState) {
+    window.history.replaceState(null, "", window.location.pathname);
+  }
+}
+
 async function loadSetupState() {
+  const pending = readPendingSetup();
   try {
     const config = await apiFetch("/api/setup/state");
     $("setupToken").value = config.token || "";
     $("setupApiId").value = config.api_id || "";
     $("setupApiHash").value = config.api_hash || "";
+    $("setupSession").value = "";
+    updateSessionBadge(config);
+
+    if (pending.setupId) {
+      setPendingSetupFields(pending.setupId, pending.phone);
+      setSetupStage(pending.stage === "password" ? "password" : "code");
+      if (pending.message) setSetupMessage(pending.message);
+      else if (pending.error) setSetupMessage(pending.error);
+      else setSetupMessage("");
+      resumeSetupFlow(pending);
+      return;
+    }
+
     $("setupPhone").value = "";
     $("setupCode").value = "";
     $("setupPassword").value = "";
-    $("setupSession").value = "";
-    updateSessionBadge(config);
+    $("setupIdInput").value = "";
     setSetupStage("idle");
-    setSetupMessage("");
+    setSetupMessage(pending.error || pending.message || "");
   } catch (error) {
     setSetupMessage(error.message);
+  }
+}
+
+async function resumeSetupFlow(pending) {
+  const stage = pending.stage === "password" ? "password" : "code";
+  setSetupBusy(true);
+  setSetupStage(stage);
+
+  const untilStatuses =
+    pending.action === "start"
+      ? ["sent", "ready", "done"]
+      : pending.action === "password"
+        ? ["done"]
+        : ["ready", "done"];
+
+  try {
+    const status = await pollSetupStatus(pending.setupId, untilStatuses);
+
+    if (status.status === "error") {
+      setSetupMessage(status.error || "Telegram 登录流程失败");
+      if (pending.action === "start") {
+        setSetupStage("idle");
+      }
+      return;
+    }
+
+    if (status.status === "missing") {
+      setSetupMessage("登录流程不存在或已过期，请重新开始");
+      setSetupStage("idle");
+      setPendingSetupFields("", "");
+      clearSetupQuery();
+      return;
+    }
+
+    if (pending.action === "start" && status.status === "sent") {
+      setSetupStage("code");
+      setSetupMessage(`验证码已发送到 ${pending.phone || setupState.phone}`);
+      return;
+    }
+
+    if (status.stage === "password") {
+      setSetupStage("password");
+      setSetupMessage(status.message || "账号已开启两步验证，请输入密码");
+      return;
+    }
+
+    if (status.status === "done" || status.session_string) {
+      $("setupSession").value = status.session_string || "";
+      updateSessionBadge(status.saved || {});
+      setSetupStage("done");
+      setSetupMessage(status.message || "Session String 已生成");
+      clearSetupQuery();
+      loadStatus();
+      return;
+    }
+
+    setSetupMessage(status.message || "登录状态已更新");
+  } catch (error) {
+    setSetupMessage(error.message);
+  } finally {
+    setSetupBusy(false);
   }
 }
 
@@ -748,10 +849,6 @@ document.addEventListener("DOMContentLoaded", () => {
   $("noteSearch").addEventListener("keydown", (event) => {
     if (event.key === "Enter") loadNotes();
   });
-  $("setupSaveBtn").addEventListener("click", saveSetupConfig);
-  $("setupStartBtn").addEventListener("click", startSetup);
-  $("setupCodeBtn").addEventListener("click", submitSetupCode);
-  $("setupPasswordBtn").addEventListener("click", submitSetupPassword);
   $("setupResetBtn").addEventListener("click", loadSetupState);
   $("passwordSaveBtn").addEventListener("click", savePassword);
   $("webdavSaveBtn").addEventListener("click", saveWebdavConfig);
