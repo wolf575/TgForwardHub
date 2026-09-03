@@ -134,6 +134,40 @@ FLASK_SECRET_KEY=replace-with-a-long-random-string
 
 项目已经准备了 `docker run` 所需的条件：镜像暴露 `10000` 端口、声明 `/app/data` 和 `/app/downloads` 数据卷，并内置健康检查。
 
+### 使用云端镜像
+
+如果你不想在服务器上重新构建，可以直接使用 GitHub Container Registry 上的镜像：
+
+```bash
+docker pull ghcr.io/wolf575/tg-forward-hub:latest
+```
+
+在服务器上运行，并把宿主机端口改成 `10001`：
+
+```bash
+docker run -d \
+  --name tg-forward-hub \
+  --restart unless-stopped \
+  -p 10001:10000 \
+  -v /docker-data/tfh/data:/app/data \
+  -v /docker-data/tfh/downloads:/app/downloads \
+  --env-file .env \
+  -e DATA_DIR=/app/data \
+  -e PORT=10000 \
+  -e TZ=Asia/Shanghai \
+  ghcr.io/wolf575/tg-forward-hub:latest
+```
+
+容器内 Web 服务继续监听 `10000`，宿主机通过 `10001` 访问。打开 `http://服务器IP:10001` 即可。
+
+如果你想同时把容器内部端口也改成 `10001`，端口映射和 `PORT` 环境变量要保持一致：
+
+```bash
+-p 10001:10001 -e PORT=10001
+```
+
+不要使用 `-p 10001:10000` 搭配 `-e PORT=10001`，这会让宿主机映射到容器 `10000`，但 Flask 实际监听在 `10001`，导致页面无法访问。
+
 ### Windows PowerShell
 
 ```powershell
