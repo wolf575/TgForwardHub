@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bot 配置 - Save-Restricted-Bot</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+    <style>
+        .setup-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: var(--space-lg);
+        }
+
+        .setup-card {
+            background: var(--white);
+            border-radius: var(--radius-xl);
+            padding: var(--space-xl);
+            box-shadow: var(--shadow-lg);
+        }
+
+        .setup-card h2 {
+            margin-bottom: var(--space-sm);
+            font-size: var(--font-size-xl);
+            color: var(--gray-800);
+        }
+
+        .setup-card .muted {
+            color: var(--gray-600);
+            margin-bottom: var(--space-lg);
+        }
+
+        .status-row {
+            display: flex;
+            gap: var(--space-sm);
+            align-items: center;
+            flex-wrap: wrap;
+            margin-bottom: var(--space-lg);
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 12px;
+            border-radius: var(--radius-full);
+            background: var(--gray-100);
+            color: var(--gray-700);
+            font-weight: 600;
+            font-size: var(--font-size-sm);
+        }
+
+        .status-badge.ready {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status-badge.missing {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .form-actions {
+            display: flex;
+            gap: var(--space-sm);
+            flex-wrap: wrap;
+            margin-top: var(--space-md);
+        }
+
+        .session-output {
+            width: 100%;
+            min-height: 120px;
+            font-family: Consolas, Monaco, monospace;
+            font-size: var(--font-size-sm);
+            word-break: break-all;
+        }
+
+        .restart-note {
+            margin-top: var(--space-lg);
+            padding: var(--space-md);
+            border-left: 4px solid var(--warning);
+            background: #fff8e1;
+            color: #6b4e00;
+            border-radius: var(--radius-md);
+        }
+
+        @media (max-width: 600px) {
+            .form-actions .btn {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="header-title">
+                <span class="header-icon">🛠️</span>
+                <h1>Bot 配置</h1>
+            </div>
+            <div class="header-actions">
+                <button class="menu-toggle" onclick="toggleMenu()" aria-label="菜单">
+                    <div class="menu-bar"></div>
+                    <div class="menu-bar"></div>
+                    <div class="menu-bar"></div>
+                </button>
+                <div class="menu-dropdown" id="menuDropdown">
+                    <a href="/notes" class="menu-item">
+                        <span class="menu-item-icon">📝</span>笔记列表
+                    </a>
+                    <a href="/admin" class="menu-item">
+                        <span class="menu-item-icon">⚙️</span>管理设置
+                    </a>
+                    <a href="/setup" class="menu-item">
+                        <span class="menu-item-icon">🛠️</span>Bot 配置
+                    </a>
+                    <a href="/logout" class="menu-item">
+                        <span class="menu-item-icon">🚪</span>退出登录
+                    </a>
+                </div>
+            </div>
+        </div>
+
+        <div class="setup-grid">
+            <div class="setup-card">
+                <h2>Telegram 凭据</h2>
+                <p class="muted">填写 API ID、API Hash 和 Bot Token。配置会同时写入 <code>.env</code> 和 <code>data/config/config.json</code>。</p>
+
+                <div class="status-row">
+                    <span class="status-badge {{ 'ready' if config.get('has_session') else 'missing' }}">
+                        Session String：{{ '已配置 ' + config.get('session_masked', '') if config.get('has_session') else '未生成' }}
+                    </span>
+                </div>
+
+                {% if error %}
+                <div class="error-message">{{ error }}</div>
+                {% endif %}
+
+                {% if message %}
+                <div class="success-message">{{ message }}</div>
+                {% endif %}
+
+                {% if stage in ['idle', 'saved'] %}
+                <form method="POST">
+                    <div class="form-group">
+                        <label for="token">Bot Token</label>
+                        <input type="text" id="token" name="token" value="{{ config.get('token', '') }}" required placeholder="1234567890:ABCdefGHIjklMNOpqrsTUVwxyz">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="api_id">API ID</label>
+                        <input type="text" id="api_id" name="api_id" value="{{ config.get('api_id', '') }}" required placeholder="12345678">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="api_hash">API Hash</label>
+                        <input type="text" id="api_hash" name="api_hash" value="{{ config.get('api_hash', '') }}" required placeholder="0123456789abcdef0123456789abcdef">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="phone_number">Telegram 手机号</label>
+                        <input type="text" id="phone_number" name="phone_number" value="{{ phone_number }}" placeholder="+8613800138000">
+                        <p class="muted" style="margin-top: 6px;">仅用于生成 Session String。公开频道转发可以留空。</p>
+                    </div>
+
+                    <div class="form-actions">
+                        <button type="submit" formaction="/setup/save" class="btn btn-secondary">保存配置</button>
+                        <button type="submit" formaction="/setup/start" class="btn btn-primary">发送验证码并生成 Session String</button>
+                    </div>
+                </form>
+                {% endif %}
+
+                {% if stage == 'code' %}
+                <form method="POST" action="/setup/code">
+                    <input type="hidden" name="setup_id" value="{{ setup_id }}">
+                    <input type="hidden" name="phone_number" value="{{ phone_number }}">
+                    <input type="hidden" name="token" value="{{ config.get('token', '') }}">
+                    <input type="hidden" name="api_id" value="{{ config.get('api_id', '') }}">
+                    <input type="hidden" name="api_hash" value="{{ config.get('api_hash', '') }}">
+
+                    <div class="form-group">
+                        <label for="code">Telegram 验证码</label>
+                        <input type="text" id="code" name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus>
+                        <p class="muted" style="margin-top: 6px;">验证码已发送到 {{ phone_number }}</p>
+                    </div>
+
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn-primary">验证并生成 Session String</button>
+                    </div>
+                </form>
+                {% endif %}
+
+                {% if stage == 'password' %}
+                <form method="POST" action="/setup/password">
+                    <input type="hidden" name="setup_id" value="{{ setup_id }}">
+                    <input type="hidden" name="phone_number" value="{{ phone_number }}">
+                    <input type="hidden" name="token" value="{{ config.get('token', '') }}">
+                    <input type="hidden" name="api_id" value="{{ config.get('api_id', '') }}">
+                    <input type="hidden" name="api_hash" value="{{ config.get('api_hash', '') }}">
+
+                    <div class="form-group">
+                        <label for="password">两步验证密码</label>
+                        <input type="password" id="password" name="password" required autofocus>
+                    </div>
+
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn-primary">完成两步验证</button>
+                    </div>
+                </form>
+                {% endif %}
+
+                {% if stage == 'done' %}
+                <div class="form-group">
+                    <label for="generated_session">已生成的 Session String</label>
+                    <textarea id="generated_session" class="session-output" readonly>{{ generated_session }}</textarea>
+                </div>
+                <div class="form-actions">
+                    <a href="/setup" class="btn btn-secondary">返回配置页</a>
+                    <a href="/notes" class="btn btn-primary">进入笔记管理</a>
+                </div>
+                {% endif %}
+
+                <div class="restart-note">
+                    修改 Bot Token、API ID、API Hash 或 Session String 后，需要重启容器或重新运行 Bot 进程才会生效。
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

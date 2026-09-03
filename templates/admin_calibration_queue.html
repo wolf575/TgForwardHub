@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>校准队列 - Save-Restricted-Bot</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+    <style>
+        .queue-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: var(--white);
+            border-radius: var(--radius-lg);
+            overflow: hidden;
+        }
+        .queue-table th,
+        .queue-table td {
+            padding: 12px;
+            border-bottom: 1px solid var(--gray-300);
+            text-align: left;
+            vertical-align: top;
+        }
+        .queue-table th {
+            background: var(--gray-50);
+            font-weight: 600;
+            color: var(--gray-700);
+        }
+        .queue-table tr:hover td {
+            background: var(--gray-50);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="header-title">
+                <span class="header-icon">📋</span>
+                <h1>校准队列</h1>
+            </div>
+            <div class="header-actions">
+                <button class="menu-toggle" onclick="toggleMenu()" aria-label="菜单">
+                    <div class="menu-bar"></div>
+                    <div class="menu-bar"></div>
+                    <div class="menu-bar"></div>
+                </button>
+                <div class="menu-dropdown" id="menuDropdown">
+                    <a href="/notes" class="menu-item"><span class="menu-item-icon">📝</span>笔记列表</a>
+                    <a href="/admin" class="menu-item"><span class="menu-item-icon">⚙️</span>管理设置</a>
+                    <a href="/setup" class="menu-item"><span class="menu-item-icon">🛠️</span>Bot 配置</a>
+                    <a href="/logout" class="menu-item"><span class="menu-item-icon">🚪</span>退出登录</a>
+                </div>
+            </div>
+        </div>
+
+        <div class="stats">
+            <div class="stat-item"><span class="stat-icon">📦</span><span>总任务 <span class="stat-value">{{ stats.get('total', 0) }}</span></span></div>
+            <div class="stat-item"><span class="stat-icon">⏳</span><span>待处理 <span class="stat-value">{{ stats.get('ready_to_process', 0) }}</span></span></div>
+        </div>
+
+        <div class="card">
+            <h2>任务列表</h2>
+            {% if tasks %}
+            <table class="queue-table">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>笔记</th>
+                        <th>状态</th>
+                        <th>重试</th>
+                        <th>下次尝试</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for task in tasks %}
+                    <tr>
+                        <td>{{ task.get('id') }}</td>
+                        <td>{{ task.get('note_id') }}</td>
+                        <td>{{ task.get('status') }}</td>
+                        <td>{{ task.get('retry_count', 0) }}</td>
+                        <td>{{ task.get('next_attempt') }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="empty-state">
+                <div class="empty-state-icon">📭</div>
+                <h2>暂无校准任务</h2>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

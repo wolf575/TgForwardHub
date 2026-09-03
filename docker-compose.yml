@@ -1,0 +1,32 @@
+# version: '3.8'
+
+services:
+  telegram-bot:
+    build: .
+    container_name: tg-forward-hub
+    restart: unless-stopped
+    ports:
+      - "10000:10000"
+    environment:
+      - TOKEN=${TOKEN}
+      - ID=${ID}
+      - HASH=${HASH}
+      - STRING=${STRING}
+      - DATA_DIR=/app/data
+      - PORT=10000
+      - TZ=Asia/Shanghai
+      - FLASK_APP=app.py
+      - FLASK_SECRET_KEY=${FLASK_SECRET_KEY:-change-this-secret}
+    volumes:
+      - ./downloads:/app/downloads
+      - ./data:/app/data
+    # Docker日志配置 - 自动轮转，防止日志文件过大
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"      # 单个日志文件最大10MB
+        max-file: "5"        # 保留5个日志文件
+        compress: "true"     # 压缩旧日志文件
+
+volumes:
+  session-data:

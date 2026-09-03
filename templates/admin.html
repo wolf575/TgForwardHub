@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>管理员面板 - Telegram 笔记</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+    <style>
+        /* Page-specific styles */
+        .header-nav {
+            display: flex;
+            gap: var(--space-sm);
+            flex-wrap: wrap;
+        }
+        
+        @media (max-width: 768px) {
+            .header {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            
+            .header-title {
+                padding-right: 0;
+                margin-bottom: var(--space-md);
+            }
+            
+            .header-nav {
+                justify-content: stretch;
+            }
+            
+            .header-nav .btn {
+                flex: 1;
+                min-width: 140px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="header-title">
+                <span class="header-icon">⚙️</span>
+                <h1>管理员面板</h1>
+            </div>
+            <div class="header-actions">
+                <button class="menu-toggle" onclick="toggleMenu()" aria-label="菜单">
+                    <div class="menu-bar"></div>
+                    <div class="menu-bar"></div>
+                    <div class="menu-bar"></div>
+                </button>
+                <div class="menu-dropdown" id="menuDropdown">
+                    <a href="/notes" class="menu-item">
+                        <span class="menu-item-icon">📝</span>笔记列表
+                    </a>
+                    <a href="/admin" class="menu-item">
+                        <span class="menu-item-icon">⚙️</span>管理设置
+                    </a>
+                    <a href="/logout" class="menu-item">
+                        <span class="menu-item-icon">🚪</span>退出登录
+                    </a>
+                </div>
+            </div>
+        </div>
+        
+        <div style="background: rgba(255, 255, 255, 0.95); border-radius: var(--radius-xl); padding: var(--space-lg); margin-bottom: var(--space-lg); box-shadow: var(--shadow-md);">
+            <div class="header-nav">
+                <a href="/setup" class="btn btn-secondary">🛠️ Bot 配置</a>
+                <a href="/admin/calibration" class="btn btn-secondary">🔧 自动校准</a>
+                <a href="/admin/webdav" class="btn btn-secondary">☁️ WebDAV 存储</a>
+                <a href="/admin/viewer" class="btn btn-secondary">🎬 观看设置</a>
+                <a href="/notes" class="btn btn-secondary">← 返回笔记</a>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>修改密码</h2>
+            <p>建议定期更换密码以确保账户安全</p>
+
+            {% if success %}
+            <div class="success-message">
+                ✓ {{ success }}
+            </div>
+            {% endif %}
+
+            {% if error %}
+            <div class="error-message">
+                ✗ {{ error }}
+            </div>
+            {% endif %}
+
+            <div class="info-box">
+                <p>💡 密码长度至少为 6 个字符</p>
+            </div>
+
+            <form method="POST" action="/admin">
+                <div class="form-group">
+                    <label for="current_password">当前密码</label>
+                    <input type="password" id="current_password" name="current_password" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="new_password">新密码</label>
+                    <input type="password" id="new_password" name="new_password" required minlength="6">
+                </div>
+
+                <div class="form-group">
+                    <label for="confirm_password">确认新密码</label>
+                    <input type="password" id="confirm_password" name="confirm_password" required minlength="6">
+                </div>
+
+                <button type="submit" class="btn btn-primary btn-lg">更新密码</button>
+            </form>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

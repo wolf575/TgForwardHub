@@ -1,0 +1,9 @@
+pyrogram
+tgcrypto
+flask
+flask-login
+bcrypt
+pillow
+webdavclient3
+requests
+tzdata

@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>编辑笔记 - Telegram 笔记</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+    <style>
+        /* Page-specific styles */
+        body {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .edit-card {
+            background: var(--white);
+            border-radius: var(--radius-xl);
+            padding: var(--space-2xl);
+            box-shadow: var(--shadow-2xl);
+            max-width: 800px;
+            width: 100%;
+        }
+        
+        .edit-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: var(--space-md);
+            margin-bottom: var(--space-xl);
+        }
+        
+        .edit-header-title {
+            display: flex;
+            align-items: center;
+            gap: var(--space-md);
+        }
+        
+        .edit-header h1 {
+            color: var(--gray-800);
+            font-size: var(--font-size-3xl);
+        }
+        
+        .edit-icon {
+            font-size: 36px;
+        }
+        
+        .note-info {
+            background: var(--gray-50);
+            padding: var(--space-md);
+            border-radius: var(--radius-lg);
+            margin-bottom: var(--space-lg);
+        }
+        
+        .note-info-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--gray-600);
+            font-size: var(--font-size-sm);
+            margin-bottom: 8px;
+        }
+        
+        .note-info-item:last-child {
+            margin-bottom: 0;
+        }
+        
+        .note-info-label {
+            font-weight: 600;
+        }
+        
+        .media-preview {
+            margin-bottom: var(--space-lg);
+            text-align: center;
+        }
+        
+        .media-grid {
+            display: grid;
+            gap: var(--space-sm);
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        }
+        
+        .media-grid img,
+        .media-preview img {
+            width: 100%;
+            max-height: 300px;
+            border-radius: var(--radius-lg);
+            object-fit: cover;
+            box-shadow: var(--shadow-md);
+        }
+        
+        .media-badge {
+            display: inline-block;
+            background: rgba(0, 0, 0, 0.7);
+            color: var(--white);
+            padding: 8px var(--space-md);
+            border-radius: var(--radius-full);
+            font-size: var(--font-size-base);
+            font-weight: 600;
+            margin-top: var(--space-sm);
+        }
+        
+        .button-group {
+            display: flex;
+            gap: var(--space-md);
+            margin-top: var(--space-xl);
+        }
+        
+        .button-group .btn {
+            flex: 1;
+            padding: var(--space-md) var(--space-xl);
+        }
+        
+        .flash-messages {
+            margin-bottom: var(--space-lg);
+        }
+        
+        @media (max-width: 768px) {
+            .edit-card {
+                padding: var(--space-lg);
+            }
+            
+            .button-group {
+                flex-direction: column;
+            }
+            
+            .button-group .btn {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="edit-card">
+            <div class="edit-header">
+                <div class="edit-header-title">
+                    <span class="edit-icon">✏️</span>
+                    <h1>编辑笔记</h1>
+                </div>
+                <div style="position: relative;">
+                    <button class="menu-toggle" onclick="toggleMenu()" aria-label="菜单">
+                        <div class="menu-bar"></div>
+                        <div class="menu-bar"></div>
+                        <div class="menu-bar"></div>
+                    </button>
+                    <div class="menu-dropdown" id="menuDropdown">
+                        <a href="/notes" class="menu-item">
+                            <span class="menu-item-icon">📝</span>笔记列表
+                        </a>
+                        <a href="/admin" class="menu-item">
+                            <span class="menu-item-icon">⚙️</span>管理设置
+                        </a>
+                        <a href="/logout" class="menu-item">
+                            <span class="menu-item-icon">🚪</span>退出登录
+                        </a>
+                    </div>
+                </div>
+            </div>
+
+            {% with messages = get_flashed_messages() %}
+                {% if messages %}
+                    <div class="flash-messages">
+                        {% for message in messages %}
+                            <div class="flash-message flash-error">{{ message }}</div>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            {% endwith %}
+
+            <div class="note-info">
+                <div class="note-info-item">
+                    <span>📡</span>
+                    <span class="note-info-label">来源：</span>
+                    <span>{{ note.source_name or note.source_chat_id }}</span>
+                </div>
+                <div class="note-info-item">
+                    <span>🕒</span>
+                    <span class="note-info-label">时间：</span>
+                    <span>{{ note.timestamp }}</span>
+                </div>
+                {% if note.media_type %}
+                <div class="note-info-item">
+                    <span>{% if note.media_type == 'photo' %}📷{% elif note.media_type == 'video' %}📹{% elif note.media_type == 'animation' %}🎞️{% else %}📄{% endif %}</span>
+                    <span class="note-info-label">媒体类型：</span>
+                    <span>{% if note.media_type == 'photo' %}图片{% elif note.media_type == 'video' %}视频{% elif note.media_type == 'animation' %}GIF动图{% else %}{{ note.media_type }}{% endif %}</span>
+                </div>
+                {% endif %}
+                {% if note.media_paths and note.media_paths|length > 1 %}
+                <div class="note-info-item">
+                    <span>🖼️</span>
+                    <span class="note-info-label">图片数量：</span>
+                    <span>{{ note.media_paths|length }} 张</span>
+                </div>
+                {% endif %}
+            </div>
+
+            {% if note.media_paths and note.media_paths|length > 0 %}
+            <div class="media-preview">
+                <div class="media-grid">
+                    {% for media_path in note.media_paths %}
+                    <img src="/media/{{ media_path | urlencode }}" alt="Media preview">
+                    {% endfor %}
+                </div>
+                {% if note.media_type == 'video' %}
+                <div class="media-badge">📹 视频缩略图</div>
+                {% elif note.media_type == 'animation' %}
+                <div class="media-badge">🎬 GIF动图缩略图</div>
+                {% endif %}
+            </div>
+            {% elif note.media_path %}
+            <div class="media-preview">
+                <img src="/media/{{ note.media_path | urlencode }}" alt="Media preview">
+                {% if note.media_type == 'video' %}
+                <div class="media-badge">📹 视频缩略图</div>
+                {% elif note.media_type == 'animation' %}
+                <div class="media-badge">🎬 GIF动图缩略图</div>
+                {% endif %}
+            </div>
+            {% elif note.media_type == 'video' %}
+            <div class="media-preview">
+                <div style="width: 200px; height: 200px; margin: 0 auto; display: flex; align-items: center; justify-content: center; background: var(--primary-gradient); border-radius: var(--radius-lg); box-shadow: var(--shadow-md);">
+                    <span style="font-size: 80px;">🎬</span>
+                </div>
+                <div class="media-badge">📹 视频（无缩略图）</div>
+            </div>
+            {% elif note.media_type == 'animation' %}
+            <div class="media-preview">
+                <div style="width: 200px; height: 200px; margin: 0 auto; display: flex; align-items: center; justify-content: center; background: var(--primary-gradient); border-radius: var(--radius-lg); box-shadow: var(--shadow-md);">
+                    <span style="font-size: 80px;">🎞️</span>
+                </div>
+                <div class="media-badge">🎬 GIF动图（无缩略图）</div>
+            </div>
+            {% endif %}
+
+            <form method="POST" action="/edit_note/{{ note.id }}">
+                <input type="hidden" name="return_url" value="{{ return_url }}">
+                <div class="form-group">
+                    <label for="message_text">📝 笔记内容</label>
+                    <textarea id="message_text" name="message_text" placeholder="输入笔记内容...">{{ note.message_text or '' }}</textarea>
+                </div>
+
+                <div class="button-group">
+                    <button type="submit" class="btn btn-primary">
+                        <span>💾</span>保存修改
+                    </button>
+                    <a href="{{ return_url }}" class="btn btn-secondary">
+                        <span>↩️</span>返回列表
+                    </a>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

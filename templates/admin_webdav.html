@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebDAV 存储 - Save-Restricted-Bot</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="header-title">
+                <span class="header-icon">☁️</span>
+                <h1>WebDAV 存储</h1>
+            </div>
+            <div class="header-actions">
+                <button class="menu-toggle" onclick="toggleMenu()" aria-label="菜单">
+                    <div class="menu-bar"></div>
+                    <div class="menu-bar"></div>
+                    <div class="menu-bar"></div>
+                </button>
+                <div class="menu-dropdown" id="menuDropdown">
+                    <a href="/notes" class="menu-item"><span class="menu-item-icon">📝</span>笔记列表</a>
+                    <a href="/admin" class="menu-item"><span class="menu-item-icon">⚙️</span>管理设置</a>
+                    <a href="/setup" class="menu-item"><span class="menu-item-icon">🛠️</span>Bot 配置</a>
+                    <a href="/logout" class="menu-item"><span class="menu-item-icon">🚪</span>退出登录</a>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>WebDAV 配置</h2>
+            <p>可选：把媒体文件同步到 WebDAV 存储。</p>
+
+            {% if success %}
+            <div class="success-message">{{ success }}</div>
+            {% endif %}
+            {% if error %}
+            <div class="error-message">{{ error }}</div>
+            {% endif %}
+
+            <form method="POST">
+                <div class="form-group">
+                    <label><input type="checkbox" name="enabled" {% if config.get('enabled') %}checked{% endif %}> 启用 WebDAV</label>
+                </div>
+                <div class="form-group">
+                    <label for="url">WebDAV URL</label>
+                    <input type="text" id="url" name="url" value="{{ config.get('url', '') }}" placeholder="https://dav.example.com/remote.php/dav/files/user/">
+                </div>
+                <div class="form-group">
+                    <label for="webdav_username">用户名</label>
+                    <input type="text" id="webdav_username" name="webdav_username" value="{{ config.get('username', '') }}">
+                </div>
+                <div class="form-group">
+                    <label for="webdav_password">密码</label>
+                    <input type="password" id="webdav_password" name="webdav_password" value="{{ config.get('password', '') }}">
+                </div>
+                <div class="form-group">
+                    <label for="base_path">基础路径</label>
+                    <input type="text" id="base_path" name="base_path" value="{{ config.get('base_path', '/telegram_media') }}">
+                </div>
+                <div class="form-group">
+                    <label><input type="checkbox" name="keep_local_copy" {% if config.get('keep_local_copy') %}checked{% endif %}> 保留本地副本</label>
+                </div>
+                <button type="submit" class="btn btn-primary">保存配置</button>
+            </form>
+        </div>
+    </div>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

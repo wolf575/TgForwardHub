@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>笔记管理 - Telegram 笔记</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="header-title">
+                <span class="header-icon">📝</span>
+                <h1>Telegram 笔记</h1>
+            </div>
+            <div class="header-actions">
+                <button class="search-toggle" id="searchToggle" onclick="toggleSearchPanel()" aria-label="搜索笔记">
+                    🔍
+                </button>
+                <button class="menu-toggle" onclick="toggleMenu()" aria-label="菜单">
+                    <div class="menu-bar"></div>
+                    <div class="menu-bar"></div>
+                    <div class="menu-bar"></div>
+                </button>
+                <div class="menu-dropdown" id="menuDropdown">
+                    <a href="/notes" class="menu-item">
+                        <span class="menu-item-icon">📝</span>笔记列表
+                    </a>
+                    <a href="/admin" class="menu-item">
+                        <span class="menu-item-icon">⚙️</span>管理设置
+                    </a>
+                    <a href="/logout" class="menu-item">
+                        <span class="menu-item-icon">🚪</span>退出登录
+                    </a>
+                </div>
+            </div>
+        </div>
+
+        <div class="stats">
+            <div class="stat-item">
+                <span class="stat-icon">📊</span>
+                <span>总计 <span class="stat-value">{{ total_count }}</span> 条笔记</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-icon">📂</span>
+                <span><span class="stat-value">{{ sources|length }}</span> 个来源</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-icon">📄</span>
+                <span>第 <span class="stat-value">{{ current_page }}</span> / {{ total_pages }} 页</span>
+            </div>
+        </div>
+
+        <div class="search-panel{% if search_query or date_from or date_to or selected_source or favorite_only %} active{% endif %}" 
+             id="searchPanel"
+             {% if search_query or date_from or date_to or selected_source or favorite_only %}data-has-filters="true"{% endif %}>
+            <form method="GET" action="/notes">
+                <div class="search-row">
+                    <div class="search-field search-field-wide">
+                        <label>🔍 搜索关键词</label>
+                        <input type="text" name="search" placeholder="搜索笔记内容或来源..." value="{{ search_query or '' }}">
+                    </div>
+                    {% if sources|length > 0 %}
+                    <div class="search-field">
+                        <label>📌 筛选来源</label>
+                        <select name="source">
+                            <option value="">全部来源</option>
+                            {% for source in sources %}
+                            <option value="{{ source.source_chat_id }}" {% if selected_source == source.source_chat_id|string %}selected{% endif %}>
+                                {{ source.source_name or source.source_chat_id }}
+                            </option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    {% endif %}
+                    <div class="search-field search-field-date">
+                        <label>📅 开始日期</label>
+                        <input type="date" name="date_from" value="{{ date_from or '' }}">
+                    </div>
+                    <div class="search-field search-field-date">
+                        <label>📅 结束日期</label>
+                        <input type="date" name="date_to" value="{{ date_to or '' }}">
+                    </div>
+                    <div class="search-field">
+                        <label>⭐ 收藏筛选</label>
+                        <select name="favorite">
+                            <option value="">全部笔记</option>
+                            <option value="1" {% if favorite_only %}selected{% endif %}>仅收藏</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="search-actions">
+                    <button type="submit" class="search-btn">应用筛选</button>
+                    {% if search_query or date_from or date_to or selected_source or favorite_only %}
+                    <a href="/notes" class="clear-search">清除筛选</a>
+                    {% endif %}
+                </div>
+            </form>
+        </div>
+
+        {% if notes|length > 0 %}
+        <div class="notes-grid">
+            {% for note in notes %}
+            <div class="note-card">
+                {% if note.media_paths and note.media_paths|length > 0 %}
+                    <div class="note-media-grid count-{{ note.media_paths|length }}">
+                        {% for media_path in note.media_paths %}
+                            <div class="note-media-item">
+                                <img src="/media/{{ media_path | urlencode }}" alt="Note image" onerror="this.style.display='none'">
+                            </div>
+                        {% endfor %}
+                    </div>
+                {% elif note.media_type == 'photo' %}
+                    <img src="/media/{{ note.media_path | urlencode }}" alt="Note image" class="note-image" onerror="this.style.display='none'">
+                {% elif note.media_type == 'video' %}
+                    <div class="note-video-container">
+                        {% if note.media_path %}
+                            <img src="/media/{{ note.media_path | urlencode }}" alt="Video thumbnail" class="note-video-thumbnail">
+                        {% else %}
+                            <div style="width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
+                                <span style="font-size: 64px;">🎬</span>
+                            </div>
+                        {% endif %}
+                        <span class="video-badge">📹 视频</span>
+                    </div>
+                {% elif note.media_type == 'animation' %}
+                    <div class="note-gif-container">
+                        {% if note.media_path %}
+                            <img src="/media/{{ note.media_path | urlencode }}" alt="GIF thumbnail" class="note-gif-thumbnail">
+                        {% else %}
+                            <div style="width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);">
+                                <span style="font-size: 64px;">🎞️</span>
+                            </div>
+                        {% endif %}
+                        <span class="gif-badge">🎬 GIF动图</span>
+                    </div>
+                {% endif %}
+                
+                <div class="note-content">
+                    <div class="note-source">
+                        <span>📡</span>
+                        <span><strong>{{ note.source_name or note.source_chat_id }}</strong></span>
+                        <span style="margin-left: 8px; color: #999; font-size: 0.9em;">#{{ note.id }}</span>
+                    </div>
+                    
+                    {% if note.message_text %}
+                    <div class="note-text collapsed" id="text-{{ note.id }}">{{ note.message_text | highlight(search_query) | safe }}</div>
+                    <button class="expand-btn" id="btn-{{ note.id }}" onclick="toggleText({{ note.id }})" style="display: none;">展开</button>
+                    {% endif %}
+                    
+                    <div class="note-footer">
+                        <div class="note-time">
+                            <span>🕒</span>
+                            <span>{{ note.timestamp }}</span>
+                        </div>
+                        <div class="note-actions">
+                            {% if note.all_dns and note.all_dns|length > 0 %}
+                            <button class="btn btn-warning btn-sm" onclick="calibrateNote({{ note.id }}, {{ note.all_dns|length }})" id="calibrate-{{ note.id }}">
+                                🔧 校准{% if note.all_dns|length > 1 %}({{ note.all_dns|length }}){% endif %}
+                            </button>
+                            {% endif %}
+
+                            {% if note.all_dns and note.all_dns|length > 1 %}
+                            <button class="btn btn-info btn-sm btn-watch-multi"
+                                    data-note-id="{{ note.id }}"
+                                    data-dns='{{ note.all_dns | tojson }}'
+                                    data-viewer-url="{{ viewer_url }}">
+                                ▶️ 观看({{ note.all_dns|length }})
+                            </button>
+                            {% elif note.all_dns and note.all_dns|length == 1 and note.all_dns[0].dn %}
+                            <a href="{{ viewer_url }}{{ note.all_dns[0].dn }}" target="_blank" class="btn btn-info btn-sm">
+                                ▶️ 观看
+                            </a>
+                            {% endif %}
+
+                            <button class="btn btn-favorite btn-sm" onclick="toggleFavorite({{ note.id }}, this)">
+                                {% if note.is_favorite %}★{% else %}☆{% endif %}
+                            </button>
+
+                            <a href="/edit_note/{{ note.id }}?return_url={{ request.url | urlencode }}" class="btn btn-success btn-sm">
+                                ✏️ 编辑
+                            </a>
+
+                            <button class="btn btn-danger btn-sm" onclick="deleteNote({{ note.id }})">
+                                🗑️ 删除
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+
+        <div class="pagination">
+            {% if current_page > 1 %}
+            <a href="?page={{ current_page - 1 }}{% if search_query %}&search={{ search_query | urlencode }}{% endif %}{% if date_from %}&date_from={{ date_from }}{% endif %}{% if date_to %}&date_to={{ date_to }}{% endif %}{% if selected_source %}&source={{ selected_source }}{% endif %}{% if favorite_only %}&favorite=1{% endif %}" class="page-btn">« 上一页</a>
+            {% else %}
+            <button class="page-btn" disabled>« 上一页</button>
+            {% endif %}
+
+            {% set start_page = [1, current_page - 2] | max %}
+            {% set end_page = [total_pages, current_page + 2] | min %}
+
+            {% if start_page > 1 %}
+            <a href="?page=1{% if search_query %}&search={{ search_query | urlencode }}{% endif %}{% if date_from %}&date_from={{ date_from }}{% endif %}{% if date_to %}&date_to={{ date_to }}{% endif %}{% if selected_source %}&source={{ selected_source }}{% endif %}{% if favorite_only %}&favorite=1{% endif %}" class="page-btn">1</a>
+            {% if start_page > 2 %}
+            <span class="page-btn" disabled>...</span>
+            {% endif %}
+            {% endif %}
+
+            {% for page in range(start_page, end_page + 1) %}
+            {% if page == current_page %}
+            <span class="page-btn active">{{ page }}</span>
+            {% else %}
+            <a href="?page={{ page }}{% if search_query %}&search={{ search_query | urlencode }}{% endif %}{% if date_from %}&date_from={{ date_from }}{% endif %}{% if date_to %}&date_to={{ date_to }}{% endif %}{% if selected_source %}&source={{ selected_source }}{% endif %}{% if favorite_only %}&favorite=1{% endif %}" class="page-btn">{{ page }}</a>
+            {% endif %}
+            {% endfor %}
+
+            {% if end_page < total_pages %}
+            {% if end_page < total_pages - 1 %}
+            <span class="page-btn" disabled>...</span>
+            {% endif %}
+            <a href="?page={{ total_pages }}{% if search_query %}&search={{ search_query | urlencode }}{% endif %}{% if date_from %}&date_from={{ date_from }}{% endif %}{% if date_to %}&date_to={{ date_to }}{% endif %}{% if selected_source %}&source={{ selected_source }}{% endif %}{% if favorite_only %}&favorite=1{% endif %}" class="page-btn">{{ total_pages }}</a>
+            {% endif %}
+
+            {% if current_page < total_pages %}
+            <a href="?page={{ current_page + 1 }}{% if search_query %}&search={{ search_query | urlencode }}{% endif %}{% if date_from %}&date_from={{ date_from }}{% endif %}{% if date_to %}&date_to={{ date_to }}{% endif %}{% if selected_source %}&source={{ selected_source }}{% endif %}{% if favorite_only %}&favorite=1{% endif %}" class="page-btn">下一页 »</a>
+            {% else %}
+            <button class="page-btn" disabled>下一页 »</button>
+            {% endif %}
+        </div>
+        {% else %}
+        <div class="empty-state">
+            <div class="empty-state-icon">📭</div>
+            <h2>暂无笔记</h2>
+            <p>还没有保存任何笔记，快去 Telegram 发送消息吧！</p>
+        </div>
+        {% endif %}
+    </div>
+
+    <!-- Flash Messages -->
+    {% with messages = get_flashed_messages() %}
+        {% if messages %}
+            <div class="flash-messages">
+                {% for message in messages %}
+                    <div class="flash-message flash-success">{{ message }}</div>
+                {% endfor %}
+            </div>
+        {% endif %}
+    {% endwith %}
+
+    <!-- Image Modal -->
+    <div id="imageModal" class="image-modal" onclick="closeImageModal()">
+        <span class="image-modal-close" onclick="closeImageModal()">&times;</span>
+        <img class="image-modal-content" id="modalImage" onclick="event.stopPropagation()">
+    </div>
+
+    <!-- Selection Modal -->
+    <div id="selectionModal" class="selection-modal" onclick="closeSelectionModal()">
+        <div class="selection-modal-content" onclick="event.stopPropagation()">
+            <div class="selection-modal-header">
+                <span id="selectionModalTitle">选择要观看的内容</span>
+                <span class="selection-modal-close" onclick="closeSelectionModal()">&times;</span>
+            </div>
+            <div id="selectionModalOptions"></div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

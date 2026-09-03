@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>观看设置 - Save-Restricted-Bot</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="header-title">
+                <span class="header-icon">🎬</span>
+                <h1>观看设置</h1>
+            </div>
+            <div class="header-actions">
+                <button class="menu-toggle" onclick="toggleMenu()" aria-label="菜单">
+                    <div class="menu-bar"></div>
+                    <div class="menu-bar"></div>
+                    <div class="menu-bar"></div>
+                </button>
+                <div class="menu-dropdown" id="menuDropdown">
+                    <a href="/notes" class="menu-item"><span class="menu-item-icon">📝</span>笔记列表</a>
+                    <a href="/admin" class="menu-item"><span class="menu-item-icon">⚙️</span>管理设置</a>
+                    <a href="/setup" class="menu-item"><span class="menu-item-icon">🛠️</span>Bot 配置</a>
+                    <a href="/logout" class="menu-item"><span class="menu-item-icon">🚪</span>退出登录</a>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>观看网站 URL</h2>
+            <p>笔记中的磁力链接会拼接该 URL，用于生成观看入口。</p>
+
+            {% if success %}
+            <div class="success-message">{{ success }}</div>
+            {% endif %}
+            {% if error %}
+            <div class="error-message">{{ error }}</div>
+            {% endif %}
+
+            <form method="POST">
+                <div class="form-group">
+                    <label for="viewer_url">观看网站 URL</label>
+                    <input type="text" id="viewer_url" name="viewer_url" value="{{ config.get('viewer_url', '') }}" placeholder="https://example.com/watch?dn=">
+                </div>
+                <button type="submit" class="btn btn-primary">保存配置</button>
+            </form>
+        </div>
+    </div>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TG Forward Hub</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/merged.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">TG Forward Hub</div>
+    <nav class="tabs" aria-label="主导航">
+      <button class="tab active" data-tab="batch">批量转发</button>
+      <button class="tab" data-tab="watch">实时监控</button>
+      <button class="tab" data-tab="notes">记录笔记</button>
+      <button class="tab" data-tab="settings">设置</button>
+    </nav>
+    <a class="logout" href="{{ url_for('logout') }}">退出</a>
+  </header>
+
+  <main class="shell">
+    <section id="tab-batch" class="panel active">
+      <div class="panel-head">
+        <h1>批量转发任务</h1>
+        <div class="status-pill" id="clientStatus">连接检查中...</div>
+      </div>
+
+      <div class="grid">
+        <form id="batchForm" class="form-card">
+          <label>任务名（可选）
+            <input id="taskName" placeholder="例如：群采集-01">
+          </label>
+          <label>来源 ID
+            <input id="sourceId" required placeholder="@channel / -100... / 数字 ID">
+          </label>
+          <label>目标 ID
+            <input id="targetId" required placeholder="@channel / -100... / 数字 ID">
+          </label>
+
+          <div class="field-row">
+            <label>范围类型
+              <select id="rangeType">
+                <option value="id">消息 ID</option>
+                <option value="time">时间</option>
+              </select>
+            </label>
+            <label>转发方式
+              <select id="forwardMode">
+                <option value="clone">clone（隐藏来源）</option>
+                <option value="direct">direct（保留来源）</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="field-row">
+            <label>开始
+              <input id="startValue" placeholder="100 或 2026-09-01">
+            </label>
+            <label>结束
+              <input id="endValue" placeholder="500 或 2026-09-02">
+            </label>
+          </div>
+
+          <label class="check">
+            <input id="descFlag" type="checkbox"> 逆序转发
+          </label>
+
+          <label>排除关键词（用逗号或 | 分隔）
+            <input id="excludeKeywords" placeholder="广告, #ad, 签到">
+          </label>
+          <label>清理尾部关键词（从两个换行后的关键词开始截断）
+            <input id="removeKeywords" placeholder="Powered by">
+          </label>
+
+          <button class="primary" type="submit">生成并执行</button>
+          <div id="batchMessage" class="message" hidden></div>
+        </form>
+
+        <div class="monitor-card">
+          <div class="monitor-head">
+            <strong>执行状态</strong>
+            <span id="jobId" class="muted"></span>
+          </div>
+          <div class="stat-grid">
+            <div><span>状态</span><strong id="jobStatus">等待</strong></div>
+            <div><span>已处理</span><strong id="processedCount">0</strong></div>
+            <div><span>成功</span><strong id="successCount">0</strong></div>
+            <div><span>失败</span><strong id="failedCount">0</strong></div>
+            <div><span>跳过</span><strong id="skippedCount">0</strong></div>
+          </div>
+          <textarea id="jobLog" readonly placeholder="任务日志"></textarea>
+          <button id="cancelBtn" class="secondary" hidden>取消任务</button>
+        </div>
+      </div>
+
+      <div class="history-card">
+        <div class="history-head">
+          <h2>命令历史</h2>
+          <div class="history-actions">
+            <button id="historyRefresh" class="secondary small">刷新</button>
+            <button id="historyClear" class="danger small">清空</button>
+          </div>
+        </div>
+        <div id="historyBody" class="history-list"></div>
+      </div>
+    </section>
+
+    <section id="tab-watch" class="panel">
+      <div class="panel-head">
+        <h1>实时监控规则</h1>
+        <button id="watchRefresh" class="secondary">刷新</button>
+      </div>
+      <div class="watch-layout">
+        <form id="watchForm" class="form-card">
+          <label>用户 ID
+            <input id="watchUser" required placeholder="Telegram 用户 ID">
+          </label>
+          <label>规则名
+            <input id="watchKey" required placeholder="例如：channel-01">
+          </label>
+          <label>来源
+            <input id="watchSource" required placeholder="-100... 或 @channel">
+          </label>
+          <label>目标（record 模式可留空）
+            <input id="watchDest" placeholder="-100... / me">
+          </label>
+          <div class="field-row">
+            <label>模式
+              <select id="watchMode">
+                <option value="forward">forward 转发</option>
+                <option value="record">record 记录</option>
+              </select>
+            </label>
+            <label>转发模式
+              <select id="watchForwardMode">
+                <option value="full">full</option>
+                <option value="extract">extract</option>
+              </select>
+            </label>
+          </div>
+          <label class="check">
+            <input id="watchPreserve" type="checkbox"> 保留转发来源
+          </label>
+          <label>白名单关键词
+            <input id="watchWhitelist" placeholder="逗号分隔">
+          </label>
+          <label>黑名单关键词
+            <input id="watchBlacklist" placeholder="逗号分隔">
+          </label>
+          <button class="primary" type="submit">保存规则</button>
+          <div id="watchMessage" class="message" hidden></div>
+        </form>
+        <div id="watchList" class="list-card"></div>
+      </div>
+    </section>
+
+    <section id="tab-notes" class="panel">
+      <div class="panel-head">
+        <h1>记录笔记</h1>
+        <div class="history-actions">
+          <input id="noteSearch" placeholder="搜索文本或来源">
+          <button id="noteRefresh" class="secondary">刷新</button>
+        </div>
+      </div>
+      <div id="notesList" class="list-card"></div>
+    </section>
+
+    <section id="tab-settings" class="panel">
+      <div class="panel-head">
+        <h1>设置</h1>
+      </div>
+      <div class="link-grid">
+        <a class="link-card" href="/setup">初始配置 / String Session</a>
+        <a class="link-card" href="/admin/webdav">WebDAV 存储</a>
+        <a class="link-card" href="/admin/calibration">自动校准</a>
+        <a class="link-card" href="/admin">修改密码</a>
+        <a class="link-card" href="/notes">经典笔记页</a>
+      </div>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='js/merged.js') }}"></script>
+</body>
+</html>

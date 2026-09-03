@@ -1,0 +1,34 @@
+{
+  "123456789": {
+    "-1001234567890": {
+      "dest": "me",
+      "whitelist": ["重要", "紧急"],
+      "blacklist": ["测试", "广告"],
+      "whitelist_regex": [],
+      "blacklist_regex": [],
+      "preserve_forward_source": false,
+      "forward_mode": "full",
+      "extract_patterns": []
+    },
+    "-1009876543210": {
+      "dest": "-1001111111111",
+      "whitelist": [],
+      "blacklist": [],
+      "whitelist_regex": ["https?://[^\\s]+"],
+      "blacklist_regex": ["广告|推广"],
+      "preserve_forward_source": true,
+      "forward_mode": "full",
+      "extract_patterns": []
+    },
+    "-1005555555555": {
+      "dest": "me",
+      "whitelist": ["分享", "推荐"],
+      "blacklist": [],
+      "whitelist_regex": [],
+      "blacklist_regex": [],
+      "preserve_forward_source": false,
+      "forward_mode": "extract",
+      "extract_patterns": ["https?://[^\\s]+", "\\d{6,}"]
+    }
+  }
+}
