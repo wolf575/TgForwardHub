@@ -11,9 +11,17 @@ from web_setup import load_visible_config, save_configuration, start_session_aut
 import batch_forward
 import math
 import requests
+import sys
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your-secret-key-change-this-in-production')
+
+
+@app.after_request
+def disable_sensitive_response_caching(response):
+    if request.path == '/' or request.path == '/login' or request.path.startswith('/api/'):
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+    return response
 
 # 初始化数据库
 init_database()
@@ -163,6 +171,15 @@ def api_setup_start():
         return jsonify({'error': '未登录'}), 401
 
     data = request.get_json(silent=True) or {}
+    sys.stdout.write(
+        "[web-setup] POST /api/setup/start received keys={} "
+        "client={} cf_ray={}\n".format(
+            sorted(data.keys()),
+            request.headers.get('X-Forwarded-For') or request.remote_addr,
+            request.headers.get('CF-Ray'),
+        )
+    )
+    sys.stdout.flush()
     token = str(data.get('token') or '').strip()
     api_id = str(data.get('api_id') or '').strip()
     api_hash = str(data.get('api_hash') or '').strip()

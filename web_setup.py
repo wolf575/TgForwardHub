@@ -1,24 +1,22 @@
 """Web setup helpers for the merged web service.
 
-This module keeps the Flask setup routes small and provides an in-memory
-state machine for Telegram user authorization.
+The Telegram user authorization is intentionally run in a separate Python
+process.  Pyrogram's synchronous wrapper is easiest to drive from a process's
+main thread, while the merged service runs the Telegram bot on its main
+thread.  Running temporary auth clients in Flask worker threads can leave a
+request hanging until Cloudflare returns HTTP 503.
 
-Pyrogram's synchronous client wrapper captures the event loop that is current
-when ``pyrogram`` is imported and, when called from a non-main thread, routes
-every coroutine back to that captured loop.  The merged service runs the bot
-on the main thread, so a Flask worker thread calling the sync wrapper would
-block waiting for the bot loop and could hang indefinitely.
-
-To avoid that, all temporary auth clients are created and driven on a single
-dedicated event-loop thread.  The original async Pyrogram methods are invoked
-directly (bypassing the sync wrapper), so the auth flow is completely isolated
-from the bot's event loop.
+This module therefore only creates and monitors small JSON job files.  The
+actual Telegram calls happen in :file:`web_auth_worker.py`.
 """
 
-import asyncio
 import json
 import os
+import re
+import subprocess
+import sys
 import threading
+import time
 import uuid
 from typing import Any, Dict, Optional
 
@@ -29,52 +27,74 @@ CONFIG_DIR = os.path.join(DATA_DIR, "config")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 ENV_FILE = os.path.join(BASE_DIR, ".env")
 SESSION_DIR = os.path.join(DATA_DIR, "auth_sessions")
+AUTH_JOBS_DIR = os.path.join(DATA_DIR, "auth_jobs")
+WORKER_SCRIPT = os.path.join(BASE_DIR, "web_auth_worker.py")
 
-_setup_states: Dict[str, Dict[str, Any]] = {}
-_setup_lock = threading.Lock()
-
-# Dedicated event loop for temporary auth clients.  This loop is intentionally
-# separate from the bot's main loop so web-driven login never touches it.
-_auth_loop: Optional[asyncio.AbstractEventLoop] = None
-_auth_loop_thread: Optional[threading.Thread] = None
-_auth_loop_lock = threading.Lock()
-
-_AUTH_TIMEOUT = 75
-
-
-def _get_auth_loop() -> asyncio.AbstractEventLoop:
-    global _auth_loop, _auth_loop_thread
-
-    with _auth_loop_lock:
-        if _auth_loop is None or _auth_loop.is_closed():
-            _auth_loop = asyncio.new_event_loop()
-            _auth_loop_thread = threading.Thread(
-                target=_auth_loop.run_forever,
-                name="WebAuthLoop",
-                daemon=True,
-            )
-            _auth_loop_thread.start()
-        return _auth_loop
-
-
-def _run_on_auth_loop(coro, timeout: float = _AUTH_TIMEOUT) -> Any:
-    """Run a coroutine on the dedicated auth loop and block for its result."""
-    loop = _get_auth_loop()
-    future = asyncio.run_coroutine_threadsafe(coro, loop)
-    try:
-        return future.result(timeout=timeout)
-    except TimeoutError:
-        future.cancel()
-        raise TimeoutError("登录流程超时，请检查服务器到 Telegram 的网络连通性后重试")
+_AUTH_WORKER_TIMEOUT = 90
+_finalize_lock = threading.Lock()
+_job_lock = threading.Lock()
+_finalize_scheduled: set = set()
+_SETUP_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 
 
 def _ensure_dirs() -> None:
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    os.makedirs(SESSION_DIR, exist_ok=True)
+    for path in (CONFIG_DIR, SESSION_DIR, AUTH_JOBS_DIR):
+        os.makedirs(path, exist_ok=True)
+
+
+def _job_path(setup_id: str) -> str:
+    if not _SETUP_ID_RE.fullmatch(setup_id or ""):
+        raise ValueError("invalid setup id")
+    return os.path.join(AUTH_JOBS_DIR, f"{setup_id}.json")
+
+
+def _read_job(setup_id: str) -> Optional[Dict[str, Any]]:
+    _ensure_dirs()
+    path = _job_path(setup_id)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except (json.JSONDecodeError, OSError):
+        pass
+    return None
+
+
+def _write_job(setup_id: str, data: Dict[str, Any]) -> None:
+    """Write a sensitive auth job with owner-only permissions."""
+    _ensure_dirs()
+    path = _job_path(setup_id)
+    temp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    try:
+        with os.fdopen(os.open(temp_path, flags, 0o600), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(temp_path, path)
+    finally:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _update_job(setup_id: str, **fields: Any) -> Dict[str, Any]:
+    """Merge fields into a job file and persist it."""
+    with _job_lock:
+        job = _read_job(setup_id) or {"setup_id": setup_id}
+        job.update(fields)
+        job["updated_at"] = time.time()
+        _write_job(setup_id, job)
+    return job
 
 
 def _remove_session_files(session_name: str) -> None:
-    """Remove Pyrogram file-session artifacts for a temporary auth session."""
     for suffix in ("", "-journal"):
         path = os.path.join(SESSION_DIR, f"{session_name}.session{suffix}")
         try:
@@ -82,6 +102,56 @@ def _remove_session_files(session_name: str) -> None:
                 os.remove(path)
         except OSError:
             pass
+
+
+def _monitor_worker(
+    setup_id: str,
+    process: subprocess.Popen,
+) -> None:
+    """Kill an auth subprocess if Telegram does not finish in a bounded time."""
+    try:
+        process.wait(timeout=_AUTH_WORKER_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        _update_job(
+            setup_id,
+            status="error",
+            error="Telegram 登录流程超时，请稍后重试",
+        )
+
+
+def _spawn_worker(setup_id: str, action: str) -> Optional[Dict[str, Any]]:
+    """Start an auth subprocess and return immediately."""
+    worker_env = os.environ.copy()
+    worker_env["TG_FORWARD_HUB_AUTH_ACTION"] = action
+
+    popen_kwargs: Dict[str, Any] = {
+        "stdout": sys.stdout,
+        "stderr": sys.stderr,
+        "env": worker_env,
+    }
+    if os.name != "nt":
+        popen_kwargs["start_new_session"] = True
+
+    try:
+        process = subprocess.Popen(
+            [sys.executable, WORKER_SCRIPT, setup_id, action],
+            **popen_kwargs,
+        )
+    except Exception as exc:
+        _update_job(setup_id, status="error", error=f"无法启动 Telegram 鉴权进程: {exc}")
+        return _read_job(setup_id)
+
+    threading.Thread(
+        target=_monitor_worker,
+        args=(setup_id, process),
+        name=f"WebAuthMonitor-{setup_id[:8]}",
+        daemon=True,
+    ).start()
+    return None
 
 
 def _read_current_config() -> Dict[str, Any]:
@@ -196,149 +266,61 @@ def _request_client_restart() -> None:
         pass
 
 
-def _get_state(setup_id: str) -> Optional[Dict[str, Any]]:
-    with _setup_lock:
-        return _setup_states.get(setup_id)
+def _finalize_finished_job(setup_id: str) -> Optional[Dict[str, Any]]:
+    """Persist an exported session and restart clients exactly once."""
+    with _finalize_lock:
+        if setup_id in _finalize_scheduled:
+            return _read_job(setup_id)
+        _finalize_scheduled.add(setup_id)
 
+    job = _read_job(setup_id)
+    if not job or job.get("status") != "done" or not job.get("session_string"):
+        return None
 
-def _remove_state(setup_id: str) -> Optional[Dict[str, Any]]:
-    with _setup_lock:
-        return _setup_states.pop(setup_id, None)
+    saved = save_configuration(
+        job.get("token", ""),
+        job.get("api_id", ""),
+        job.get("api_hash", ""),
+        session_string=job["session_string"],
+        preserve_existing_session=False,
+    )
+    _update_job(
+        setup_id,
+        saved=saved,
+        restart_queued=True,
+        message="Session String 已自动生成并写入配置",
+    )
+    _request_client_restart()
 
-
-def _set_state(setup_id: str, **fields: Any) -> None:
-    """Merge fields into an existing setup state without removing it."""
-    with _setup_lock:
-        state = _setup_states.get(setup_id)
-        if state:
-            state.update(fields)
+    session_name = job.get("session_name")
+    if session_name:
+        _remove_session_files(session_name)
+    try:
+        os.remove(_job_path(setup_id))
+    except OSError:
+        pass
+    return saved
 
 
 def get_setup_status(setup_id: str) -> Dict[str, Any]:
     """Return a JSON-safe snapshot of an auth flow for frontend polling."""
-    with _setup_lock:
-        state = _setup_states.get(setup_id)
-
-    if not state:
+    job = _read_job(setup_id)
+    if not job:
         return {"setup_id": setup_id, "stage": "idle", "status": "missing"}
+
+    saved = None
+    if job.get("status") == "done" and job.get("session_string"):
+        saved = _finalize_finished_job(setup_id)
 
     return {
         "setup_id": setup_id,
-        "stage": state.get("stage"),
-        "status": state.get("status"),
-        "phone_number": state.get("phone_number"),
-        "message": state.get("message"),
-        "error": state.get("error"),
-        "session_string": state.get("session_string"),
-        "saved": state.get("saved"),
-    }
-
-
-def _cleanup_state(state: Optional[Dict[str, Any]]) -> None:
-    """Disconnect and remove the temporary session for a finished auth flow."""
-    if not state:
-        return
-    client = state.get("client")
-    if client is not None:
-        try:
-            _run_on_auth_loop(_disconnect_client(client), timeout=10)
-        except Exception:
-            pass
-    session_name = state.get("session_name")
-    if session_name:
-        _remove_session_files(session_name)
-
-
-def _cleanup_all_setup_states() -> None:
-    with _setup_lock:
-        states = list(_setup_states.values())
-        _setup_states.clear()
-    for state in states:
-        _cleanup_state(state)
-
-
-async def _disconnect_client(client: Any) -> None:
-    if client is None or not getattr(client, "is_connected", False):
-        return
-    from pyrogram.methods.auth.disconnect import Disconnect
-    await Disconnect.disconnect(client)
-
-
-async def _connect_and_send_code(
-    session_name: str,
-    api_id: int,
-    api_hash: str,
-    phone_number: str,
-) -> Dict[str, Any]:
-    from pyrogram import Client
-    from pyrogram.methods.auth.connect import Connect
-    from pyrogram.methods.auth.send_code import SendCode
-
-    client = Client(
-        session_name,
-        api_id=api_id,
-        api_hash=api_hash,
-        phone_number=phone_number,
-        workdir=SESSION_DIR,
-        in_memory=False,
-    )
-
-    try:
-        await Connect.connect(client)
-        sent_code = await SendCode.send_code(client, phone_number)
-        phone_code_hash = getattr(sent_code, "phone_code_hash", None)
-    except Exception:
-        await _disconnect_client(client)
-        raise
-
-    return {
-        "client": client,
-        "phone_code_hash": phone_code_hash,
-    }
-
-
-async def _sign_in_and_export(
-    state: Dict[str, Any],
-    code: str,
-) -> Dict[str, Any]:
-    from pyrogram.methods.auth.sign_in import SignIn
-    from pyrogram.methods.utilities.export_session_string import ExportSessionString
-    from pyrogram.errors import SessionPasswordNeeded
-
-    client = state["client"]
-    try:
-        await SignIn.sign_in(
-            client,
-            state["phone_number"],
-            state["phone_code_hash"],
-            code,
-        )
-    except SessionPasswordNeeded:
-        return {
-            "stage": "password",
-            "message": "账号已开启两步验证，请输入两步验证密码",
-        }
-
-    session_string = await ExportSessionString.export_session_string(client)
-    return {
-        "stage": "done",
-        "session_string": session_string,
-    }
-
-
-async def _check_password_and_export(
-    state: Dict[str, Any],
-    password: str,
-) -> Dict[str, Any]:
-    from pyrogram.methods.auth.check_password import CheckPassword
-    from pyrogram.methods.utilities.export_session_string import ExportSessionString
-
-    client = state["client"]
-    await CheckPassword.check_password(client, password)
-    session_string = await ExportSessionString.export_session_string(client)
-    return {
-        "stage": "done",
-        "session_string": session_string,
+        "stage": job.get("stage"),
+        "status": job.get("status"),
+        "phone_number": job.get("phone_number"),
+        "message": job.get("message"),
+        "error": job.get("error"),
+        "session_string": job.get("session_string"),
+        "saved": saved or job.get("saved"),
     }
 
 
@@ -348,7 +330,7 @@ def start_session_auth(
     api_hash: str,
     phone_number: str,
 ) -> Dict[str, Any]:
-    """Request a Telegram login code and store the active auth session."""
+    """Request a Telegram login code through an isolated subprocess."""
     _ensure_dirs()
 
     try:
@@ -367,64 +349,31 @@ def start_session_auth(
     if not token:
         return {"error": "Bot Token 不能为空"}
 
-    _cleanup_all_setup_states()
-
     setup_id = uuid.uuid4().hex
     session_name = f"web_auth_{setup_id}"
+    job = {
+        "setup_id": setup_id,
+        "session_name": session_name,
+        "phone_number": phone_number,
+        "token": token,
+        "api_id": str(api_id_int),
+        "api_hash": api_hash,
+        "stage": "code",
+        "status": "queued",
+        "message": "正在启动 Telegram 登录流程",
+        "error": None,
+        "session_string": None,
+        "saved": None,
+        "phone_code_hash": None,
+        "restart_queued": False,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    }
+    _write_job(setup_id, job)
 
-    with _setup_lock:
-        _setup_states[setup_id] = {
-            "session_name": session_name,
-            "phone_number": phone_number,
-            "token": token,
-            "api_id": str(api_id_int),
-            "api_hash": api_hash,
-            "stage": "code",
-            "status": "pending",
-            "client": None,
-            "phone_code_hash": None,
-            "message": None,
-            "error": None,
-            "session_string": None,
-            "saved": None,
-        }
-
-    def _worker() -> None:
-        client = None
-        try:
-            result = _run_on_auth_loop(
-                _connect_and_send_code(
-                    session_name,
-                    api_id_int,
-                    api_hash,
-                    phone_number,
-                )
-            )
-        except Exception as exc:
-            _remove_session_files(session_name)
-            _set_state(setup_id, status="error", error=_friendly_pyrogram_error(exc))
-            return
-
-        client = result["client"]
-        phone_code_hash = result.get("phone_code_hash")
-
-        if not phone_code_hash:
-            try:
-                _run_on_auth_loop(_disconnect_client(client), timeout=10)
-            except Exception:
-                pass
-            _remove_session_files(session_name)
-            _set_state(setup_id, status="error", error="Telegram 未返回验证码哈希，请重试")
-            return
-
-        _set_state(
-            setup_id,
-            status="sent",
-            client=client,
-            phone_code_hash=phone_code_hash,
-        )
-
-    threading.Thread(target=_worker, name="WebAuthWorker", daemon=True).start()
+    spawn_error = _spawn_worker(setup_id, "start")
+    if spawn_error:
+        return {"error": spawn_error.get("error", "无法启动 Telegram 鉴权进程")}
 
     return {
         "setup_id": setup_id,
@@ -434,9 +383,9 @@ def start_session_auth(
 
 
 def submit_code(setup_id: str, code: str) -> Dict[str, Any]:
-    """Submit a Telegram login code and advance the auth state machine."""
-    state = _get_state(setup_id)
-    if not state:
+    """Submit a Telegram login code in a fresh isolated process."""
+    job = _read_job(setup_id)
+    if not job:
         return {"error": "登录流程不存在或已过期，请重新开始"}
 
     code = (code or "").strip()
@@ -447,50 +396,20 @@ def submit_code(setup_id: str, code: str) -> Dict[str, Any]:
             "error": "验证码不能为空",
         }
 
-    client = state.get("client")
-    if client is None or not getattr(client, "is_connected", False):
-        _cleanup_state(_remove_state(setup_id))
-        return {"error": "登录流程不存在或已过期，请重新开始"}
+    allowed_statuses = {"sent", "error"}
+    if job.get("status") not in allowed_statuses:
+        return {"error": "验证码尚未发送或登录流程已过期，请重新开始"}
 
-    _set_state(setup_id, status="pending", error=None, message=None)
-
-    def _worker() -> None:
-        try:
-            result = _run_on_auth_loop(_sign_in_and_export(state, code))
-        except Exception as exc:
-            _set_state(setup_id, status="error", error=_friendly_pyrogram_error(exc))
-            return
-
-        if result.get("stage") == "password":
-            _set_state(
-                setup_id,
-                stage="password",
-                status="ready",
-                message=result.get("message"),
-            )
-            return
-
-        session_string = result.get("session_string") or ""
-        saved = save_configuration(
-            state["token"],
-            state["api_id"],
-            state["api_hash"],
-            session_string=session_string,
-            preserve_existing_session=False,
-        )
-        _cleanup_state(state)
-        _set_state(
-            setup_id,
-            stage="done",
-            status="done",
-            client=None,
-            session_string=session_string,
-            saved=saved,
-            message="Session String 已自动生成并写入配置",
-        )
-        _request_client_restart()
-
-    threading.Thread(target=_worker, name="WebAuthWorker", daemon=True).start()
+    _update_job(
+        setup_id,
+        status="queued",
+        error=None,
+        message="正在验证验证码",
+        login_code=code,
+    )
+    spawn_error = _spawn_worker(setup_id, "code")
+    if spawn_error:
+        return {"error": spawn_error.get("error", "无法启动 Telegram 鉴权进程")}
 
     return {
         "setup_id": setup_id,
@@ -499,9 +418,9 @@ def submit_code(setup_id: str, code: str) -> Dict[str, Any]:
 
 
 def submit_password(setup_id: str, password: str) -> Dict[str, Any]:
-    """Complete two-factor authentication and export the session string."""
-    state = _get_state(setup_id)
-    if not state:
+    """Complete two-factor authentication in a fresh isolated process."""
+    job = _read_job(setup_id)
+    if not job:
         return {"error": "登录流程不存在或已过期，请重新开始"}
 
     password = password or ""
@@ -512,89 +431,22 @@ def submit_password(setup_id: str, password: str) -> Dict[str, Any]:
             "error": "两步验证密码不能为空",
         }
 
-    client = state.get("client")
-    if client is None or not getattr(client, "is_connected", False):
-        _cleanup_state(_remove_state(setup_id))
-        return {"error": "登录流程不存在或已过期，请重新开始"}
+    allowed_statuses = {"ready", "error"}
+    if job.get("status") not in allowed_statuses:
+        return {"error": "两步验证流程不存在或已过期，请重新开始"}
 
-    _set_state(setup_id, status="pending", error=None, message=None)
-
-    def _worker() -> None:
-        try:
-            result = _run_on_auth_loop(_check_password_and_export(state, password))
-        except Exception as exc:
-            _set_state(setup_id, status="error", error=_friendly_pyrogram_error(exc))
-            return
-
-        session_string = result.get("session_string") or ""
-        saved = save_configuration(
-            state["token"],
-            state["api_id"],
-            state["api_hash"],
-            session_string=session_string,
-            preserve_existing_session=False,
-        )
-        _cleanup_state(state)
-        _set_state(
-            setup_id,
-            stage="done",
-            status="done",
-            client=None,
-            session_string=session_string,
-            saved=saved,
-            message="Session String 已自动生成并写入配置",
-        )
-        _request_client_restart()
-
-    threading.Thread(target=_worker, name="WebAuthWorker", daemon=True).start()
+    _update_job(
+        setup_id,
+        status="queued",
+        error=None,
+        message="正在完成两步验证",
+        two_factor_password=password,
+    )
+    spawn_error = _spawn_worker(setup_id, "password")
+    if spawn_error:
+        return {"error": spawn_error.get("error", "无法启动 Telegram 鉴权进程")}
 
     return {
         "setup_id": setup_id,
         "stage": "pending",
     }
-
-
-def _friendly_pyrogram_error(exc: Exception) -> str:
-    name = exc.__class__.__name__
-    message = str(exc)
-
-    if name == "TimeoutError":
-        return message
-    if name == "PhoneCodeInvalid":
-        return "验证码不正确，请检查后重新输入"
-    if name == "PhoneCodeExpired":
-        return "验证码已过期，请重新获取验证码"
-    if name == "PhoneCodeEmpty":
-        return "验证码为空"
-    if name == "SessionPasswordNeeded":
-        return "需要输入两步验证密码"
-    if name == "FloodWait":
-        wait = ""
-        try:
-            wait = str(getattr(exc, "value", "") or getattr(exc, "seconds", "") or "")
-        except Exception:
-            pass
-        return f"Telegram 触发限流，请等待 {wait} 秒后重试"
-    if name == "ApiIdInvalid":
-        return "API ID 无效"
-    if name == "PhoneNumberInvalid":
-        return "手机号格式无效，请使用带国家代码的格式，例如 +8613800138000"
-    if name == "PhoneNumberBanned":
-        return "该手机号已被 Telegram 限制"
-    if name == "PasswordHashInvalid":
-        return "两步验证密码不正确"
-
-    if "AUTH_KEY_UNREGISTERED" in message or "api_id" in message.lower():
-        return "API 凭据错误，请检查 API ID 和 API Hash"
-    if "PHONE_NUMBER_INVALID" in message:
-        return "手机号格式无效，请使用带国家代码的格式，例如 +8613800138000"
-    if "PHONE_CODE_INVALID" in message:
-        return "验证码不正确"
-    if "PHONE_CODE_EXPIRED" in message:
-        return "验证码已过期"
-    if "SESSION_PASSWORD_NEEDED" in message:
-        return "需要输入两步验证密码"
-    if "FLOOD_WAIT" in message:
-        return "请求过于频繁，请稍后重试"
-
-    return f"登录失败: {message or name}"
