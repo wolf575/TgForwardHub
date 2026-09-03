@@ -109,16 +109,13 @@ python run.py
 ```bash
 cd TgForwardHub
 
-# 复制配置模板并填写真实凭据
-cp .env.example .env
-
 docker compose up -d --build
 docker compose logs -f
 ```
 
 打开 `http://服务器IP:10000`。
 
-`.env` 示例：
+如果你愿意提前填写凭据，也可以创建可选的 `.env`：
 
 ```dotenv
 TOKEN=123456789:AA...
@@ -132,7 +129,14 @@ FLASK_SECRET_KEY=replace-with-a-long-random-string
 
 ## Docker Run 部署
 
-项目已经准备了 `docker run` 所需的条件：镜像暴露 `10000` 端口、声明 `/app/data` 和 `/app/downloads` 数据卷，并内置健康检查。
+项目已经准备好了“零配置启动”：
+
+1. 先用 `docker run` 把容器跑起来。
+2. 打开 Web 页面，登录 `admin` / `admin`。
+3. 进入「设置 → 初始配置」，填写 Bot Token、API ID、API Hash，并生成 Session String。
+4. 配置会持久化到 `/app/data/config/config.json`，重启容器不会丢失。
+
+你不需要提前创建 `.env` 文件。
 
 ### 使用云端镜像
 
@@ -153,7 +157,6 @@ docker run -d \
   -p 10001:10000 \
   -v /docker-data/tfh/data:/app/data \
   -v /docker-data/tfh/downloads:/app/downloads \
-  --env-file .env \
   -e DATA_DIR=/app/data \
   -e PORT=10000 \
   -e TZ=Asia/Shanghai \
@@ -175,9 +178,6 @@ docker run -d \
 ```powershell
 cd TgForwardHub
 
-Copy-Item .env.example .env -Force
-# 编辑 .env，填入 TOKEN / ID / HASH / STRING
-
 .\docker-run.ps1
 ```
 
@@ -185,9 +185,6 @@ Copy-Item .env.example .env -Force
 
 ```bash
 cd TgForwardHub
-
-cp .env.example .env
-# 编辑 .env，填入 TOKEN / ID / HASH / STRING
 
 chmod +x docker-run.sh
 ./docker-run.sh
@@ -204,7 +201,6 @@ docker run -d \
   -p 10000:10000 \
   -v "$(pwd)/data:/app/data" \
   -v "$(pwd)/downloads:/app/downloads" \
-  --env-file .env \
   -e DATA_DIR=/app/data \
   -e PORT=10000 \
   -e TZ=Asia/Shanghai \
@@ -220,7 +216,6 @@ docker run -d `
   -p 10000:10000 `
   -v "C:\path\to\TgForwardHub\data:/app/data" `
   -v "C:\path\to\TgForwardHub\downloads:/app/downloads" `
-  --env-file .env `
   -e DATA_DIR=/app/data `
   -e PORT=10000 `
   -e TZ=Asia/Shanghai `
