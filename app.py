@@ -98,6 +98,13 @@ def _setup_config_from_form(token='', api_id='', api_hash=''):
     return config
 
 
+def _redirect_to_dashboard():
+    """Keep legacy B-project pages from opening as a second UI."""
+    if 'username' not in session:
+        return redirect(url_for('login'))
+    return redirect(url_for('home'))
+
+
 @app.route('/api/setup/state')
 def api_setup_state():
     if 'username' not in session:
@@ -129,7 +136,12 @@ def api_setup_save():
         api_hash,
         preserve_existing_session=True
     )
-    saved['message'] = 'Bot 配置已保存。修改凭据后需要重启服务才会生效。'
+    try:
+        from bot.handlers.instances import stop_and_clear_instances
+        stop_and_clear_instances()
+    except Exception:
+        pass
+    saved['message'] = 'Bot 配置已保存，后台服务会自动重新加载。'
     return jsonify(saved)
 
 
@@ -184,196 +196,147 @@ def api_setup_password():
     return jsonify(result)
 
 
+@app.route('/api/admin/password', methods=['POST'])
+def api_admin_password():
+    if 'username' not in session:
+        return jsonify({'error': '未登录'}), 401
+
+    data = request.get_json(silent=True) or {}
+    current_password = str(data.get('current_password') or '')
+    new_password = str(data.get('new_password') or '')
+    confirm_password = str(data.get('confirm_password') or '')
+
+    if not verify_user(session['username'], current_password):
+        return jsonify({'error': '当前密码不正确'}), 400
+    if len(new_password) < 6:
+        return jsonify({'error': '新密码长度至少为 6 个字符'}), 400
+    if new_password != confirm_password:
+        return jsonify({'error': '两次输入的新密码不一致'}), 400
+
+    update_password(session['username'], new_password)
+    return jsonify({'ok': True, 'message': '密码更新成功'})
+
+
+@app.route('/api/admin/webdav', methods=['GET', 'POST'])
+def api_admin_webdav():
+    if 'username' not in session:
+        return jsonify({'error': '未登录'}), 401
+
+    if request.method == 'GET':
+        return jsonify(load_webdav_config())
+
+    data = request.get_json(silent=True) or {}
+    config = {
+        'enabled': bool(data.get('enabled')),
+        'url': str(data.get('url') or '').strip(),
+        'username': str(data.get('username') or '').strip(),
+        'password': str(data.get('password') or ''),
+        'base_path': str(data.get('base_path') or '/telegram_media').strip(),
+        'keep_local_copy': bool(data.get('keep_local_copy')),
+    }
+
+    if config['enabled'] and config['url'] and config['username'] and config['password']:
+        test_client = WebDAVClient(
+            config['url'],
+            config['username'],
+            config['password'],
+            config['base_path'],
+        )
+        if not test_client.test_connection():
+            return jsonify({'error': 'WebDAV 连接测试失败，请检查配置'}), 400
+
+    from config import save_webdav_config
+    save_webdav_config(config)
+
+    global storage_manager
+    storage_manager = init_storage_manager()
+    return jsonify({'ok': True, 'config': config, 'message': 'WebDAV 配置已保存'})
+
+
+@app.route('/api/admin/calibration', methods=['GET', 'POST'])
+def api_admin_calibration():
+    if 'username' not in session:
+        return jsonify({'error': '未登录'}), 401
+
+    from database import get_calibration_config, update_calibration_config, get_calibration_stats
+
+    if request.method == 'GET':
+        config = get_calibration_config() or {}
+        stats = get_calibration_stats()
+        return jsonify({'config': config, 'stats': stats})
+
+    data = request.get_json(silent=True) or {}
+    try:
+        config = {
+            'enabled': 1 if data.get('enabled') else 0,
+            'filter_mode': str(data.get('filter_mode') or 'empty_only'),
+            'first_delay': int(data.get('first_delay') or 600),
+            'retry_delay_1': int(data.get('retry_delay_1') or 3600),
+            'retry_delay_2': int(data.get('retry_delay_2') or 14400),
+            'retry_delay_3': int(data.get('retry_delay_3') or 28800),
+            'max_retries': int(data.get('max_retries') or 3),
+            'concurrent_limit': int(data.get('concurrent_limit') or 5),
+            'timeout_per_magnet': int(data.get('timeout_per_magnet') or 30),
+            'batch_timeout': int(data.get('batch_timeout') or 300),
+        }
+    except (TypeError, ValueError):
+        return jsonify({'error': '校准参数必须是有效数字'}), 400
+
+    update_calibration_config(config)
+
+    try:
+        from bot.services.calibration_manager import get_calibration_manager
+        get_calibration_manager().reload_config()
+    except Exception:
+        pass
+
+    stats = get_calibration_stats()
+    return jsonify({'ok': True, 'config': config, 'stats': stats, 'message': '自动校准配置已保存'})
+
+
+@app.route('/api/admin/viewer', methods=['GET', 'POST'])
+def api_admin_viewer():
+    if 'username' not in session:
+        return jsonify({'error': '未登录'}), 401
+
+    if request.method == 'GET':
+        return jsonify(load_viewer_config())
+
+    data = request.get_json(silent=True) or {}
+    viewer_url = str(data.get('viewer_url') or '').strip()
+    if not viewer_url:
+        return jsonify({'error': '观看网站 URL 不能为空'}), 400
+    if not (viewer_url.startswith('http://') or viewer_url.startswith('https://')):
+        return jsonify({'error': 'URL 必须以 http:// 或 https:// 开头'}), 400
+
+    config = {'viewer_url': viewer_url}
+    save_viewer_config(config)
+    return jsonify({'ok': True, 'config': config, 'message': '观看网站配置已保存'})
+
+
 @app.route('/setup')
 def setup():
-    if 'username' not in session:
-        return redirect(url_for('login'))
-    config = load_visible_config()
-    return render_template(
-        'setup.html',
-        config=config,
-        stage='idle',
-        setup_id='',
-        phone_number='',
-        message=None,
-        error=None,
-        generated_session=''
-    )
+    return _redirect_to_dashboard()
 
 
 @app.route('/setup/save', methods=['POST'])
 def setup_save():
-    if 'username' not in session:
-        return redirect(url_for('login'))
-
-    token = request.form.get('token', '').strip()
-    api_id = request.form.get('api_id', '').strip()
-    api_hash = request.form.get('api_hash', '').strip()
-
-    if not token or not api_id or not api_hash:
-        return render_template(
-            'setup.html',
-            config=_setup_config_from_form(token, api_id, api_hash),
-            stage='idle',
-            setup_id='',
-            phone_number='',
-            error='Bot Token、API ID 和 API Hash 均不能为空',
-            generated_session=''
-        )
-
-    try:
-        int(api_id)
-    except (TypeError, ValueError):
-        return render_template(
-            'setup.html',
-            config=_setup_config_from_form(token, api_id, api_hash),
-            stage='idle',
-            setup_id='',
-            phone_number='',
-            error='API ID 必须是纯数字',
-            generated_session=''
-        )
-
-    saved = save_configuration(
-        token,
-        api_id,
-        api_hash,
-        preserve_existing_session=True
-    )
-    return render_template(
-        'setup.html',
-        config=saved,
-        stage='saved',
-        setup_id='',
-        phone_number='',
-        message='Bot 配置已保存。修改凭据后需要重启服务才会生效。',
-        error=None,
-        generated_session=''
-    )
+    return _redirect_to_dashboard()
 
 
 @app.route('/setup/start', methods=['POST'])
 def setup_start():
-    if 'username' not in session:
-        return redirect(url_for('login'))
-
-    token = request.form.get('token', '').strip()
-    api_id = request.form.get('api_id', '').strip()
-    api_hash = request.form.get('api_hash', '').strip()
-    phone_number = request.form.get('phone_number', '').strip()
-
-    config = _setup_config_from_form(token, api_id, api_hash)
-
-    result = start_session_auth(token, api_id, api_hash, phone_number)
-    if 'error' in result:
-        return render_template(
-            'setup.html',
-            config=config,
-            stage='idle',
-            setup_id='',
-            phone_number=phone_number,
-            error=result['error'],
-            generated_session=''
-        )
-
-    return render_template(
-        'setup.html',
-        config=config,
-        stage='code',
-        setup_id=result['setup_id'],
-        phone_number=result.get('phone_number', phone_number),
-        message='验证码已发送到 Telegram，请输入验证码。',
-        error=None,
-        generated_session=''
-    )
+    return _redirect_to_dashboard()
 
 
 @app.route('/setup/code', methods=['POST'])
 def setup_code():
-    if 'username' not in session:
-        return redirect(url_for('login'))
-
-    setup_id = request.form.get('setup_id', '')
-    code = request.form.get('code', '').strip()
-    phone_number = request.form.get('phone_number', '')
-    config = _setup_config_from_form(
-        request.form.get('token', ''),
-        request.form.get('api_id', ''),
-        request.form.get('api_hash', '')
-    )
-
-    result = submit_code(setup_id, code)
-    if 'error' in result:
-        return render_template(
-            'setup.html',
-            config=config,
-            stage=result.get('stage', 'code'),
-            setup_id=result.get('setup_id', setup_id),
-            phone_number=phone_number,
-            error=result['error'],
-            generated_session=''
-        )
-
-    if result.get('stage') == 'password':
-        return render_template(
-            'setup.html',
-            config=config,
-            stage='password',
-            setup_id=result.get('setup_id', setup_id),
-            phone_number=phone_number,
-            message=result.get('message'),
-            error=None,
-            generated_session=''
-        )
-
-    return render_template(
-        'setup.html',
-        config=result.get('saved', config),
-        stage='done',
-        setup_id='',
-        phone_number=phone_number,
-        message=result.get('message'),
-        error=None,
-        generated_session=result.get('session_string', '')
-    )
+    return _redirect_to_dashboard()
 
 
 @app.route('/setup/password', methods=['POST'])
 def setup_password():
-    if 'username' not in session:
-        return redirect(url_for('login'))
-
-    setup_id = request.form.get('setup_id', '')
-    password = request.form.get('password', '')
-    phone_number = request.form.get('phone_number', '')
-    config = _setup_config_from_form(
-        request.form.get('token', ''),
-        request.form.get('api_id', ''),
-        request.form.get('api_hash', '')
-    )
-
-    result = submit_password(setup_id, password)
-    if 'error' in result:
-        return render_template(
-            'setup.html',
-            config=config,
-            stage=result.get('stage', 'password'),
-            setup_id=result.get('setup_id', setup_id),
-            phone_number=phone_number,
-            error=result['error'],
-            generated_session=''
-        )
-
-    return render_template(
-        'setup.html',
-        config=result.get('saved', config),
-        stage='done',
-        setup_id='',
-        phone_number=phone_number,
-        message=result.get('message'),
-        error=None,
-        generated_session=result.get('session_string', '')
-    )
+    return _redirect_to_dashboard()
 
 
 def extract_all_magnets_from_text(message_text):
@@ -486,150 +449,16 @@ def extract_all_dns_from_note(note):
 
 @app.route('/notes')
 def notes():
-    if 'username' not in session:
-        return redirect(url_for('login'))
-
-    # 获取分页和过滤参数
-    page = request.args.get('page', 1, type=int)
-    source_filter = request.args.get('source', None)
-    search_query = request.args.get('search', None)
-    date_from = request.args.get('date_from', None)
-    date_to = request.args.get('date_to', None)
-    favorite_only = request.args.get('favorite', None) == '1'
-
-    # 计算偏移量
-    offset = (page - 1) * NOTES_PER_PAGE
-
-    # 获取笔记
-    notes_list = get_notes(source_chat_id=source_filter, search_query=search_query,
-                          date_from=date_from, date_to=date_to, favorite_only=favorite_only,
-                          limit=NOTES_PER_PAGE, offset=offset)
-
-    # 获取观看网站配置
-    viewer_config = load_viewer_config()
-    viewer_url = viewer_config.get('viewer_url', '')
-
-    # 为每条笔记添加所有磁力链接和观看链接
-    for note in notes_list:
-        # 提取所有dn参数
-        all_dns = extract_all_dns_from_note(note)
-        note['all_dns'] = all_dns
-
-        # 为向后兼容，保留单个watch_url（使用第一个dn）
-        if all_dns and viewer_url:
-            note['watch_url'] = viewer_url + all_dns[0]['dn'] if all_dns[0]['dn'] else None
-        else:
-            note['watch_url'] = None
-
-    # 获取总数和来源列表
-    total_count = get_note_count(source_chat_id=source_filter, search_query=search_query,
-                                 date_from=date_from, date_to=date_to, favorite_only=favorite_only)
-    sources = get_sources()
-
-    # 计算总页数
-    total_pages = math.ceil(total_count / NOTES_PER_PAGE) if total_count > 0 else 1
-
-    return render_template('notes.html',
-                         notes=notes_list,
-                         sources=sources,
-                         total_count=total_count,
-                         current_page=page,
-                         total_pages=total_pages,
-                         selected_source=source_filter,
-                         search_query=search_query,
-                         date_from=date_from,
-                         date_to=date_to,
-                         favorite_only=favorite_only,
-                         viewer_url=viewer_url)
+    return _redirect_to_dashboard()
 
 @app.route('/admin', methods=['GET', 'POST'])
 def admin():
-    if 'username' not in session:
-        return redirect(url_for('login'))
-
-    if request.method == 'POST':
-        current_password = request.form.get('current_password')
-        new_password = request.form.get('new_password')
-        confirm_password = request.form.get('confirm_password')
-
-        # 验证当前密码
-        if not verify_user(session['username'], current_password):
-            return render_template('admin.html', error='当前密码不正确')
-
-        # 验证新密码
-        if len(new_password) < 6:
-            return render_template('admin.html', error='新密码长度至少为 6 个字符')
-
-        if new_password != confirm_password:
-            return render_template('admin.html', error='两次输入的新密码不一致')
-
-        # 更新密码
-        update_password(session['username'], new_password)
-        return render_template('admin.html', success='密码更新成功')
-
-    return render_template('admin.html')
+    return _redirect_to_dashboard()
 
 
 @app.route('/admin/webdav', methods=['GET', 'POST'])
 def admin_webdav():
-    """WebDAV 配置管理"""
-    if 'username' not in session:
-        return redirect(url_for('login'))
-
-    if request.method == 'POST':
-        try:
-            # 获取表单数据
-            enabled = request.form.get('enabled') == 'on'
-            url = request.form.get('url', '').strip()
-            username = request.form.get('webdav_username', '').strip()
-            password = request.form.get('webdav_password', '').strip()
-            base_path = request.form.get('base_path', '/telegram_media').strip()
-            keep_local_copy = request.form.get('keep_local_copy') == 'on'
-
-            # 构建配置
-            config = {
-                'enabled': enabled,
-                'url': url,
-                'username': username,
-                'password': password,
-                'base_path': base_path,
-                'keep_local_copy': keep_local_copy
-            }
-
-            # 如果启用了 WebDAV，测试连接
-            if enabled and url and username and password:
-                try:
-                    test_client = WebDAVClient(url, username, password, base_path)
-                    if not test_client.test_connection():
-                        return render_template('admin_webdav.html',
-                                             config=config,
-                                             error='WebDAV 连接测试失败，请检查配置')
-                except Exception as e:
-                    return render_template('admin_webdav.html',
-                                         config=config,
-                                         error=f'WebDAV 连接失败: {str(e)}')
-
-            # 保存配置
-            from config import save_webdav_config
-            save_webdav_config(config)
-
-            # 重新初始化存储管理器
-            global storage_manager
-            storage_manager = init_storage_manager()
-
-            return render_template('admin_webdav.html',
-                                 config=config,
-                                 success='WebDAV 配置已保存')
-
-        except Exception as e:
-            config = load_webdav_config()
-            return render_template('admin_webdav.html',
-                                 config=config,
-                                 error=f'保存配置失败: {str(e)}')
-
-    # GET 请求，加载当前配置
-    config = load_webdav_config()
-    return render_template('admin_webdav.html', config=config)
+    return _redirect_to_dashboard()
 
 @app.route('/media/<path:storage_location>')
 def media(storage_location):
@@ -693,24 +522,7 @@ def media(storage_location):
 
 @app.route('/edit_note/<int:note_id>', methods=['GET', 'POST'])
 def edit_note(note_id):
-    if 'username' not in session:
-        return redirect(url_for('login'))
-
-    note = get_note_by_id(note_id)
-    if not note:
-        flash('笔记不存在')
-        return redirect(url_for('notes'))
-
-    if request.method == 'POST':
-        new_text = request.form.get('message_text', '').strip()
-        if update_note(note_id, new_text):
-            flash('笔记更新成功')
-            return_url = request.form.get('return_url', url_for('notes'))
-            return redirect(return_url)
-        else:
-            flash('更新失败')
-
-    return render_template('edit_note.html', note=note, return_url=request.referrer or url_for('notes'))
+    return _redirect_to_dashboard()
 
 @app.route('/delete_note/<int:note_id>', methods=['POST'])
 def delete_note_route(note_id):
@@ -735,129 +547,15 @@ def toggle_favorite_route(note_id):
 
 @app.route('/admin/viewer', methods=['GET', 'POST'])
 def admin_viewer():
-    """观看网站配置管理"""
-    if 'username' not in session:
-        return redirect(url_for('login'))
-
-    if request.method == 'POST':
-        try:
-            # 获取表单数据
-            viewer_url = request.form.get('viewer_url', '').strip()
-
-            # 验证URL格式
-            if not viewer_url:
-                return render_template('admin_viewer.html',
-                                     config={'viewer_url': viewer_url},
-                                     error='观看网站URL不能为空')
-
-            if not (viewer_url.startswith('http://') or viewer_url.startswith('https://')):
-                return render_template('admin_viewer.html',
-                                     config={'viewer_url': viewer_url},
-                                     error='URL必须以 http:// 或 https:// 开头')
-
-            # 构建配置
-            config = {
-                'viewer_url': viewer_url
-            }
-
-            # 保存配置
-            save_viewer_config(config)
-
-            return render_template('admin_viewer.html',
-                                 config=config,
-                                 success='观看网站配置已保存')
-
-        except Exception as e:
-            config = load_viewer_config()
-            return render_template('admin_viewer.html',
-                                 config=config,
-                                 error=f'保存配置失败: {str(e)}')
-
-    # GET 请求，加载当前配置
-    config = load_viewer_config()
-    return render_template('admin_viewer.html', config=config)
+    return _redirect_to_dashboard()
 
 @app.route('/admin/calibration', methods=['GET', 'POST'])
 def admin_calibration():
-    """自动校准配置管理"""
-    if 'username' not in session:
-        return redirect(url_for('login'))
-
-    from database import get_calibration_config, update_calibration_config, get_calibration_stats
-
-    if request.method == 'POST':
-        try:
-            # 获取表单数据
-            config = {
-                'enabled': 1 if request.form.get('enabled') == 'on' else 0,
-                'filter_mode': request.form.get('filter_mode', 'empty_only'),
-                'first_delay': int(request.form.get('first_delay', 600)),
-                'retry_delay_1': int(request.form.get('retry_delay_1', 3600)),
-                'retry_delay_2': int(request.form.get('retry_delay_2', 14400)),
-                'retry_delay_3': int(request.form.get('retry_delay_3', 28800)),
-                'max_retries': int(request.form.get('max_retries', 3)),
-                'concurrent_limit': int(request.form.get('concurrent_limit', 5)),
-                'timeout_per_magnet': int(request.form.get('timeout_per_magnet', 30)),
-                'batch_timeout': int(request.form.get('batch_timeout', 300))
-            }
-
-            # 保存配置
-            update_calibration_config(config)
-
-            # 重新加载校准管理器配置
-            from bot.services.calibration_manager import get_calibration_manager
-            manager = get_calibration_manager()
-            manager.reload_config()
-
-            # 获取统计信息
-            stats = get_calibration_stats()
-
-            return render_template('admin_calibration.html',
-                                 config=config,
-                                 stats=stats,
-                                 success='自动校准配置已保存')
-
-        except Exception as e:
-            config = get_calibration_config()
-            stats = get_calibration_stats()
-            return render_template('admin_calibration.html',
-                                 config=config,
-                                 stats=stats,
-                                 error=f'保存配置失败: {str(e)}')
-
-    # GET 请求，加载当前配置
-    config = get_calibration_config()
-    stats = get_calibration_stats()
-    return render_template('admin_calibration.html', config=config, stats=stats)
+    return _redirect_to_dashboard()
 
 @app.route('/admin/calibration/queue')
 def admin_calibration_queue():
-    """校准任务队列查看"""
-    if 'username' not in session:
-        return redirect(url_for('login'))
-
-    from database import get_all_calibration_tasks, get_calibration_stats
-
-    # 获取过滤参数
-    status_filter = request.args.get('status', '')
-    page = int(request.args.get('page', 1))
-    per_page = 50
-
-    # 获取任务列表
-    tasks = get_all_calibration_tasks(
-        status=status_filter if status_filter else None,
-        limit=per_page,
-        offset=(page - 1) * per_page
-    )
-
-    # 获取统计信息
-    stats = get_calibration_stats()
-
-    return render_template('admin_calibration_queue.html',
-                         tasks=tasks,
-                         stats=stats,
-                         status_filter=status_filter,
-                         page=page)
+    return _redirect_to_dashboard()
 
 @app.route('/api/calibration/task/<int:task_id>/retry', methods=['POST'])
 def api_retry_calibration_task(task_id):

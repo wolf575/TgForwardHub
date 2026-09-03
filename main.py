@@ -51,6 +51,8 @@ def _has_bot_credentials():
 
 def main():
     """主函数：协调所有模块启动Bot"""
+    acc = None
+
     while not _has_bot_credentials():
         logger.error(
             "Bot Token、API ID 或 API Hash 缺失。请打开 http://服务器IP:10000/setup 完成配置。"

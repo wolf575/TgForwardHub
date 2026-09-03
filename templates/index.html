@@ -219,7 +219,7 @@
             <button id="setupResetBtn" class="secondary" type="button">重新配置</button>
           </div>
 
-          <p class="muted">修改 Bot Token、API ID、API Hash 或 Session String 后，需要重启容器才会生效。</p>
+          <p class="muted">首次配置会自动启动 Bot；修改已生效的 Telegram 凭据后，重启容器会更稳妥。</p>
         </form>
 
         <div class="list-card setup-status-card">
@@ -236,11 +236,83 @@
         </div>
       </div>
 
-      <div class="link-grid secondary-links">
-        <a class="link-card" href="/admin/webdav">WebDAV 存储</a>
-        <a class="link-card" href="/admin/calibration">自动校准</a>
-        <a class="link-card" href="/admin">修改密码</a>
-        <a class="link-card" href="/notes">经典笔记页</a>
+      <div class="settings-card-grid">
+        <form id="passwordForm" class="form-card">
+          <div class="panel-subhead"><h2>修改密码</h2></div>
+          <div id="passwordMessage" class="message" hidden></div>
+          <label>当前密码
+            <input id="passwordCurrent" type="password" autocomplete="current-password">
+          </label>
+          <label>新密码
+            <input id="passwordNew" type="password" autocomplete="new-password">
+          </label>
+          <label>确认新密码
+            <input id="passwordConfirm" type="password" autocomplete="new-password">
+          </label>
+          <button id="passwordSaveBtn" class="primary" type="button">更新密码</button>
+        </form>
+
+        <form id="webdavForm" class="form-card">
+          <div class="panel-subhead"><h2>WebDAV 存储</h2></div>
+          <div id="webdavMessage" class="message" hidden></div>
+          <label class="check"><input id="webdavEnabled" type="checkbox"> 启用 WebDAV</label>
+          <label>WebDAV URL
+            <input id="webdavUrl" placeholder="https://dav.example.com/remote.php/dav/files/user/">
+          </label>
+          <label>用户名
+            <input id="webdavUsername">
+          </label>
+          <label>密码
+            <input id="webdavPassword" type="password">
+          </label>
+          <label>基础路径
+            <input id="webdavBasePath" value="/telegram_media">
+          </label>
+          <label class="check"><input id="webdavKeepLocal" type="checkbox"> 保留本地副本</label>
+          <button id="webdavSaveBtn" class="primary" type="button">保存 WebDAV 配置</button>
+        </form>
+
+        <form id="calibrationForm" class="form-card">
+          <div class="panel-subhead"><h2>自动校准</h2></div>
+          <div id="calibrationMessage" class="message" hidden></div>
+          <div class="stat-grid two">
+            <div><span>总任务</span><strong id="calibrationTotal">-</strong></div>
+            <div><span>待处理</span><strong id="calibrationPending">-</strong></div>
+          </div>
+          <label class="check"><input id="calibrationEnabled" type="checkbox"> 启用自动校准</label>
+          <label>过滤模式
+            <select id="calibrationFilterMode">
+              <option value="empty_only">仅空文件名</option>
+              <option value="all">全部校准</option>
+            </select>
+          </label>
+          <div class="field-row">
+            <label>首次延迟（秒）<input id="calibrationFirstDelay" type="number" min="0"></label>
+            <label>最大重试次数<input id="calibrationMaxRetries" type="number" min="0"></label>
+          </div>
+          <div class="field-row">
+            <label>并发数<input id="calibrationConcurrent" type="number" min="1"></label>
+            <label>单磁力超时（秒）<input id="calibrationMagnetTimeout" type="number" min="1"></label>
+          </div>
+          <div class="field-row">
+            <label>批次超时（秒）<input id="calibrationBatchTimeout" type="number" min="1"></label>
+            <label>首次重试延迟（秒）<input id="calibrationRetry1" type="number" min="0"></label>
+          </div>
+          <div class="field-row">
+            <label>第二次重试延迟（秒）<input id="calibrationRetry2" type="number" min="0"></label>
+            <label>第三次重试延迟（秒）<input id="calibrationRetry3" type="number" min="0"></label>
+          </div>
+          <button id="calibrationSaveBtn" class="primary" type="button">保存校准配置</button>
+        </form>
+
+        <form id="viewerForm" class="form-card">
+          <div class="panel-subhead"><h2>观看网站</h2></div>
+          <div id="viewerMessage" class="message" hidden></div>
+          <label>观看网站 URL
+            <input id="viewerUrl" placeholder="https://example.com/watch?dn=">
+          </label>
+          <button id="viewerSaveBtn" class="primary" type="button">保存观看网站</button>
+        </form>
       </div>
     </section>
   </main>

@@ -7,17 +7,31 @@ function setMessage(id, text) {
 }
 
 async function apiFetch(url, options = {}) {
+  const { timeout, ...fetchOptions } = options;
+  const requestTimeout = timeout || 90000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), requestTimeout);
   const headers = options.body ? { "Content-Type": "application/json" } : {};
-  const res = await fetch(url, { ...options, headers });
-  if (!res.ok) {
-    let message = `HTTP ${res.status}`;
-    try {
-      const data = await res.json();
-      message = data.error || message;
-    } catch (_) {}
-    throw new Error(message);
+
+  try {
+    const res = await fetch(url, { ...fetchOptions, headers, signal: controller.signal });
+    if (!res.ok) {
+      let message = `HTTP ${res.status}`;
+      try {
+        const data = await res.json();
+        message = data.error || message;
+      } catch (_) {}
+      throw new Error(message);
+    }
+    return res.json();
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error(`请求超时（${Math.round(requestTimeout / 1000)} 秒），请检查服务器网络和 Telegram 连通性`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
-  return res.json();
 }
 
 let setupState = {
@@ -206,6 +220,131 @@ async function submitSetupPassword() {
     if (error.message.includes("登录流程不存在")) {
       loadSetupState();
     }
+  }
+}
+
+async function savePassword() {
+  const currentPassword = $("passwordCurrent").value;
+  const newPassword = $("passwordNew").value;
+  const confirmPassword = $("passwordConfirm").value;
+  if (!currentPassword || !newPassword || !confirmPassword) {
+    setMessage("passwordMessage", "请完整填写当前密码、新密码和确认密码");
+    return;
+  }
+
+  try {
+    const result = await apiFetch("/api/admin/password", {
+      method: "POST",
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword, confirm_password: confirmPassword }),
+    });
+    $("passwordCurrent").value = "";
+    $("passwordNew").value = "";
+    $("passwordConfirm").value = "";
+    setMessage("passwordMessage", result.message || "密码更新成功");
+  } catch (error) {
+    setMessage("passwordMessage", error.message);
+  }
+}
+
+async function loadWebdavConfig() {
+  try {
+    const config = await apiFetch("/api/admin/webdav");
+    $("webdavEnabled").checked = !!config.enabled;
+    $("webdavUrl").value = config.url || "";
+    $("webdavUsername").value = config.username || "";
+    $("webdavPassword").value = config.password || "";
+    $("webdavBasePath").value = config.base_path || "/telegram_media";
+    $("webdavKeepLocal").checked = !!config.keep_local_copy;
+  } catch (error) {
+    setMessage("webdavMessage", error.message);
+  }
+}
+
+async function saveWebdavConfig() {
+  try {
+    const result = await apiFetch("/api/admin/webdav", {
+      method: "POST",
+      body: JSON.stringify({
+        enabled: $("webdavEnabled").checked,
+        url: $("webdavUrl").value.trim(),
+        username: $("webdavUsername").value.trim(),
+        password: $("webdavPassword").value,
+        base_path: $("webdavBasePath").value.trim(),
+        keep_local_copy: $("webdavKeepLocal").checked,
+      }),
+    });
+    setMessage("webdavMessage", result.message || "WebDAV 配置已保存");
+  } catch (error) {
+    setMessage("webdavMessage", error.message);
+  }
+}
+
+async function loadCalibrationConfig() {
+  try {
+    const data = await apiFetch("/api/admin/calibration");
+    const config = data.config || {};
+    $("calibrationEnabled").checked = !!config.enabled;
+    $("calibrationFilterMode").value = config.filter_mode || "empty_only";
+    $("calibrationFirstDelay").value = config.first_delay ?? 600;
+    $("calibrationMaxRetries").value = config.max_retries ?? 3;
+    $("calibrationConcurrent").value = config.concurrent_limit ?? 5;
+    $("calibrationMagnetTimeout").value = config.timeout_per_magnet ?? 30;
+    $("calibrationBatchTimeout").value = config.batch_timeout ?? 300;
+    $("calibrationRetry1").value = config.retry_delay_1 ?? 3600;
+    $("calibrationRetry2").value = config.retry_delay_2 ?? 14400;
+    $("calibrationRetry3").value = config.retry_delay_3 ?? 28800;
+    const stats = data.stats || {};
+    $("calibrationTotal").textContent = stats.total ?? 0;
+    $("calibrationPending").textContent = stats.ready_to_process ?? 0;
+  } catch (error) {
+    setMessage("calibrationMessage", error.message);
+  }
+}
+
+async function saveCalibrationConfig() {
+  try {
+    const result = await apiFetch("/api/admin/calibration", {
+      method: "POST",
+      body: JSON.stringify({
+        enabled: $("calibrationEnabled").checked,
+        filter_mode: $("calibrationFilterMode").value,
+        first_delay: $("calibrationFirstDelay").value,
+        retry_delay_1: $("calibrationRetry1").value,
+        retry_delay_2: $("calibrationRetry2").value,
+        retry_delay_3: $("calibrationRetry3").value,
+        max_retries: $("calibrationMaxRetries").value,
+        concurrent_limit: $("calibrationConcurrent").value,
+        timeout_per_magnet: $("calibrationMagnetTimeout").value,
+        batch_timeout: $("calibrationBatchTimeout").value,
+      }),
+    });
+    const stats = result.stats || {};
+    $("calibrationTotal").textContent = stats.total ?? 0;
+    $("calibrationPending").textContent = stats.ready_to_process ?? 0;
+    setMessage("calibrationMessage", result.message || "自动校准配置已保存");
+  } catch (error) {
+    setMessage("calibrationMessage", error.message);
+  }
+}
+
+async function loadViewerConfig() {
+  try {
+    const config = await apiFetch("/api/admin/viewer");
+    $("viewerUrl").value = config.viewer_url || "";
+  } catch (error) {
+    setMessage("viewerMessage", error.message);
+  }
+}
+
+async function saveViewerConfig() {
+  try {
+    const result = await apiFetch("/api/admin/viewer", {
+      method: "POST",
+      body: JSON.stringify({ viewer_url: $("viewerUrl").value.trim() }),
+    });
+    setMessage("viewerMessage", result.message || "观看网站配置已保存");
+  } catch (error) {
+    setMessage("viewerMessage", error.message);
   }
 }
 
@@ -520,10 +659,18 @@ document.addEventListener("DOMContentLoaded", () => {
   $("setupCodeBtn").addEventListener("click", submitSetupCode);
   $("setupPasswordBtn").addEventListener("click", submitSetupPassword);
   $("setupResetBtn").addEventListener("click", loadSetupState);
+  $("passwordSaveBtn").addEventListener("click", savePassword);
+  $("webdavSaveBtn").addEventListener("click", saveWebdavConfig);
+  $("calibrationSaveBtn").addEventListener("click", saveCalibrationConfig);
+  $("viewerSaveBtn").addEventListener("click", saveViewerConfig);
 
   loadStatus();
   loadSetupState();
+  loadWebdavConfig();
+  loadCalibrationConfig();
+  loadViewerConfig();
   loadHistory();
   loadWatchConfig();
   loadNotes();
+  setInterval(loadStatus, 3000);
 });

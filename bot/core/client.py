@@ -23,9 +23,14 @@ def initialize_clients():
     DATA = load_config()
 
     # 获取配置值
-    bot_token = getenv("TOKEN", DATA)
-    api_hash = getenv("HASH", DATA)
-    api_id = getenv("ID", DATA)
+    bot_token = (getenv("TOKEN", DATA) or "").strip()
+    api_hash = (getenv("HASH", DATA) or "").strip()
+    api_id_raw = (getenv("ID", DATA) or "").strip()
+
+    try:
+        api_id = int(api_id_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("API ID 必须是纯数字") from exc
 
     # 创建Bot客户端
     logger.info("🤖 正在初始化Bot客户端...")

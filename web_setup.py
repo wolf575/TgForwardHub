@@ -175,6 +175,15 @@ def _mask_session(session_string: str) -> str:
     return session_string[:4] + "..." + session_string[-4:]
 
 
+def _request_client_restart() -> None:
+    """Ask the running bot/user clients to stop so the background loop reloads config."""
+    try:
+        from bot.handlers.instances import stop_and_clear_instances
+        stop_and_clear_instances()
+    except Exception:
+        pass
+
+
 def _cleanup_state(setup_id: str) -> None:
     with _setup_lock:
         state = _setup_states.pop(setup_id, None)
@@ -353,6 +362,7 @@ def submit_code(setup_id: str, code: str) -> Dict[str, Any]:
         session_string=session_string,
         preserve_existing_session=False,
     )
+    _request_client_restart()
     return {
         "stage": "done",
         "session_string": session_string,
@@ -411,6 +421,7 @@ def submit_password(setup_id: str, password: str) -> Dict[str, Any]:
         session_string=session_string,
         preserve_existing_session=False,
     )
+    _request_client_restart()
     return {
         "stage": "done",
         "session_string": session_string,

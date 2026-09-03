@@ -35,7 +35,7 @@ TG Forward Hub 是一个把「网页端批量转发」和「Telegram 自动监�
 ### 网页端
 
 - 统一 Flask 页面：批量转发、实时监控、记录笔记、系统设置。
-- 初始配置已嵌入统一设置页，不再跳转到旧项目页面。
+- Telegram 初始配置、修改密码、WebDAV、自动校准和观看网站配置全部嵌入统一设置页，不再跳转到旧项目页面。
 - 设置页会显示网页端、Bot 和用户客户端状态；网页与 Bot 共享配置和数据库，可同时操作。
 - 默认管理员账号：`admin` / `admin`，首次登录后建议在管理页面修改密码。
 - 内置 Telegram 配置向导，可填写 Bot Token、API ID、API Hash，并通过手机号验证码和两步验证生成 String Session。
@@ -135,7 +135,7 @@ FLASK_SECRET_KEY=replace-with-a-long-random-string
 
 1. 先用 `docker run` 把容器跑起来。
 2. 打开 Web 页面，登录 `admin` / `admin`。
-3. 进入「设置」页，直接在统一表单中填写 Bot Token、API ID、API Hash，并生成 Session String。
+3. 进入「设置」页，在统一表单中填写 Bot Token、API ID、API Hash，并生成 Session String。
 4. 配置会持久化到 `/app/data/config/config.json`，重启容器不会丢失。
 
 你不需要提前创建 `.env` 文件。
@@ -228,7 +228,7 @@ docker run -d `
 
 1. 打开 `http://服务器IP:10000`。
 2. 使用 `admin` / `admin` 登录。
-3. 进入「设置」标签，直接在设置页填写 Bot Token、API ID、API Hash。
+3. 进入「设置」标签，在设置页填写 Bot Token、API ID、API Hash。
 4. 点击「发送验证码并生成 Session String」，输入 Telegram 手机号。
 5. 输入 Telegram 收到的验证码；如账号开启两步验证，再输入两步验证密码。
 6. 配置完成后，后台 Bot 和用户客户端会自动启动。
