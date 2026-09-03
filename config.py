@@ -25,6 +25,7 @@ os.makedirs(MEDIA_DIR, exist_ok=True)
 
 # Global state
 _monitored_sources: Set[str] = set()
+_reload_attempted: bool = False
 
 
 def load_config() -> Dict[str, Any]:
@@ -105,8 +106,9 @@ def build_monitored_sources() -> Set[str]:
 
 def reload_monitored_sources():
     """Reload the monitored sources set (call after config changes)"""
-    global _monitored_sources
+    global _monitored_sources, _reload_attempted
     _monitored_sources = build_monitored_sources()
+    _reload_attempted = True
     logger.info(f"🔄 监控源已更新: {_monitored_sources if _monitored_sources else '无'}")
 
 
@@ -114,13 +116,15 @@ def get_monitored_sources() -> Set[str]:
     """Get the current set of monitored sources
 
     Note: This function now returns the pre-loaded set instead of lazy loading.
-    The set is initialized at startup by reload_monitored_sources().
-    If the set is empty, it will attempt to reload once.
+    If the set is empty, it will attempt to reload once and then cache that
+    result so repeated status polling does not spam the logs or re-read the
+    watch config file on every request.
     """
-    global _monitored_sources
+    global _monitored_sources, _reload_attempted
 
-    # 如果集合为空，尝试重新加载一次（懒加载机制）
-    if not _monitored_sources:
+    # 如果集合为空且尚未尝试过，则重新加载一次（懒加载机制）
+    if not _monitored_sources and not _reload_attempted:
+        _reload_attempted = True
         logger.warning("⚠️ 监控源集合为空，尝试重新加载...")
         reload_monitored_sources()
 
