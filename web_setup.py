@@ -206,6 +206,34 @@ def _remove_state(setup_id: str) -> Optional[Dict[str, Any]]:
         return _setup_states.pop(setup_id, None)
 
 
+def _set_state(setup_id: str, **fields: Any) -> None:
+    """Merge fields into an existing setup state without removing it."""
+    with _setup_lock:
+        state = _setup_states.get(setup_id)
+        if state:
+            state.update(fields)
+
+
+def get_setup_status(setup_id: str) -> Dict[str, Any]:
+    """Return a JSON-safe snapshot of an auth flow for frontend polling."""
+    with _setup_lock:
+        state = _setup_states.get(setup_id)
+
+    if not state:
+        return {"setup_id": setup_id, "stage": "idle", "status": "missing"}
+
+    return {
+        "setup_id": setup_id,
+        "stage": state.get("stage"),
+        "status": state.get("status"),
+        "phone_number": state.get("phone_number"),
+        "message": state.get("message"),
+        "error": state.get("error"),
+        "session_string": state.get("session_string"),
+        "saved": state.get("saved"),
+    }
+
+
 def _cleanup_state(state: Optional[Dict[str, Any]]) -> None:
     """Disconnect and remove the temporary session for a finished auth flow."""
     if not state:
@@ -344,45 +372,63 @@ def start_session_auth(
     setup_id = uuid.uuid4().hex
     session_name = f"web_auth_{setup_id}"
 
-    try:
-        result = _run_on_auth_loop(
-            _connect_and_send_code(
-                session_name,
-                api_id_int,
-                api_hash,
-                phone_number,
-            )
-        )
-    except Exception as exc:
-        _remove_session_files(session_name)
-        return {"error": _friendly_pyrogram_error(exc)}
-
-    client = result["client"]
-    phone_code_hash = result.get("phone_code_hash")
-
-    if not phone_code_hash:
-        try:
-            _run_on_auth_loop(_disconnect_client(client), timeout=10)
-        except Exception:
-            pass
-        _remove_session_files(session_name)
-        return {"error": "Telegram 未返回验证码哈希，请重试"}
-
     with _setup_lock:
         _setup_states[setup_id] = {
             "session_name": session_name,
             "phone_number": phone_number,
-            "phone_code_hash": phone_code_hash,
             "token": token,
             "api_id": str(api_id_int),
             "api_hash": api_hash,
             "stage": "code",
-            "client": client,
+            "status": "pending",
+            "client": None,
+            "phone_code_hash": None,
+            "message": None,
+            "error": None,
+            "session_string": None,
+            "saved": None,
         }
+
+    def _worker() -> None:
+        client = None
+        try:
+            result = _run_on_auth_loop(
+                _connect_and_send_code(
+                    session_name,
+                    api_id_int,
+                    api_hash,
+                    phone_number,
+                )
+            )
+        except Exception as exc:
+            _remove_session_files(session_name)
+            _set_state(setup_id, status="error", error=_friendly_pyrogram_error(exc))
+            return
+
+        client = result["client"]
+        phone_code_hash = result.get("phone_code_hash")
+
+        if not phone_code_hash:
+            try:
+                _run_on_auth_loop(_disconnect_client(client), timeout=10)
+            except Exception:
+                pass
+            _remove_session_files(session_name)
+            _set_state(setup_id, status="error", error="Telegram 未返回验证码哈希，请重试")
+            return
+
+        _set_state(
+            setup_id,
+            status="sent",
+            client=client,
+            phone_code_hash=phone_code_hash,
+        )
+
+    threading.Thread(target=_worker, name="WebAuthWorker", daemon=True).start()
 
     return {
         "setup_id": setup_id,
-        "stage": "code",
+        "stage": "pending",
         "phone_number": phone_number,
     }
 
@@ -406,39 +452,49 @@ def submit_code(setup_id: str, code: str) -> Dict[str, Any]:
         _cleanup_state(_remove_state(setup_id))
         return {"error": "登录流程不存在或已过期，请重新开始"}
 
-    try:
-        result = _run_on_auth_loop(_sign_in_and_export(state, code))
-    except Exception as exc:
-        return {
-            "stage": "code",
-            "setup_id": setup_id,
-            "error": _friendly_pyrogram_error(exc),
-        }
+    _set_state(setup_id, status="pending", error=None, message=None)
 
-    if result.get("stage") == "password":
-        state["stage"] = "password"
-        return {
-            "stage": "password",
-            "setup_id": setup_id,
-            "message": result.get("message"),
-        }
+    def _worker() -> None:
+        try:
+            result = _run_on_auth_loop(_sign_in_and_export(state, code))
+        except Exception as exc:
+            _set_state(setup_id, status="error", error=_friendly_pyrogram_error(exc))
+            return
 
-    session_string = result.get("session_string") or ""
-    _cleanup_state(_remove_state(setup_id))
+        if result.get("stage") == "password":
+            _set_state(
+                setup_id,
+                stage="password",
+                status="ready",
+                message=result.get("message"),
+            )
+            return
 
-    saved = save_configuration(
-        state["token"],
-        state["api_id"],
-        state["api_hash"],
-        session_string=session_string,
-        preserve_existing_session=False,
-    )
-    _request_client_restart()
+        session_string = result.get("session_string") or ""
+        saved = save_configuration(
+            state["token"],
+            state["api_id"],
+            state["api_hash"],
+            session_string=session_string,
+            preserve_existing_session=False,
+        )
+        _cleanup_state(state)
+        _set_state(
+            setup_id,
+            stage="done",
+            status="done",
+            client=None,
+            session_string=session_string,
+            saved=saved,
+            message="Session String 已自动生成并写入配置",
+        )
+        _request_client_restart()
+
+    threading.Thread(target=_worker, name="WebAuthWorker", daemon=True).start()
+
     return {
-        "stage": "done",
-        "session_string": session_string,
-        "saved": saved,
-        "message": "Session String 已自动生成并写入配置",
+        "setup_id": setup_id,
+        "stage": "pending",
     }
 
 
@@ -461,31 +517,40 @@ def submit_password(setup_id: str, password: str) -> Dict[str, Any]:
         _cleanup_state(_remove_state(setup_id))
         return {"error": "登录流程不存在或已过期，请重新开始"}
 
-    try:
-        result = _run_on_auth_loop(_check_password_and_export(state, password))
-    except Exception as exc:
-        return {
-            "stage": "password",
-            "setup_id": setup_id,
-            "error": _friendly_pyrogram_error(exc),
-        }
+    _set_state(setup_id, status="pending", error=None, message=None)
 
-    session_string = result.get("session_string") or ""
-    _cleanup_state(_remove_state(setup_id))
+    def _worker() -> None:
+        try:
+            result = _run_on_auth_loop(_check_password_and_export(state, password))
+        except Exception as exc:
+            _set_state(setup_id, status="error", error=_friendly_pyrogram_error(exc))
+            return
 
-    saved = save_configuration(
-        state["token"],
-        state["api_id"],
-        state["api_hash"],
-        session_string=session_string,
-        preserve_existing_session=False,
-    )
-    _request_client_restart()
+        session_string = result.get("session_string") or ""
+        saved = save_configuration(
+            state["token"],
+            state["api_id"],
+            state["api_hash"],
+            session_string=session_string,
+            preserve_existing_session=False,
+        )
+        _cleanup_state(state)
+        _set_state(
+            setup_id,
+            stage="done",
+            status="done",
+            client=None,
+            session_string=session_string,
+            saved=saved,
+            message="Session String 已自动生成并写入配置",
+        )
+        _request_client_restart()
+
+    threading.Thread(target=_worker, name="WebAuthWorker", daemon=True).start()
+
     return {
-        "stage": "done",
-        "session_string": session_string,
-        "saved": saved,
-        "message": "Session String 已自动生成并写入配置",
+        "setup_id": setup_id,
+        "stage": "pending",
     }
 
 

@@ -7,7 +7,7 @@ from database import init_database, get_notes, get_note_count, get_sources, veri
 from config import load_webdav_config, load_viewer_config, save_viewer_config, load_watch_config, save_watch_config, reload_monitored_sources, get_monitored_sources
 from bot.storage.webdav_client import WebDAVClient, StorageManager
 from bot.handlers.instances import get_acc_instance, get_bot_instance
-from web_setup import load_visible_config, save_configuration, start_session_auth, submit_code, submit_password
+from web_setup import load_visible_config, save_configuration, start_session_auth, submit_code, submit_password, get_setup_status
 import batch_forward
 import math
 import requests
@@ -110,6 +110,18 @@ def api_setup_state():
     if 'username' not in session:
         return jsonify({'error': '未登录'}), 401
     return jsonify(load_visible_config())
+
+
+@app.route('/api/setup/status')
+def api_setup_status():
+    if 'username' not in session:
+        return jsonify({'error': '未登录'}), 401
+
+    setup_id = str(request.args.get('setup_id') or '').strip()
+    if not setup_id:
+        return jsonify({'error': 'setup_id 不能为空'}), 400
+
+    return jsonify(get_setup_status(setup_id))
 
 
 @app.route('/api/setup/save', methods=['POST'])

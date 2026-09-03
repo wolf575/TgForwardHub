@@ -38,6 +38,7 @@ let setupState = {
   stage: "idle",
   setupId: "",
   phone: "",
+  busy: false,
 };
 
 function setSetupMessage(text) {
@@ -59,6 +60,38 @@ function setSetupStage(stage) {
   $("setupStagePassword").hidden = stage !== "password";
   $("setupStageDone").hidden = stage !== "done";
   setSetupFieldEnabled(stage === "idle");
+}
+
+function setSetupBusy(busy) {
+  setupState.busy = busy;
+  ["setupSaveBtn", "setupStartBtn", "setupCodeBtn", "setupPasswordBtn"].forEach((id) => {
+    const el = $(id);
+    if (el) el.disabled = busy;
+  });
+  setSetupFieldEnabled(busy ? false : setupState.stage === "idle");
+}
+
+async function pollSetupStatus(setupId, untilStatuses) {
+  const deadline = Date.now() + 90000;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    let status;
+    try {
+      status = await apiFetch(
+        `/api/setup/status?setup_id=${encodeURIComponent(setupId)}`,
+        { timeout: 5000 }
+      );
+    } catch (_) {
+      continue;
+    }
+    if (status.status === "error" || status.status === "missing") {
+      return status;
+    }
+    if (untilStatuses.includes(status.status)) {
+      return status;
+    }
+  }
+  throw new Error("登录流程超时，请重新开始");
 }
 
 function updateSessionBadge(config) {
@@ -126,8 +159,10 @@ async function startSetup() {
     setSetupMessage("生成 Session String 需要填写 Bot Token、API ID、API Hash 和 Telegram 手机号");
     return;
   }
+  if (setupState.busy) return;
 
-  setSetupMessage("");
+  setSetupBusy(true);
+  setSetupMessage("正在请求 Telegram 发送验证码，请稍候...");
   try {
     const result = await apiFetch("/api/setup/start", {
       method: "POST",
@@ -135,12 +170,25 @@ async function startSetup() {
     });
     setupState.setupId = result.setup_id;
     setupState.phone = result.phone_number || creds.phone_number;
+
+    const status = await pollSetupStatus(result.setup_id, ["sent"]);
+    if (status.status === "error") {
+      setSetupMessage(status.error || "发送验证码失败");
+      return;
+    }
+    if (status.status === "missing") {
+      setSetupMessage("登录流程不存在或已过期，请重新开始");
+      return;
+    }
+
     $("setupCode").value = "";
     setSetupStage("code");
-    setSetupMessage(result.message || `验证码已发送到 ${setupState.phone}`);
+    setSetupMessage(`验证码已发送到 ${setupState.phone}`);
   } catch (error) {
     setSetupStage("idle");
     setSetupMessage(error.message);
+  } finally {
+    setSetupBusy(false);
   }
 }
 
@@ -154,36 +202,59 @@ async function submitSetupCode() {
     setSetupMessage("验证码不能为空");
     return;
   }
+  if (setupState.busy) return;
 
-  setSetupMessage("");
+  setSetupBusy(true);
+  setSetupMessage("正在验证并生成 Session String...");
   try {
     const result = await apiFetch("/api/setup/code", {
       method: "POST",
       body: JSON.stringify({ setup_id: setupState.setupId, code }),
     });
 
-    if (result.stage === "password") {
-      setSetupStage("password");
-      $("setupPassword").value = "";
-      setSetupMessage(result.message || "账号已开启两步验证，请输入密码");
+    if (result.error) {
+      setSetupMessage(result.error);
       return;
     }
 
-    if (result.stage === "done" || result.session_string) {
-      $("setupSession").value = result.session_string || "";
-      updateSessionBadge(result.saved || {});
+    const status = await pollSetupStatus(setupState.setupId, ["ready", "done"]);
+    if (status.status === "error") {
+      setSetupMessage(status.error || "验证码验证失败");
+      if ((status.error || "").includes("登录流程不存在")) {
+        loadSetupState();
+      }
+      return;
+    }
+    if (status.status === "missing") {
+      setSetupMessage("登录流程不存在或已过期，请重新开始");
+      loadSetupState();
+      return;
+    }
+
+    if (status.stage === "password") {
+      setSetupStage("password");
+      $("setupPassword").value = "";
+      setSetupMessage(status.message || "账号已开启两步验证，请输入密码");
+      return;
+    }
+
+    if (status.status === "done" || status.session_string) {
+      $("setupSession").value = status.session_string || "";
+      updateSessionBadge(status.saved || {});
       setSetupStage("done");
-      setSetupMessage(result.message || "Session String 已生成");
+      setSetupMessage(status.message || "Session String 已生成");
       loadStatus();
       return;
     }
 
-    setSetupMessage(result.message || "登录状态已更新");
+    setSetupMessage(status.message || "登录状态已更新");
   } catch (error) {
     setSetupMessage(error.message);
     if (error.message.includes("登录流程不存在")) {
       loadSetupState();
     }
+  } finally {
+    setSetupBusy(false);
   }
 }
 
@@ -197,29 +268,52 @@ async function submitSetupPassword() {
     setSetupMessage("两步验证密码不能为空");
     return;
   }
+  if (setupState.busy) return;
 
-  setSetupMessage("");
+  setSetupBusy(true);
+  setSetupMessage("正在完成两步验证...");
   try {
     const result = await apiFetch("/api/setup/password", {
       method: "POST",
       body: JSON.stringify({ setup_id: setupState.setupId, password }),
     });
 
-    if (result.stage === "done" || result.session_string) {
-      $("setupSession").value = result.session_string || "";
-      updateSessionBadge(result.saved || {});
+    if (result.error) {
+      setSetupMessage(result.error);
+      return;
+    }
+
+    const status = await pollSetupStatus(setupState.setupId, ["done"]);
+    if (status.status === "error") {
+      setSetupMessage(status.error || "两步验证失败");
+      if ((status.error || "").includes("登录流程不存在")) {
+        loadSetupState();
+      }
+      return;
+    }
+    if (status.status === "missing") {
+      setSetupMessage("登录流程不存在或已过期，请重新开始");
+      loadSetupState();
+      return;
+    }
+
+    if (status.status === "done" || status.session_string) {
+      $("setupSession").value = status.session_string || "";
+      updateSessionBadge(status.saved || {});
       setSetupStage("done");
-      setSetupMessage(result.message || "Session String 已生成");
+      setSetupMessage(status.message || "Session String 已生成");
       loadStatus();
       return;
     }
 
-    setSetupMessage(result.message || "登录状态已更新");
+    setSetupMessage(status.message || "登录状态已更新");
   } catch (error) {
     setSetupMessage(error.message);
     if (error.message.includes("登录流程不存在")) {
       loadSetupState();
     }
+  } finally {
+    setSetupBusy(false);
   }
 }
 
