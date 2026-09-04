@@ -364,17 +364,30 @@ def _get_bot_peer_id(bot):
     return int(me.id)
 
 
-def _copy_single_private_media(acc, destination, chatid, msg):
+def _copy_single_private_media(
+    acc,
+    destination,
+    chatid,
+    msg,
+    caption=None,
+    caption_entities=None,
+):
     """Copy one private media message with Pyrogram's cached-media path."""
+    copy_kwargs = {}
+    if caption is not None:
+        copy_kwargs["caption"] = caption
+    if caption_entities is not None:
+        copy_kwargs["caption_entities"] = caption_entities
+
     try:
-        return acc.copy_message(destination, chatid, msg.id)
+        return acc.copy_message(destination, chatid, msg.id, **copy_kwargs)
     except FileReferenceExpired as exc:
         # A newly fetched message normally carries a fresh file reference.
         # Refetching here can repair an expired reference without downloading.
         fresh = acc.get_messages(chatid, msg.id)
         if fresh is None:
             raise RuntimeError(f"无法重新获取消息 {msg.id}") from exc
-        return acc.copy_message(destination, chatid, fresh.id)
+        return acc.copy_message(destination, chatid, fresh.id, **copy_kwargs)
 
 
 def _forward_private_media_direct(bot, acc, chatid, msg):
@@ -507,19 +520,18 @@ def _download_private_media_group(
 
     Returns ``(group_messages, downloads, work_dir)``. The caller owns
     ``work_dir`` and must remove it after uploading. ``downloads`` is a list of
-    ``(message, file_path, thumbnail_path)`` tuples.
+    ``(message, file_path, thumbnail_path)`` tuples aligned with the returned
+    ``group_messages``. Messages without downloadable media are skipped so one
+    unsupported item does not abort the rest of the album.
     """
     if group_messages is None:
         group_messages = _get_private_media_group_messages(acc, chatid, msg)
     work_dir = tempfile.mkdtemp(prefix="tg_forward_album_")
     downloads = []
+    downloadable_messages = []
 
     try:
         for index, item in enumerate(group_messages):
-            payload = _get_private_media_payload(item)
-            if payload is None:
-                raise RuntimeError(f"媒体组消息 {item.id} 没有可下载的媒体")
-
             download_kwargs = {
                 "file_name": os.path.join(work_dir, ""),
             }
@@ -527,10 +539,17 @@ def _download_private_media_group(
                 download_kwargs["progress"] = progress_callback
                 download_kwargs["progress_args"] = progress_args
 
-            file_path = acc.download_media(item, **download_kwargs)
+            try:
+                file_path = acc.download_media(item, **download_kwargs)
+            except ValueError as exc:
+                if "doesn't contain any downloadable media" in str(exc):
+                    logger.debug("媒体组消息 %s 没有可下载媒体，已跳过", item.id)
+                    continue
+                raise
             if file_path is None:
                 raise RuntimeError(f"媒体组消息 {item.id} 下载失败")
 
+            payload = _get_private_media_payload(item)
             thumb = None
             if get_message_type(item) in (
                 "Document",
@@ -546,7 +565,13 @@ def _download_private_media_group(
                     index,
                 )
             downloads.append((item, file_path, thumb))
-        return group_messages, downloads, work_dir
+            downloadable_messages.append(item)
+
+        if not downloads:
+            raise RuntimeError(
+                f"媒体组消息 {group_messages[0].id} 没有可下载的媒体"
+            )
+        return downloadable_messages, downloads, work_dir
     except Exception:
         shutil.rmtree(work_dir, ignore_errors=True)
         raise

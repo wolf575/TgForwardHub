@@ -1,9 +1,12 @@
 import os
+import shutil
 import unittest
 
+from pyrogram.enums import MessageMediaType
 from pyrogram.types import InputMediaPhoto
 
 from bot.handlers.messages import (
+    _download_private_media_group,
     _forward_private_media_group_by_download,
     _get_private_media_group_messages,
     _should_forward_private_media_group,
@@ -40,6 +43,14 @@ class _VideoNote:
         self.length = 512
 
 
+class _Contact:
+    def __init__(self):
+        self.phone_number = "123"
+        self.first_name = "Contact"
+        self.last_name = None
+        self.vcard = None
+
+
 class _Message:
     def __init__(
         self,
@@ -49,6 +60,7 @@ class _Message:
         video=None,
         document=None,
         video_note=None,
+        contact=None,
         caption=None,
         text=None,
     ):
@@ -59,6 +71,7 @@ class _Message:
         self.video = video
         self.document = document
         self.video_note = video_note
+        self.contact = contact
         self.caption = caption
         self.text = text
         self.caption_entities = None
@@ -91,6 +104,10 @@ class _Acc:
         )
         if "thumb_" in file_name:
             return file_name
+        if getattr(item, "contact", None) is not None:
+            raise ValueError(
+                "This message doesn't contain any downloadable media"
+            )
         return os.path.join(file_name, f"item_{item.id}.jpg")
 
 
@@ -233,6 +250,24 @@ class PrivateMediaGroupFallbackTests(unittest.TestCase):
             if call[0] in ("send_video_note", "send_document")
         ]
         self.assertEqual(sent_kinds, ["send_video_note", "send_document"])
+
+    def test_download_skips_non_downloadable_group_items(self):
+        contact = _Message(40, "album", contact=_Contact())
+        contact.media = MessageMediaType.CONTACT
+        photo = _Message(41, "album", photo=_Photo("p8"))
+        acc = _Acc([contact, photo])
+
+        group_messages, downloads, work_dir = _download_private_media_group(
+            acc,
+            -1001234567890,
+            contact,
+            group_messages=[contact, photo],
+        )
+        try:
+            self.assertEqual([item.id for item in group_messages], [41])
+            self.assertEqual([item.id for item, _path, _thumb in downloads], [41])
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

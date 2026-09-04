@@ -39,7 +39,16 @@ apply_pyrogram_peer_id_compat()
 
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 HISTORY_DB = os.path.join(DATA_DIR, "history.db")
-MEDIA_GROUP_REUPLOAD_TYPES = {"Animation", "Sticker", "Voice", "VideoNote"}
+DOWNLOADABLE_MEDIA_TYPES = {
+    "Audio",
+    "Document",
+    "Photo",
+    "Video",
+    "Animation",
+    "Sticker",
+    "Voice",
+    "VideoNote",
+}
 
 TASKS = {}
 TASKS_LOCK = threading.Lock()
@@ -375,6 +384,48 @@ def _worker_execute(worker, name, operation):
     return worker._execute_with_flood_retry(name, operation)
 
 
+def _copy_batch_media_group_items(
+    worker,
+    acc,
+    source_id,
+    dest_id,
+    group_messages,
+    cleaned_text,
+    text_changed,
+    preserve_source,
+):
+    """Copy a media group item by item through Telegram's cached-media path."""
+    errors = []
+    for index, item in enumerate(group_messages):
+        if preserve_source and not text_changed:
+            operation_name = f"逐条转发媒体组 {index + 1}/{len(group_messages)}"
+
+            def forward_item(item=item):
+                return acc.forward_messages(dest_id, source_id, item.id)
+
+            operation = forward_item
+        else:
+            caption = cleaned_text if text_changed and index == 0 else None
+            operation_name = f"逐条复制媒体组 {index + 1}/{len(group_messages)}"
+
+            def copy_item(item=item, caption=caption):
+                return _copy_single_private_media(
+                    acc,
+                    dest_id,
+                    source_id,
+                    item,
+                    caption=caption,
+                )
+
+            operation = copy_item
+
+        try:
+            _worker_execute(worker, operation_name, operation)
+        except Exception as exc:
+            errors.append((item, exc))
+    return errors
+
+
 def _reupload_batch_media_group(
     worker,
     acc,
@@ -419,21 +470,6 @@ def _forward_batch_media_group(
     preserve_source,
 ):
     anchor = group_messages[0]
-    if any(
-        get_message_type(item) in MEDIA_GROUP_REUPLOAD_TYPES
-        for item in group_messages
-    ):
-        count = _reupload_batch_media_group(
-            worker,
-            acc,
-            source_id,
-            dest_id,
-            group_messages,
-            cleaned_text,
-            text_changed,
-        )
-        return count, True
-
     try:
         if text_changed:
             _worker_execute(
@@ -463,8 +499,8 @@ def _forward_batch_media_group(
                 lambda: acc.copy_media_group(dest_id, source_id, anchor.id),
             )
         return len(group_messages), False
-    except (ChatForwardsRestricted, FileReferenceExpired, ValueError):
-        count = _reupload_batch_media_group(
+    except Exception:
+        errors = _copy_batch_media_group_items(
             worker,
             acc,
             source_id,
@@ -472,8 +508,56 @@ def _forward_batch_media_group(
             group_messages,
             cleaned_text,
             text_changed,
+            preserve_source,
         )
-        return count, True
+        if not errors:
+            return len(group_messages), False
+
+        failed_items = [
+            item
+            for item, _exc in errors
+            if get_message_type(item) in DOWNLOADABLE_MEDIA_TYPES
+        ]
+        non_downloadable_errors = [
+            f"{item.id}: {type(exc).__name__}: {exc}"
+            for item, exc in errors
+            if get_message_type(item) not in DOWNLOADABLE_MEDIA_TYPES
+        ]
+
+        reuploaded = 0
+        if failed_items:
+            failed_first = failed_items[0]
+            subset_text_changed = (
+                text_changed and failed_first.id == anchor.id
+            )
+            if len(failed_items) == 1:
+                reuploaded = _reupload_batch_single_media(
+                    worker,
+                    acc,
+                    dest_id,
+                    failed_first,
+                    cleaned_text,
+                    subset_text_changed,
+                )
+            else:
+                reuploaded = _reupload_batch_media_group(
+                    worker,
+                    acc,
+                    source_id,
+                    dest_id,
+                    failed_items,
+                    cleaned_text,
+                    subset_text_changed,
+                )
+
+        if non_downloadable_errors:
+            raise RuntimeError(
+                "媒体组包含无法缓存复制且不可下载的消息: "
+                + "; ".join(non_downloadable_errors)
+            )
+
+        sent = len(group_messages) - len(errors) + reuploaded
+        return sent, True
 
 
 def _reupload_batch_single_media(

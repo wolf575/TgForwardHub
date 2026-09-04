@@ -2,10 +2,12 @@ import os
 import re
 import unittest
 
+from pyrogram.enums import MessageMediaType
 from pyrogram.errors import ChatForwardsRestricted
 from pyrogram.types import InputMediaPhoto
 
 import batch_forward
+from bot.utils.helpers import get_message_type
 
 
 class _Photo:
@@ -58,23 +60,37 @@ class _Worker:
 
 
 class _RestrictedAcc:
-    def __init__(self, media_group=None, album_error=None, copy_error=None):
+    def __init__(
+        self,
+        media_group=None,
+        album_error=None,
+        copy_error=None,
+        item_copy_error="same-as-copy",
+    ):
         self.media_group = media_group or []
         self.album_error = album_error
         self.copy_error = copy_error or ChatForwardsRestricted(
             400,
             "CHAT_FORWARDS_RESTRICTED",
         )
+        self.item_copy_error = (
+            self.copy_error
+            if item_copy_error == "same-as-copy"
+            else item_copy_error
+        )
         self.downloaded = []
         self.media_groups = []
         self.sent = []
+        self.copied = []
         self.get_media_group_calls = []
 
     def copy_message(self, *args, **kwargs):
-        raise self.copy_error
+        self.copied.append((args, kwargs))
+        if self.item_copy_error:
+            raise self.item_copy_error
 
     def copy_media_group(self, *args, **kwargs):
-        raise self.copy_error
+        raise self.album_error or self.copy_error
 
     def get_media_group(self, chat_id, message_id):
         self.get_media_group_calls.append((chat_id, message_id))
@@ -172,6 +188,74 @@ class BatchRestrictedForwardTests(unittest.TestCase):
         )
         self.assertEqual(len(acc.media_groups), 1)
         self.assertEqual(len(acc.media_groups[0]), 2)
+
+    def test_unsupported_media_group_uses_cached_item_copies_not_downloads(self):
+        first = _Message(
+            80,
+            "album",
+            animation=_Animation("a2"),
+            caption="GIF 说明",
+        )
+        second = _Message(81, "album", photo=_Photo("p8"))
+        acc = _RestrictedAcc(
+            media_group=[first, second],
+            album_error=ValueError("Message with this type can't be copied."),
+            item_copy_error=None,
+        )
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            -1001234567890,
+            -1009876543210,
+            [first, second],
+            "GIF 说明",
+            False,
+            False,
+        )
+
+        self.assertEqual((count, used_fallback), (2, False))
+        self.assertEqual(acc.downloaded, [])
+        self.assertEqual(
+            [call[0][2] for call in acc.copied],
+            [80, 81],
+        )
+        self.assertNotIn("caption", acc.copied[0][1])
+        self.assertNotIn("caption", acc.copied[1][1])
+
+    def test_modified_caption_is_kept_when_group_copy_falls_back(self):
+        first = _Message(
+            90,
+            "album",
+            animation=_Animation("a3"),
+            caption="原始说明",
+        )
+        second = _Message(91, "album", photo=_Photo("p9"))
+        acc = _RestrictedAcc(
+            media_group=[first, second],
+            album_error=ValueError("Message with this type can't be copied."),
+            item_copy_error=None,
+        )
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            -1001234567890,
+            -1009876543210,
+            [first, second],
+            "清理后的说明",
+            True,
+            False,
+        )
+
+        self.assertEqual((count, used_fallback), (2, False))
+        self.assertEqual(acc.copied[0][1]["caption"], "清理后的说明")
+        self.assertNotIn("caption", acc.copied[1][1])
+
+    def test_media_enum_names_are_recognized(self):
+        message = _Message(95, animation=_Animation("a4"))
+        message.media = MessageMediaType.ANIMATION
+        self.assertEqual(get_message_type(message), "Animation")
 
     def test_video_note_album_skips_native_copy_and_reuploads_every_item(self):
         first = _Message(
