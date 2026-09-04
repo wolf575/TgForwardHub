@@ -6,6 +6,10 @@ import os
 from pyrogram import Client
 from bot.utils.logger import get_logger
 from config import load_config, getenv
+from pyrogram_compat import apply_pyrogram_peer_id_compat
+
+
+apply_pyrogram_peer_id_compat()
 
 logger = get_logger(__name__)
 
@@ -72,31 +76,11 @@ def initialize_clients():
         # 启动User客户端
         acc.start()
 
-        # 强制导出并重新加载session，确保文件被正确创建
+        # Pyrogram always uses MemoryStorage when a session_string is supplied,
+        # so no .session file is expected here. The client still caches resolved
+        # peers for the lifetime of the process.
         if not os.path.exists(f"{session_file}.session"):
-            logger.warning("⚠️ Session文件未自动创建，尝试强制导出...")
-            try:
-                # 导出当前session string
-                current_ss = acc.export_session_string()
-                # 停止当前客户端
-                acc.stop()
-                # 使用导出的session string重新创建客户端（这次应该会创建文件）
-                acc = Client(
-                    session_file,
-                    api_id=api_id,
-                    api_hash=api_hash,
-                    session_string=current_ss,
-                    in_memory=False
-                )
-                # 重新启动
-                acc.start()
-
-                if os.path.exists(f"{session_file}.session"):
-                    logger.info("✅ Session文件强制创建成功")
-                else:
-                    logger.error("❌ Session文件仍然无法创建，这可能影响消息接收")
-            except Exception as e:
-                logger.error(f"❌ 强制创建Session文件失败: {e}")
+            logger.info("ℹ️ Session String 模式使用内存会话；Peer 缓存将在本次运行期间保留")
         else:
             logger.info("✅ Session文件已存在")
 

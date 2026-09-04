@@ -17,6 +17,10 @@ from zoneinfo import ZoneInfo
 from database import DATA_DIR
 from bot.handlers.instances import get_acc_instance
 from bot.workers.message_worker import MessageWorker
+from pyrogram_compat import apply_pyrogram_peer_id_compat, normalize_private_channel_ref
+
+
+apply_pyrogram_peer_id_compat()
 
 
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
@@ -208,7 +212,7 @@ def _parse_timestamp(value):
 
 
 def _resolve_chat(client, ref):
-    ref = str(ref or "").strip()
+    ref = normalize_private_channel_ref(ref)
     if not ref:
         raise ValueError("缺少聊天 ID")
     if ref.lower() == "me":

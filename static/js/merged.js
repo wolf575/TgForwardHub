@@ -788,7 +788,7 @@ function fillFromTelegramLink(input) {
   if (!match) return false;
 
   if (match[1]) {
-    $("sourceId").value = match[1];
+    $("sourceId").value = `-100${match[1]}`;
     input.value = match[2];
   } else if (match[3]) {
     $("sourceId").value = `@${match[3]}`;
