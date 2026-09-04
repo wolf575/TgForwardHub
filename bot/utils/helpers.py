@@ -25,6 +25,12 @@ def get_message_type(msg: pyrogram.types.messages_and_media.message.Message):
         pass
 
     try:
+        msg.video_note.file_id
+        return "VideoNote"
+    except:
+        pass
+
+    try:
         msg.sticker.file_id
         return "Sticker"
     except:

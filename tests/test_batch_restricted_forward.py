@@ -20,6 +20,14 @@ class _Animation:
         self.thumbs = []
 
 
+class _VideoNote:
+    def __init__(self, file_id):
+        self.file_id = file_id
+        self.thumbs = []
+        self.duration = 4
+        self.length = 512
+
+
 class _Message:
     def __init__(
         self,
@@ -27,6 +35,7 @@ class _Message:
         media_group_id=None,
         photo=None,
         animation=None,
+        video_note=None,
         text=None,
         caption=None,
     ):
@@ -35,6 +44,7 @@ class _Message:
         self.media_group_id = media_group_id
         self.photo = photo
         self.animation = animation
+        self.video_note = video_note
         self.text = text
         self.caption = caption
         self.caption_entities = None
@@ -86,6 +96,9 @@ class _RestrictedAcc:
 
     def send_photo(self, chat_id, file_path, **kwargs):
         self.sent.append(("send_photo", file_path, kwargs))
+
+    def send_video_note(self, *args, **kwargs):
+        self.sent.append(("send_video_note", args, kwargs))
 
     def send_video(self, *args, **kwargs):
         self.sent.append(("send_video", args, kwargs))
@@ -159,6 +172,59 @@ class BatchRestrictedForwardTests(unittest.TestCase):
         )
         self.assertEqual(len(acc.media_groups), 1)
         self.assertEqual(len(acc.media_groups[0]), 2)
+
+    def test_video_note_album_skips_native_copy_and_reuploads_every_item(self):
+        first = _Message(
+            70,
+            "album",
+            video_note=_VideoNote("vn1"),
+            caption="视频动态说明",
+        )
+        second = _Message(71, "album", photo=_Photo("p7"))
+        acc = _RestrictedAcc(
+            media_group=[first, second],
+            copy_error=ValueError("Message with this type can't be copied."),
+        )
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            -1001234567890,
+            -1009876543210,
+            [first, second],
+            None,
+            False,
+            False,
+        )
+
+        self.assertEqual((count, used_fallback), (2, True))
+        self.assertEqual(acc.get_media_group_calls, [])
+        self.assertEqual(
+            [os.path.basename(path) for path in acc.downloaded],
+            ["item_70.jpg", "item_71.jpg"],
+        )
+        self.assertEqual(len(acc.media_groups), 1)
+        self.assertEqual(len(acc.media_groups[0]), 2)
+
+    def test_single_video_note_uploads_with_original_format_after_copy_failure(self):
+        message = _Message(72, video_note=_VideoNote("vn2"))
+        acc = _RestrictedAcc()
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            -1001234567890,
+            -1009876543210,
+            [message],
+            None,
+            False,
+            False,
+        )
+
+        self.assertEqual((count, used_fallback), (1, True))
+        self.assertEqual(len(acc.sent), 1)
+        self.assertEqual(acc.sent[0][0], "send_video_note")
+        self.assertTrue(acc.sent[0][1][1].endswith("item_72.jpg"))
 
     def test_restricted_single_media_uses_only_user_client_upload(self):
         message = _Message(30, photo=_Photo("p3"), caption="单图说明")

@@ -39,6 +39,7 @@ apply_pyrogram_peer_id_compat()
 
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 HISTORY_DB = os.path.join(DATA_DIR, "history.db")
+MEDIA_GROUP_REUPLOAD_TYPES = {"Animation", "Sticker", "Voice", "VideoNote"}
 
 TASKS = {}
 TASKS_LOCK = threading.Lock()
@@ -418,6 +419,21 @@ def _forward_batch_media_group(
     preserve_source,
 ):
     anchor = group_messages[0]
+    if any(
+        get_message_type(item) in MEDIA_GROUP_REUPLOAD_TYPES
+        for item in group_messages
+    ):
+        count = _reupload_batch_media_group(
+            worker,
+            acc,
+            source_id,
+            dest_id,
+            group_messages,
+            cleaned_text,
+            text_changed,
+        )
+        return count, True
+
     try:
         if text_changed:
             _worker_execute(

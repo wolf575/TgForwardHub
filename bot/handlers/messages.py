@@ -537,6 +537,7 @@ def _download_private_media_group(
                 "Video",
                 "Audio",
                 "Animation",
+                "VideoNote",
             ):
                 thumb = _download_private_media_thumbnail(
                     acc,
@@ -582,7 +583,8 @@ def _get_private_media_payload(item):
     msg_type = get_message_type(item)
     if msg_type == "Text":
         return None
-    return getattr(item, msg_type.lower(), None)
+    attribute_name = "video_note" if msg_type == "VideoNote" else msg_type.lower()
+    return getattr(item, attribute_name, None)
 
 
 def _download_private_media_thumbnail(acc, payload, work_dir, index):
@@ -679,7 +681,7 @@ def _build_private_media_group_inputs(
                     title=audio.title or "",
                 )
             )
-        elif msg_type in ("Animation", "Sticker", "Voice"):
+        elif msg_type in ("Animation", "Sticker", "Voice", "VideoNote"):
             # These are not accepted as native album entries by Telegram. Send
             # them as documents so every item is still delivered together.
             media_inputs.append(
@@ -744,6 +746,15 @@ def _send_downloaded_private_media_sequentially(
             file_path,
             caption=caption,
             caption_entities=caption_entities,
+        )
+    elif msg_type == "VideoNote":
+        video_note = source_msg.video_note
+        return bot.send_video_note(
+            destination_chat_id,
+            file_path,
+            duration=video_note.duration,
+            length=video_note.length,
+            thumb=thumb,
         )
     elif msg_type == "Sticker":
         return bot.send_sticker(destination_chat_id, file_path)

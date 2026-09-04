@@ -32,6 +32,14 @@ class _Document:
         self.thumbs = []
 
 
+class _VideoNote:
+    def __init__(self, file_id):
+        self.file_id = file_id
+        self.thumbs = []
+        self.duration = 4
+        self.length = 512
+
+
 class _Message:
     def __init__(
         self,
@@ -40,6 +48,7 @@ class _Message:
         photo=None,
         video=None,
         document=None,
+        video_note=None,
         caption=None,
         text=None,
     ):
@@ -49,6 +58,7 @@ class _Message:
         self.photo = photo
         self.video = video
         self.document = document
+        self.video_note = video_note
         self.caption = caption
         self.text = text
         self.caption_entities = None
@@ -109,6 +119,9 @@ class _Bot:
 
     def send_video(self, *args, **kwargs):
         self.calls.append(("send_video", args, kwargs))
+
+    def send_video_note(self, *args, **kwargs):
+        self.calls.append(("send_video_note", args, kwargs))
 
     def send_document(self, *args, **kwargs):
         self.calls.append(("send_document", args, kwargs))
@@ -198,6 +211,28 @@ class PrivateMediaGroupFallbackTests(unittest.TestCase):
             if call[0] in ("send_video", "send_document")
         ]
         self.assertEqual(sent_kinds, ["send_video", "send_document"])
+
+    def test_video_note_album_uses_native_note_when_album_upload_fails(self):
+        first = _Message(30, "album", video_note=_VideoNote("vn1"))
+        second = _Message(31, "album", document=_Document("d1"))
+        acc = _Acc([first, second])
+        bot = _Bot(group_error=RuntimeError("album rejected"))
+        command = _Message(77)
+
+        _forward_private_media_group_by_download(
+            command,
+            bot,
+            acc,
+            -1001234567890,
+            second,
+        )
+
+        sent_kinds = [
+            call[0]
+            for call in bot.calls
+            if call[0] in ("send_video_note", "send_document")
+        ]
+        self.assertEqual(sent_kinds, ["send_video_note", "send_document"])
 
 
 if __name__ == "__main__":
