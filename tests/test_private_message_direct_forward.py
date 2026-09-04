@@ -5,6 +5,7 @@ from pyrogram.errors import FileReferenceExpired
 
 from bot.handlers.messages import (
     _forward_private_media_direct,
+    _forward_private_media_via_bot,
     _get_bot_peer_id,
 )
 
@@ -58,8 +59,23 @@ class _Acc:
 
 
 class _Bot:
-    def __init__(self, bot_id=7654321):
+    def __init__(self, bot_id=7654321, fetched_message=None, read_error=None):
         self.me = type("Me", (), {"id": bot_id})()
+        self.fetched_message = fetched_message
+        self.read_error = read_error
+        self.calls = []
+
+    def get_messages(self, *args):
+        self.calls.append(("get_messages", args))
+        if self.read_error:
+            raise self.read_error
+        return self.fetched_message
+
+    def copy_message(self, *args):
+        self.calls.append(("copy_message", args))
+
+    def copy_media_group(self, *args):
+        self.calls.append(("copy_media_group", args))
 
 
 class PrivateMessageDirectForwardTests(unittest.TestCase):
@@ -159,6 +175,59 @@ class PrivateMessageDirectForwardTests(unittest.TestCase):
 
         self.assertNotIn("f'{message.id}downstatus.txt'", source)
         self.assertNotIn("f'{message.id}upstatus.txt'", source)
+
+    def test_bot_path_copies_private_message_when_bot_can_read_it(self):
+        bot = _Bot(fetched_message=_Message(55))
+
+        copied = _forward_private_media_via_bot(
+            bot,
+            -1009876543210,
+            -1004445556667,
+            55,
+        )
+
+        self.assertTrue(copied)
+        self.assertEqual(
+            bot.calls,
+            [
+                ("get_messages", (-1004445556667, 55)),
+                ("copy_message", (-1009876543210, -1004445556667, 55)),
+            ],
+        )
+
+    def test_bot_path_handles_media_groups(self):
+        bot = _Bot(fetched_message=_Message(55, media_group_id="album"))
+
+        copied = _forward_private_media_via_bot(
+            bot,
+            -1009876543210,
+            -1004445556667,
+            55,
+        )
+
+        self.assertTrue(copied)
+        self.assertEqual(
+            bot.calls,
+            [
+                ("get_messages", (-1004445556667, 55)),
+                (
+                    "copy_media_group",
+                    (-1009876543210, -1004445556667, 55),
+                ),
+            ],
+        )
+
+    def test_bot_path_returns_false_when_bot_cannot_read_private_chat(self):
+        bot = _Bot(read_error=RuntimeError("channel private"))
+
+        copied = _forward_private_media_via_bot(
+            bot,
+            -1009876543210,
+            -1004445556667,
+            55,
+        )
+
+        self.assertFalse(copied)
 
 
 if __name__ == "__main__":

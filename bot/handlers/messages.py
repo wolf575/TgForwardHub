@@ -8,6 +8,7 @@ import time
 import threading
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import (
+    ChatForwardsRestricted,
     FileReferenceExpired,
     InviteHashExpired,
     UserAlreadyParticipant,
@@ -423,6 +424,47 @@ def _forward_private_media_direct(bot, acc, chatid, msg):
         raise
 
 
+def _forward_private_media_via_bot(bot, destination_chat_id, chatid, msgid):
+    """Try the public-channel Bot-identity path for a private chat.
+
+    The public path succeeds because the Bot client is the sender. A bot can
+    only use that same path for a private chat when it can read messages there
+    (for example, when it has been added to the group or channel). This helper
+    is intentionally non-fatal: if the bot is not a participant, handling falls
+    back to the configured user account.
+    """
+    try:
+        msg = bot.get_messages(chatid, msgid)
+    except Exception as exc:
+        logger.debug(
+            "Bot 客户端无法读取私有会话 %s/%s，继续使用用户客户端: %s: %s",
+            chatid,
+            msgid,
+            type(exc).__name__,
+            exc,
+        )
+        return False
+
+    if msg is None:
+        return False
+
+    try:
+        if getattr(msg, "media_group_id", None):
+            bot.copy_media_group(destination_chat_id, chatid, msg.id)
+        else:
+            _copy_single_private_media(bot, destination_chat_id, chatid, msg)
+        return True
+    except Exception as exc:
+        logger.debug(
+            "Bot 客户端无法直接复制私有会话 %s/%s: %s: %s",
+            chatid,
+            msgid,
+            type(exc).__name__,
+            exc,
+        )
+        return False
+
+
 def handle_private(message: pyrogram.types.messages_and_media.message.Message, chatid: int, msgid: int):
     """Forward a private message, preferring a server-side copy."""
     bot = get_bot_instance()
@@ -443,11 +485,28 @@ def handle_private(message: pyrogram.types.messages_and_media.message.Message, c
         )
         return
     except Exception as exc:
+        if isinstance(exc, ChatForwardsRestricted):
+            logger.warning(
+                "Telegram 拒绝用户账号在受限聊天 %s 中直接复制消息 %s，"
+                "尝试 Bot 身份路径",
+                chatid,
+                msgid,
+            )
         logger.warning(
-            "消息 %s 无法直接复制，回退到下载后重传: %s: %s",
+            "用户客户端无法直接复制消息 %s，尝试 Bot 身份路径: %s: %s",
             msgid,
             type(exc).__name__,
             exc,
+        )
+        if _forward_private_media_via_bot(bot, message.chat.id, chatid, msgid):
+            logger.info(
+                "✅ 消息 %s 已由 Bot 客户端直接从私有会话复制（未下载）",
+                msgid,
+            )
+            return
+        logger.warning(
+            "Bot 客户端也无法直接复制消息 %s，回退到下载后重传",
+            msgid,
         )
 
     down_status_file = f"downstatus{message.chat.id}{message.id}.txt"

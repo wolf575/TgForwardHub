@@ -140,6 +140,10 @@ FLASK_SECRET_KEY=replace-with-a-long-random-string
 
 你不需要提前创建 `.env` 文件。
 
+> `docker run` 命令中不要添加 `--env-file .env`。云端容器通过 Web UI 初始化
+> 凭据，不使用宿主机 `.env`；添加该参数会因为没有这个文件而直接报错：
+> `docker: --env-file: open .env: no such file or directory`。
+
 ### 使用云端镜像
 
 如果你不想在服务器上重新构建，可以直接使用 GitHub Container Registry 上的镜像：
@@ -260,3 +264,4 @@ docker run -d `
 - **实时监控没有触发**：检查监控源是否已经加入配置、目标账号是否有权访问源聊天，以及黑白名单是否把消息过滤掉了。
 - **Docker 镜像构建慢**：首次构建需要安装依赖；第二次构建会使用缓存。
 - **提示 FloodWait**：项目会自动等待 Telegram 限流时间并重试，不必手动处理。
+- **`docker run` 报 `--env-file: open .env: no such file or directory`**：删除命令中的 `--env-file .env`，不需要提前创建 `.env`。
