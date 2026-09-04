@@ -334,11 +334,69 @@ def save(client: pyrogram.client.Client, message: pyrogram.types.messages_and_me
         bot.send_message(message.chat.id, summary, reply_to_message_id=message.id)
 
 
+def _get_bot_peer_id(bot):
+    """Return the user-client peer ID of the bot."""
+    me = getattr(bot, "me", None)
+    if me is None:
+        try:
+            me = bot.get_me()
+        except AttributeError:
+            me = None
+
+    if me is None or getattr(me, "id", None) is None:
+        raise RuntimeError("无法获取 Bot 用户 ID")
+
+    return int(me.id)
+
+
+def _forward_private_media_direct(bot, acc, chatid, msg):
+    """Copy a private media message to the bot chat without downloading it.
+
+    The command message lives in the chat between the Telegram account and the
+    bot. From the user client's point of view that chat is addressed by the
+    bot's user ID, so ``message.chat.id`` cannot be reused as the destination.
+    """
+    destination = _get_bot_peer_id(bot)
+
+    if getattr(msg, "media_group_id", None):
+        copy_error = None
+        try:
+            acc.copy_media_group(destination, chatid, msg.id)
+            return
+        except Exception as exc:
+            copy_error = exc
+
+        try:
+            media_group = acc.get_media_group(chatid, msg.id)
+            message_ids = [item.id for item in media_group] if media_group else [msg.id]
+            acc.forward_messages(destination, chatid, message_ids)
+            return
+        except Exception as exc:
+            raise RuntimeError(
+                f"媒体组直接转发失败（复制: {copy_error}; 转发: {exc}）"
+            ) from exc
+
+    copy_error = None
+    try:
+        acc.copy_message(destination, chatid, msg.id)
+        return
+    except Exception as exc:
+        copy_error = exc
+
+    try:
+        acc.forward_messages(destination, chatid, msg.id)
+        return
+    except Exception as exc:
+        raise RuntimeError(
+            f"媒体直接转发失败（复制: {copy_error}; 转发: {exc}）"
+        ) from exc
+
+
 def handle_private(message: pyrogram.types.messages_and_media.message.Message, chatid: int, msgid: int):
-    """Handle private message download and forward"""
+    """Forward a private message, preferring a server-side copy."""
     bot = get_bot_instance()
     acc = get_acc_instance()
-    
+
     msg: pyrogram.types.messages_and_media.message.Message = acc.get_messages(chatid, msgid)
     msg_type = get_message_type(msg)
 
@@ -346,23 +404,41 @@ def handle_private(message: pyrogram.types.messages_and_media.message.Message, c
         bot.send_message(message.chat.id, msg.text, entities=msg.entities)
         return
 
+    try:
+        _forward_private_media_direct(bot, acc, chatid, msg)
+        logger.info(f"✅ 消息 {msgid} 已直接从私有会话复制到 Bot 会话")
+        return
+    except Exception as exc:
+        logger.warning(f"消息 {msgid} 无法直接复制，回退到下载后重传: {exc}")
+
+    down_status_file = f"downstatus{message.chat.id}{message.id}.txt"
+    up_status_file = f"upstatus{message.chat.id}{message.id}.txt"
     smsg = bot.send_message(message.chat.id, '__⬇️ 下载中__', reply_to_message_id=message.id)
-    dosta = threading.Thread(target=lambda: downstatus(f'{message.id}downstatus.txt', smsg), daemon=True)
+    dosta = threading.Thread(
+        target=downstatus,
+        args=(down_status_file, smsg, bot),
+        daemon=True,
+    )
     dosta.start()
     file = acc.download_media(msg, progress=progress, progress_args=[message, "down"])
-    os.remove(f'{message.id}downstatus.txt')
+    if os.path.exists(down_status_file):
+        os.remove(down_status_file)
 
-    upsta = threading.Thread(target=lambda: upstatus(f'{message.id}upstatus.txt', smsg), daemon=True)
+    upsta = threading.Thread(
+        target=upstatus,
+        args=(up_status_file, smsg, bot),
+        daemon=True,
+    )
     upsta.start()
-    
+
     thumb = None
-    
+
     if "Document" == msg_type:
         try:
             thumb = acc.download_media(msg.document.thumbs[0].file_id)
         except:
             thumb = None
-        
+
         bot.send_document(message.chat.id, file, thumb=thumb, caption=msg.caption, caption_entities=msg.caption_entities, progress=progress, progress_args=[message, "up"])
         if thumb != None:
             os.remove(thumb)
@@ -379,7 +455,7 @@ def handle_private(message: pyrogram.types.messages_and_media.message.Message, c
 
     elif "Animation" == msg_type:
         bot.send_animation(message.chat.id, file)
-           
+
     elif "Sticker" == msg_type:
         bot.send_sticker(message.chat.id, file)
 
@@ -391,7 +467,7 @@ def handle_private(message: pyrogram.types.messages_and_media.message.Message, c
             thumb = acc.download_media(msg.audio.thumbs[0].file_id)
         except:
             thumb = None
-            
+
         bot.send_audio(message.chat.id, file, caption=msg.caption, caption_entities=msg.caption_entities, progress=progress, progress_args=[message, "up"])   
         if thumb != None:
             os.remove(thumb)
@@ -400,6 +476,6 @@ def handle_private(message: pyrogram.types.messages_and_media.message.Message, c
         bot.send_photo(message.chat.id, file, caption=msg.caption, caption_entities=msg.caption_entities)
 
     os.remove(file)
-    if os.path.exists(f'{message.id}upstatus.txt'):
-        os.remove(f'{message.id}upstatus.txt')
+    if os.path.exists(up_status_file):
+        os.remove(up_status_file)
     bot.delete_messages(message.chat.id, [smsg.id])
