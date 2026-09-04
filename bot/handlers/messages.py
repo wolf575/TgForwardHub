@@ -501,6 +501,7 @@ def _download_private_media_group(
     msg,
     progress_callback=None,
     progress_args=None,
+    group_messages=None,
 ):
     """Download a complete media group into a temporary directory.
 
@@ -508,7 +509,8 @@ def _download_private_media_group(
     ``work_dir`` and must remove it after uploading. ``downloads`` is a list of
     ``(message, file_path, thumbnail_path)`` tuples.
     """
-    group_messages = _get_private_media_group_messages(acc, chatid, msg)
+    if group_messages is None:
+        group_messages = _get_private_media_group_messages(acc, chatid, msg)
     work_dir = tempfile.mkdtemp(prefix="tg_forward_album_")
     downloads = []
 

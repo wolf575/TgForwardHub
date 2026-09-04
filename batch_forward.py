@@ -387,6 +387,7 @@ def _reupload_batch_media_group(
         acc,
         source_id,
         group_messages[0],
+        group_messages=group_messages,
     )
     try:
         _worker_execute(
@@ -446,7 +447,7 @@ def _forward_batch_media_group(
                 lambda: acc.copy_media_group(dest_id, source_id, anchor.id),
             )
         return len(group_messages), False
-    except (ChatForwardsRestricted, FileReferenceExpired):
+    except (ChatForwardsRestricted, FileReferenceExpired, ValueError):
         count = _reupload_batch_media_group(
             worker,
             acc,
