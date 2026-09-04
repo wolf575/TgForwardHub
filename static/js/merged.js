@@ -156,6 +156,23 @@ function clearSetupQuery() {
   }
 }
 
+function resetSetupFlow() {
+  setupState.setupId = "";
+  setupState.phone = "";
+  setupState.unlocked = false;
+  $("setupIdInput").value = "";
+  $("setupCode").value = "";
+  $("setupPassword").value = "";
+  setSetupStage("idle");
+  clearSetupQuery();
+}
+
+function codeFlowNeedsReset(error) {
+  return /验证码已过期|验证码不正确|验证码为空|重新获取验证码|登录流程已过期|验证码尚未发送/.test(
+    error || ""
+  );
+}
+
 async function loadSetupState() {
   const pending = readPendingSetup();
   setupState.unlocked = false;
@@ -257,12 +274,15 @@ async function resumeSetupFlow(pending) {
 }
 
 async function saveSetupConfig() {
+  if (setupState.busy) return;
+
   const creds = readSetupCredentials();
   if (!creds.token || !creds.api_id || !creds.api_hash) {
     setSetupMessage("Bot Token、API ID 和 API Hash 均不能为空");
     return;
   }
 
+  setSetupBusy(true);
   setSetupMessage("");
   try {
     const result = await apiFetch("/api/setup/save", {
@@ -276,6 +296,8 @@ async function saveSetupConfig() {
   } catch (error) {
     setSetupStage("idle");
     setSetupMessage(error.message);
+  } finally {
+    setSetupBusy(false);
   }
 }
 
@@ -287,6 +309,9 @@ async function startSetup() {
   }
   if (setupState.busy) return;
 
+  setupState.unlocked = false;
+  setSetupStage("idle");
+  updateSetupLockButton();
   setSetupBusy(true);
   setSetupMessage("正在请求 Telegram 发送验证码，请稍候...");
   try {
@@ -300,10 +325,12 @@ async function startSetup() {
     const status = await pollSetupStatus(result.setup_id, ["sent"]);
     if (status.status === "error") {
       setSetupMessage(status.error || "发送验证码失败");
+      resetSetupFlow();
       return;
     }
     if (status.status === "missing") {
       setSetupMessage("登录流程不存在或已过期，请重新开始");
+      resetSetupFlow();
       return;
     }
 
@@ -311,8 +338,8 @@ async function startSetup() {
     setSetupStage("code");
     setSetupMessage(`验证码已发送到 ${setupState.phone}`);
   } catch (error) {
-    setSetupStage("idle");
     setSetupMessage(error.message);
+    resetSetupFlow();
   } finally {
     setSetupBusy(false);
   }
@@ -340,20 +367,21 @@ async function submitSetupCode() {
 
     if (result.error) {
       setSetupMessage(result.error);
+      if (codeFlowNeedsReset(result.error)) {
+        resetSetupFlow();
+      }
       return;
     }
 
     const status = await pollSetupStatus(setupState.setupId, ["ready", "done"]);
     if (status.status === "error") {
       setSetupMessage(status.error || "验证码验证失败");
-      if ((status.error || "").includes("登录流程不存在")) {
-        loadSetupState();
-      }
+      resetSetupFlow();
       return;
     }
     if (status.status === "missing") {
       setSetupMessage("登录流程不存在或已过期，请重新开始");
-      loadSetupState();
+      resetSetupFlow();
       return;
     }
 
@@ -367,8 +395,11 @@ async function submitSetupCode() {
     if (status.status === "done" || status.session_string) {
       $("setupSession").value = status.session_string || "";
       updateSessionBadge(status.saved || {});
+      setupState.setupId = "";
+      $("setupIdInput").value = "";
       setSetupStage("done");
       setSetupMessage(status.message || "Session String 已生成");
+      clearSetupQuery();
       loadStatus();
       return;
     }
@@ -376,8 +407,11 @@ async function submitSetupCode() {
     setSetupMessage(status.message || "登录状态已更新");
   } catch (error) {
     setSetupMessage(error.message);
-    if (error.message.includes("登录流程不存在")) {
-      loadSetupState();
+    if (
+      codeFlowNeedsReset(error.message) ||
+      error.message.includes("登录流程不存在")
+    ) {
+      resetSetupFlow();
     }
   } finally {
     setSetupBusy(false);
@@ -426,8 +460,11 @@ async function submitSetupPassword() {
     if (status.status === "done" || status.session_string) {
       $("setupSession").value = status.session_string || "";
       updateSessionBadge(status.saved || {});
+      setupState.setupId = "";
+      $("setupIdInput").value = "";
       setSetupStage("done");
       setSetupMessage(status.message || "Session String 已生成");
+      clearSetupQuery();
       loadStatus();
       return;
     }
@@ -861,6 +898,22 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   $("batchForm").addEventListener("submit", submitBatch);
+  $("setupForm").addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (setupState.busy) return;
+
+    const formAction =
+      event.submitter?.getAttribute("formaction") || "/setup/save";
+    if (formAction.endsWith("/setup/start")) {
+      startSetup();
+    } else if (formAction.endsWith("/setup/code")) {
+      submitSetupCode();
+    } else if (formAction.endsWith("/setup/password")) {
+      submitSetupPassword();
+    } else {
+      saveSetupConfig();
+    }
+  });
   $("cancelBtn").addEventListener("click", cancelBatch);
   $("historyRefresh").addEventListener("click", loadHistory);
   $("historyClear").addEventListener("click", async () => {
