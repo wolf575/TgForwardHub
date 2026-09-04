@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>TG Forward Hub</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/merged.css') }}?v=20260903-form-flow">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/merged.css') }}?v=20260904-setup-lock">
 </head>
 <body>
   <header class="topbar">
@@ -175,7 +175,10 @@
         <form id="setupForm" class="form-card" method="post" action="/setup/save">
           <div class="panel-subhead">
             <h2>Telegram 初始配置 / String Session</h2>
-            <span id="sessionBadge" class="muted">读取中...</span>
+            <div class="setup-tools">
+              <span id="sessionBadge" class="muted">读取中...</span>
+              <button id="setupLockBtn" class="secondary small" type="button" aria-pressed="false">解锁参数</button>
+            </div>
           </div>
 
           <div id="setupMessage" class="message" hidden></div>
@@ -318,6 +321,6 @@
     </section>
   </main>
 
-  <script src="{{ url_for('static', filename='js/merged.js') }}?v=20260903-form-flow"></script>
+  <script src="{{ url_for('static', filename='js/merged.js') }}?v=20260904-setup-lock"></script>
 </body>
 </html>

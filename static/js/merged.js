@@ -39,6 +39,7 @@ let setupState = {
   setupId: "",
   phone: "",
   busy: false,
+  unlocked: false,
 };
 
 function setSetupMessage(text) {
@@ -49,26 +50,42 @@ function setSetupMessage(text) {
 
 function setSetupFieldEnabled(enabled) {
   ["setupToken", "setupApiId", "setupApiHash", "setupPhone"].forEach((id) => {
-    $(id).disabled = !enabled;
+    $(id).disabled = setupState.busy || !enabled;
   });
 }
 
 function setSetupStage(stage) {
   setupState.stage = stage;
-  $("setupStageIdle").hidden = stage !== "idle";
-  $("setupStageCode").hidden = stage !== "code";
-  $("setupStagePassword").hidden = stage !== "password";
-  $("setupStageDone").hidden = stage !== "done";
-  setSetupFieldEnabled(stage === "idle");
+  const editable = setupState.unlocked || stage === "idle";
+  $("setupStageIdle").hidden = stage !== "idle" && !setupState.unlocked;
+  $("setupStageCode").hidden = stage !== "code" || setupState.unlocked;
+  $("setupStagePassword").hidden = stage !== "password" || setupState.unlocked;
+  $("setupStageDone").hidden = stage !== "done" || setupState.unlocked;
+  setSetupFieldEnabled(editable);
+  updateSetupLockButton();
 }
 
 function setSetupBusy(busy) {
   setupState.busy = busy;
-  ["setupSaveBtn", "setupStartBtn", "setupCodeBtn", "setupPasswordBtn"].forEach((id) => {
+  ["setupSaveBtn", "setupStartBtn", "setupCodeBtn", "setupPasswordBtn", "setupLockBtn"].forEach((id) => {
     const el = $(id);
     if (el) el.disabled = busy;
   });
-  setSetupFieldEnabled(busy ? false : setupState.stage === "idle");
+  setSetupFieldEnabled(setupState.unlocked || setupState.stage === "idle");
+}
+
+function updateSetupLockButton() {
+  const button = $("setupLockBtn");
+  button.textContent = setupState.unlocked ? "锁定参数" : "解锁参数";
+  button.setAttribute("aria-pressed", setupState.unlocked ? "true" : "false");
+}
+
+function toggleSetupLock() {
+  if (setupState.busy) return;
+
+  setupState.unlocked = !setupState.unlocked;
+  setSetupStage(setupState.stage);
+  setSetupMessage(setupState.unlocked ? "参数已解锁，可以修改后重新发送验证码" : "参数已锁定");
 }
 
 async function pollSetupStatus(setupId, untilStatuses) {
@@ -141,6 +158,7 @@ function clearSetupQuery() {
 
 async function loadSetupState() {
   const pending = readPendingSetup();
+  setupState.unlocked = false;
   try {
     const config = await apiFetch("/api/setup/state");
     $("setupToken").value = config.token || "";
@@ -850,6 +868,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (event.key === "Enter") loadNotes();
   });
   $("setupResetBtn").addEventListener("click", loadSetupState);
+  $("setupLockBtn").addEventListener("click", toggleSetupLock);
   $("passwordSaveBtn").addEventListener("click", savePassword);
   $("webdavSaveBtn").addEventListener("click", saveWebdavConfig);
   $("calibrationSaveBtn").addEventListener("click", saveCalibrationConfig);

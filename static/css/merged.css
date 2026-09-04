@@ -295,6 +295,21 @@ textarea {
   margin-bottom: 14px;
 }
 
+.setup-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.setup-tools .small {
+  flex: 0 0 auto;
+}
+
+.setup-tools .small[aria-pressed="true"] {
+  background: var(--accent);
+  color: #07111f;
+}
+
 .setup-actions {
   display: flex;
   align-items: flex-end;
