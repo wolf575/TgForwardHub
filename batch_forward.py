@@ -7,15 +7,29 @@ Pyrogram clients.
 import json
 import os
 import re
+import shutil
 import sqlite3
+import tempfile
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+from pyrogram.errors import ChatForwardsRestricted, FileReferenceExpired
+
 from database import DATA_DIR
+from bot.handlers.messages import (
+    _copy_single_private_media,
+    _download_private_media_group,
+    _download_private_media_thumbnail,
+    _get_private_media_group_messages,
+    _get_private_media_payload,
+    _send_downloaded_private_media_group,
+    _send_downloaded_private_media_sequentially,
+)
 from bot.handlers.instances import get_acc_instance
+from bot.utils.helpers import get_message_type
 from bot.workers.message_worker import MessageWorker
 from pyrogram_compat import apply_pyrogram_peer_id_compat, normalize_private_channel_ref
 
@@ -188,6 +202,32 @@ def _matches_exclude(text, terms):
     return bool(pattern.search(text or ""))
 
 
+def _parse_regex_patterns(raw):
+    """Parse one regex per non-empty line without splitting valid `|` patterns."""
+    if not raw:
+        return []
+    return [
+        line.strip()
+        for line in str(raw).replace("\r\n", "\n").splitlines()
+        if line.strip()
+    ]
+
+
+def _compile_regex_patterns(raw, field_name="正则表达式"):
+    patterns = _parse_regex_patterns(raw)
+    compiled = []
+    try:
+        for pattern in patterns:
+            compiled.append(re.compile(pattern))
+    except re.error as exc:
+        raise ValueError(f"{field_name} 格式错误: {exc}") from exc
+    return compiled
+
+
+def _matches_exclude_regex(text, patterns):
+    return any(pattern.search(text or "") for pattern in patterns)
+
+
 def _strip_trailing_blocks(text, terms):
     if not text or not terms:
         return text
@@ -196,6 +236,17 @@ def _strip_trailing_blocks(text, terms):
         re.IGNORECASE | re.DOTALL,
     )
     return pattern.sub("", text)
+
+
+def _remove_matches(text, terms, patterns):
+    """Delete literal terms and regex matches from forwarded text."""
+    if not text:
+        return text
+    for term in terms:
+        text = re.sub(re.escape(term), "", text, flags=re.IGNORECASE)
+    for pattern in patterns:
+        text = pattern.sub("", text)
+    return text
 
 
 def _parse_timestamp(value):
@@ -260,6 +311,340 @@ def _collect_message_ids(acc, source_id, spec):
     return ids
 
 
+def _validate_task_spec(spec):
+    if not spec.get("source") or not spec.get("target"):
+        raise ValueError("source 和 target 不能为空")
+
+    forward_mode = str(spec.get("forward_mode") or "clone").lower()
+    if forward_mode not in ("clone", "direct"):
+        raise ValueError("forward_mode 只支持 clone 或 direct")
+    spec["forward_mode"] = forward_mode
+
+    _compile_regex_patterns(spec.get("exclude_regex"), "排除正则")
+    _compile_regex_patterns(spec.get("remove_regex"), "删除正则")
+
+    range_type = spec.get("range_type", "id")
+    if range_type not in ("id", "time"):
+        raise ValueError("range_type 只支持 id 或 time")
+
+    if range_type == "time":
+        if _parse_timestamp(spec.get("start")) is None:
+            raise ValueError("开始时间格式不正确")
+        if _parse_timestamp(spec.get("end")) is None:
+            raise ValueError("结束时间格式不正确")
+    else:
+        try:
+            start = int(spec.get("start"))
+            end = int(spec.get("end"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("消息 ID 范围必须是整数") from exc
+        if start <= 0 or end <= 0:
+            raise ValueError("消息 ID 必须是正数")
+    return spec
+
+
+def _filter_rule_set(spec):
+    return {
+        "exclude_terms": _parse_terms(spec.get("exclude_keywords")),
+        "exclude_patterns": _compile_regex_patterns(
+            spec.get("exclude_regex"),
+            "排除正则",
+        ),
+        "remove_terms": _parse_terms(spec.get("remove_keywords")),
+        "remove_patterns": _compile_regex_patterns(
+            spec.get("remove_regex"),
+            "删除正则",
+        ),
+    }
+
+
+def _group_text(group_messages):
+    for message in group_messages:
+        caption = getattr(message, "caption", None)
+        if caption:
+            return caption
+        text = getattr(message, "text", None)
+        if text:
+            return text
+    return ""
+
+
+def _worker_execute(worker, name, operation):
+    """Run a Pyrogram operation through the worker's FloodWait handling."""
+    return worker._execute_with_flood_retry(name, operation)
+
+
+def _reupload_batch_media_group(
+    worker,
+    acc,
+    source_id,
+    dest_id,
+    group_messages,
+    cleaned_text,
+    text_changed,
+):
+    group_messages, downloads, work_dir = _download_private_media_group(
+        acc,
+        source_id,
+        group_messages[0],
+    )
+    try:
+        _worker_execute(
+            worker,
+            "上传受限媒体组",
+            lambda: _send_downloaded_private_media_group(
+                acc,
+                dest_id,
+                group_messages,
+                downloads,
+                caption_override=cleaned_text if text_changed else None,
+                caption_entities_override=None if text_changed else None,
+            ),
+        )
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+    return len(group_messages)
+
+
+def _forward_batch_media_group(
+    worker,
+    acc,
+    source_id,
+    dest_id,
+    group_messages,
+    cleaned_text,
+    text_changed,
+    preserve_source,
+):
+    anchor = group_messages[0]
+    try:
+        if text_changed:
+            _worker_execute(
+                worker,
+                "复制媒体组并修改 caption",
+                lambda: acc.copy_media_group(
+                    dest_id,
+                    source_id,
+                    anchor.id,
+                    captions=[cleaned_text],
+                ),
+            )
+        elif preserve_source:
+            _worker_execute(
+                worker,
+                "转发媒体组",
+                lambda: acc.forward_messages(
+                    dest_id,
+                    source_id,
+                    [item.id for item in group_messages],
+                ),
+            )
+        else:
+            _worker_execute(
+                worker,
+                "复制媒体组",
+                lambda: acc.copy_media_group(dest_id, source_id, anchor.id),
+            )
+        return len(group_messages), False
+    except (ChatForwardsRestricted, FileReferenceExpired):
+        count = _reupload_batch_media_group(
+            worker,
+            acc,
+            source_id,
+            dest_id,
+            group_messages,
+            cleaned_text,
+            text_changed,
+        )
+        return count, True
+
+
+def _reupload_batch_single_media(
+    worker,
+    acc,
+    dest_id,
+    message,
+    cleaned_text,
+    text_changed,
+):
+    work_dir = tempfile.mkdtemp(prefix="tg_forward_batch_media_")
+    try:
+        file_path = acc.download_media(
+            message,
+            file_name=os.path.join(work_dir, ""),
+        )
+        if file_path is None:
+            raise RuntimeError(f"消息 {message.id} 下载失败")
+        thumb = _download_private_media_thumbnail(
+            acc,
+            _get_private_media_payload(message),
+            work_dir,
+            0,
+        )
+        _worker_execute(
+            worker,
+            "上传受限单条媒体",
+            lambda: _send_downloaded_private_media_sequentially(
+                acc,
+                dest_id,
+                message,
+                file_path,
+                thumb=thumb,
+                caption_override=cleaned_text if text_changed else None,
+                caption_entities_override=None if text_changed else None,
+            ),
+        )
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+    return 1
+
+
+def _forward_batch_single_media(
+    worker,
+    acc,
+    source_id,
+    dest_id,
+    message,
+    cleaned_text,
+    text_changed,
+    preserve_source,
+):
+    try:
+        if text_changed:
+            _worker_execute(
+                worker,
+                "复制单条媒体并修改 caption",
+                lambda: acc.copy_message(
+                    dest_id,
+                    source_id,
+                    message.id,
+                    caption=cleaned_text,
+                ),
+            )
+        elif preserve_source:
+            _worker_execute(
+                worker,
+                "转发单条媒体",
+                lambda: acc.forward_messages(
+                    dest_id,
+                    source_id,
+                    message.id,
+                ),
+            )
+        else:
+            _worker_execute(
+                worker,
+                "复制单条媒体",
+                lambda: _copy_single_private_media(
+                    acc,
+                    dest_id,
+                    source_id,
+                    message,
+                ),
+            )
+        return 1, False
+    except (ChatForwardsRestricted, FileReferenceExpired):
+        count = _reupload_batch_single_media(
+            worker,
+            acc,
+            dest_id,
+            message,
+            cleaned_text,
+            text_changed,
+        )
+        return count, True
+
+
+def _forward_batch_text(
+    worker,
+    acc,
+    source_id,
+    dest_id,
+    message,
+    cleaned_text,
+    text_changed,
+    preserve_source,
+):
+    try:
+        if text_changed:
+            _worker_execute(
+                worker,
+                "发送修改后的文本",
+                lambda: acc.send_message(dest_id, cleaned_text),
+            )
+        elif preserve_source:
+            _worker_execute(
+                worker,
+                "转发文本消息",
+                lambda: acc.forward_messages(dest_id, source_id, message.id),
+            )
+        else:
+            _worker_execute(
+                worker,
+                "复制文本消息",
+                lambda: acc.copy_message(dest_id, source_id, message.id),
+            )
+        return 1, False
+    except (ChatForwardsRestricted, FileReferenceExpired):
+        _worker_execute(
+            worker,
+            "发送受限文本消息",
+            lambda: acc.send_message(
+                dest_id,
+                cleaned_text if text_changed else message.text or "",
+                entities=None if text_changed else message.entities,
+            ),
+        )
+        return 1, True
+
+
+def _forward_batch_unit(
+    worker,
+    acc,
+    source_id,
+    dest_id,
+    group_messages,
+    cleaned_text,
+    text_changed,
+    preserve_source,
+):
+    if len(group_messages) > 1:
+        return _forward_batch_media_group(
+            worker,
+            acc,
+            source_id,
+            dest_id,
+            group_messages,
+            cleaned_text,
+            text_changed,
+            preserve_source,
+        )
+
+    message = group_messages[0]
+    msg_type = get_message_type(message)
+    if msg_type == "Text" or msg_type is None:
+        return _forward_batch_text(
+            worker,
+            acc,
+            source_id,
+            dest_id,
+            message,
+            cleaned_text,
+            text_changed,
+            preserve_source,
+        )
+    return _forward_batch_single_media(
+        worker,
+        acc,
+        source_id,
+        dest_id,
+        message,
+        cleaned_text,
+        text_changed,
+        preserve_source,
+    )
+
+
 def _run_batch_task(job_id, spec):
     log_lines = []
 
@@ -286,10 +671,14 @@ def _run_batch_task(job_id, spec):
         )
         log(f"开始处理 {total} 条消息: {source_id} -> {dest_id}")
 
-        exclude = _parse_terms(spec.get("exclude_keywords"))
-        remove = _parse_terms(spec.get("remove_keywords"))
+        rules = _filter_rule_set(spec)
+        exclude_terms = rules["exclude_terms"]
+        exclude_patterns = rules["exclude_patterns"]
+        remove_terms = rules["remove_terms"]
+        remove_patterns = rules["remove_patterns"]
         preserve_source = str(spec.get("forward_mode", "clone")).lower() != "clone"
         processed = success = failed = skipped = 0
+        handled_ids = set()
 
         for index, message_id in enumerate(ids, start=1):
             task = get_task(job_id)
@@ -299,28 +688,69 @@ def _run_batch_task(job_id, spec):
                 _persist_task_history(job_id)
                 return
 
+            unit_count = 1
+            group_messages = None
             try:
+                if message_id in handled_ids:
+                    continue
+
                 message = acc.get_messages(source_id, message_id)
                 if not message or getattr(message, "empty", False):
                     skipped += 1
-                else:
-                    text = message.text or message.caption or ""
-                    if _matches_exclude(text, exclude):
-                        skipped += 1
-                    else:
-                        cleaned = _strip_trailing_blocks(text, remove)
-                        if cleaned != text:
-                            worker._forward_with_modified_text(message, dest_id, cleaned, preserve_source)
-                        elif preserve_source:
-                            worker._forward_with_source(message, dest_id)
-                        else:
-                            worker._copy_without_source(message, dest_id)
-                        success += 1
+                    processed += 1
+                    continue
+
+                group_messages = _get_private_media_group_messages(
+                    acc,
+                    source_id,
+                    message,
+                )
+                group_ids = [item.id for item in group_messages]
+                handled_ids.update(group_ids)
+                unit_count = len(group_messages)
+                text = _group_text(group_messages)
+
+                if _matches_exclude(text, exclude_terms) or _matches_exclude_regex(
+                    text,
+                    exclude_patterns,
+                ):
+                    skipped += unit_count
+                    processed += unit_count
+                    continue
+
+                cleaned = _remove_matches(text, remove_terms, remove_patterns)
+                text_changed = cleaned != text
+                if unit_count == 1 and get_message_type(
+                    group_messages[0]
+                ) in ("Text", None) and not cleaned.strip():
+                    skipped += unit_count
+                    processed += unit_count
+                    continue
+
+                sent_count, used_fallback = _forward_batch_unit(
+                    worker,
+                    acc,
+                    source_id,
+                    dest_id,
+                    group_messages,
+                    cleaned,
+                    text_changed,
+                    preserve_source,
+                )
+                success += sent_count
+                processed += sent_count
+                if used_fallback:
+                    fallback_label = "媒体组" if unit_count > 1 else "消息"
+                    log(
+                        f"消息 {message_id} 受限，已通过用户客户端下载后重传"
+                        f"（{fallback_label}，共 {sent_count} 项）"
+                    )
             except Exception as exc:
-                failed += 1
+                unit_count = len(group_messages) if group_messages else 1
+                failed += unit_count
+                processed += unit_count
                 log(f"消息 {message_id} 失败: {type(exc).__name__}: {exc}")
 
-            processed += 1
             _update_task(
                 job_id,
                 progress={
@@ -355,8 +785,7 @@ def _run_batch_task(job_id, spec):
 
 
 def submit_batch_task(spec):
-    if not spec.get("source") or not spec.get("target"):
-        raise ValueError("source 和 target 不能为空")
+    spec = _validate_task_spec(dict(spec or {}))
 
     job_id = str(uuid.uuid4())
     state = {
@@ -368,7 +797,9 @@ def submit_batch_task(spec):
         "endValue": spec.get("end") or "",
         "forwardMode": spec.get("forward_mode") or "clone",
         "excludeKeywords": spec.get("exclude_keywords") or "",
+        "excludeRegex": spec.get("exclude_regex") or "",
         "removeKeywords": spec.get("remove_keywords") or "",
+        "removeRegex": spec.get("remove_regex") or "",
         "desc": bool(spec.get("reverse")),
     }
     task = {

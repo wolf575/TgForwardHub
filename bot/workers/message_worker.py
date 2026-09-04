@@ -13,7 +13,7 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import pyrogram
-from pyrogram.errors import FloodWait
+from pyrogram.errors import ChatForwardsRestricted, FileReferenceExpired, FloodWait
 
 from database import add_note
 from config import load_watch_config, load_webdav_config, MEDIA_DIR
@@ -721,6 +721,27 @@ class MessageWorker:
 
         return processed_text
     
+    def _restricted_media_fallback(self, message, dest_id, modified_text=None):
+        """Download and re-upload restricted media through the user client."""
+        from bot.handlers.messages import _download_and_reupload_media_fallback
+
+        logger.info("   ♻️ 缓存复制受限，改为下载整组媒体后通过用户客户端重传")
+        result = self._execute_with_flood_retry(
+            "下载并重传受限媒体",
+            lambda: _download_and_reupload_media_fallback(
+                self.acc,
+                dest_id,
+                message.chat.id,
+                message,
+                caption_override=modified_text,
+                caption_entities_override=None if modified_text is not None else None,
+            ),
+        )
+        forwarded_msg_id = result.id if hasattr(result, "id") else result
+        time.sleep(RATE_LIMIT_DELAY)
+        logger.info("   ✅ 受限媒体已下载并重传")
+        return forwarded_msg_id
+
     def _forward_with_modified_text(self, message, dest_id, modified_text, preserve_source=False):
         """转发消息并修改文本内容（用于DN补全）
 
@@ -758,6 +779,16 @@ class MessageWorker:
                     if result and len(result) > 0:
                         forwarded_msg_id = result[0].id if hasattr(result[0], 'id') else result[0]
                     logger.info(f"   ✅ 媒体组已复制（第一条消息的caption已修改）")
+                except (ChatForwardsRestricted, FileReferenceExpired) as exc:
+                    logger.warning(
+                        "   媒体组缓存复制受限，改为下载后重传: %s",
+                        type(exc).__name__,
+                    )
+                    return self._restricted_media_fallback(
+                        message,
+                        dest_id,
+                        modified_text,
+                    )
                 except Exception as e:
                     logger.warning(f"   copy_media_group失败，尝试逐个复制: {e}")
                     # 回退方案：逐个复制
@@ -794,10 +825,17 @@ class MessageWorker:
                         logger.info(f"   ✅ 已复制单条媒体消息")
             else:
                 # 单个媒体：直接复制并修改caption
-                result = self._execute_with_flood_retry(
-                    "复制媒体消息",
-                    lambda: self.acc.copy_message(dest_id, message.chat.id, message.id, caption=modified_text)
-                )
+                try:
+                    result = self._execute_with_flood_retry(
+                        "复制媒体消息",
+                        lambda: self.acc.copy_message(dest_id, message.chat.id, message.id, caption=modified_text)
+                    )
+                except (ChatForwardsRestricted, FileReferenceExpired):
+                    return self._restricted_media_fallback(
+                        message,
+                        dest_id,
+                        modified_text,
+                    )
                 if result:
                     forwarded_msg_id = result.id if hasattr(result, 'id') else result
                 logger.info(f"   ✅ 媒体消息已复制（caption已修改）")
@@ -841,12 +879,19 @@ class MessageWorker:
                 time.sleep(RATE_LIMIT_DELAY)
             except UnrecoverableError:
                 raise
+            except (ChatForwardsRestricted, FileReferenceExpired) as e:
+                logger.warning(f"   转发媒体组受限，改为下载后重传: {e}")
+                return self._restricted_media_fallback(message, dest_id)
             except Exception as e:
                 logger.warning(f"   转发媒体组失败，回退到单条转发: {e}")
-                result = self._execute_with_flood_retry(
-                    "转发单条消息",
-                    lambda: self.acc.forward_messages(dest_id, message.chat.id, message.id)
-                )
+                try:
+                    result = self._execute_with_flood_retry(
+                        "转发单条消息",
+                        lambda: self.acc.forward_messages(dest_id, message.chat.id, message.id)
+                    )
+                except (ChatForwardsRestricted, FileReferenceExpired) as fallback_exc:
+                    logger.warning(f"   单条转发仍受限，改为下载后重传: {fallback_exc}")
+                    return self._restricted_media_fallback(message, dest_id)
                 if result:
                     if isinstance(result, list) and len(result) > 0:
                         forwarded_msg_id = result[0].id if hasattr(result[0], 'id') else result[0]
@@ -855,10 +900,32 @@ class MessageWorker:
                 logger.info(f"   ✅ 消息已转发（单条）")
                 time.sleep(RATE_LIMIT_DELAY)
         else:
-            result = self._execute_with_flood_retry(
-                "转发消息",
-                lambda: self.acc.forward_messages(dest_id, message.chat.id, message.id)
+            is_media = (
+                message.photo
+                or message.video
+                or message.animation
+                or message.document
+                or message.audio
+                or message.voice
+                or message.sticker
             )
+            try:
+                result = self._execute_with_flood_retry(
+                    "转发消息",
+                    lambda: self.acc.forward_messages(dest_id, message.chat.id, message.id)
+                )
+            except (ChatForwardsRestricted, FileReferenceExpired) as e:
+                logger.warning(f"   消息受限，改为下载后重传: {e}")
+                if is_media:
+                    return self._restricted_media_fallback(message, dest_id)
+                return self._execute_with_flood_retry(
+                    "发送受限文本消息",
+                    lambda: self.acc.send_message(
+                        dest_id,
+                        message.text or "",
+                        entities=message.entities,
+                    ),
+                ).id
             if result:
                 if isinstance(result, list) and len(result) > 0:
                     forwarded_msg_id = result[0].id if hasattr(result[0], 'id') else result[0]
@@ -894,21 +961,50 @@ class MessageWorker:
                 time.sleep(RATE_LIMIT_DELAY)
             except UnrecoverableError:
                 raise
+            except (ChatForwardsRestricted, FileReferenceExpired) as e:
+                logger.warning(f"   复制媒体组受限，改为下载后重传: {e}")
+                return self._restricted_media_fallback(message, dest_id)
             except Exception as e:
                 logger.warning(f"   复制媒体组失败，回退到复制单条: {e}")
-                result = self._execute_with_flood_retry(
-                    "复制单条消息",
-                    lambda: self.acc.copy_message(dest_id, message.chat.id, message.id)
-                )
+                try:
+                    result = self._execute_with_flood_retry(
+                        "复制单条消息",
+                        lambda: self.acc.copy_message(dest_id, message.chat.id, message.id)
+                    )
+                except (ChatForwardsRestricted, FileReferenceExpired) as fallback_exc:
+                    logger.warning(f"   单条复制仍受限，改为下载后重传: {fallback_exc}")
+                    return self._restricted_media_fallback(message, dest_id)
                 if result:
                     forwarded_msg_id = result.id if hasattr(result, 'id') else result
                 logger.info(f"   ✅ 消息已复制（单条）")
                 time.sleep(RATE_LIMIT_DELAY)
         else:
-            result = self._execute_with_flood_retry(
-                "复制消息",
-                lambda: self.acc.copy_message(dest_id, message.chat.id, message.id)
+            is_media = (
+                message.photo
+                or message.video
+                or message.animation
+                or message.document
+                or message.audio
+                or message.voice
+                or message.sticker
             )
+            try:
+                result = self._execute_with_flood_retry(
+                    "复制消息",
+                    lambda: self.acc.copy_message(dest_id, message.chat.id, message.id)
+                )
+            except (ChatForwardsRestricted, FileReferenceExpired) as e:
+                logger.warning(f"   复制受限，改为下载后重传: {e}")
+                if is_media:
+                    return self._restricted_media_fallback(message, dest_id)
+                return self._execute_with_flood_retry(
+                    "发送受限文本消息",
+                    lambda: self.acc.send_message(
+                        dest_id,
+                        message.text or "",
+                        entities=message.entities,
+                    ),
+                ).id
             if result:
                 forwarded_msg_id = result.id if hasattr(result, 'id') else result
             logger.info(f"   ✅ 消息已复制")

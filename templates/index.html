@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>TG Forward Hub</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/merged.css') }}?v=20260904-ajax-setup">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/merged.css') }}?v=20260904-full-watch-settings">
 </head>
 <body>
   <header class="topbar">
@@ -16,6 +16,12 @@
       <button class="tab" data-tab="settings">设置</button>
     </nav>
     <a class="logout" href="{{ url_for('logout') }}">退出</a>
+    <div class="theme-picker" aria-label="主题颜色">
+      <button class="theme-swatch theme-dark" type="button" data-theme="dark" title="深色" aria-pressed="true"></button>
+      <button class="theme-swatch theme-light" type="button" data-theme="light" title="浅色" aria-pressed="false"></button>
+      <button class="theme-swatch theme-ocean" type="button" data-theme="ocean" title="青蓝" aria-pressed="false"></button>
+      <button class="theme-swatch theme-amber" type="button" data-theme="amber" title="暖金" aria-pressed="false"></button>
+    </div>
   </header>
 
   <main class="shell">
@@ -65,11 +71,17 @@
             <input id="descFlag" type="checkbox"> 逆序转发
           </label>
 
-          <label>排除关键词（用逗号或 | 分隔）
+          <label>排除关键词（用逗号或 | 分隔，命中后整条跳过）
             <input id="excludeKeywords" placeholder="广告, #ad, 签到">
           </label>
-          <label>清理尾部关键词（从两个换行后的关键词开始截断）
-            <input id="removeKeywords" placeholder="Powered by">
+          <label>排除正则（每行一条）
+            <textarea id="excludeRegex" rows="3" placeholder="(?i)\b(?:广告|推广)\b"></textarea>
+          </label>
+          <label>删除关键词（删除命中的关键词）
+            <input id="removeKeywords" placeholder="赞助商, 来源：">
+          </label>
+          <label>删除正则（每行一条，删除匹配内容）
+            <textarea id="removeRegex" rows="3" placeholder="(?s)#[\w\W]{0,20}$"></textarea>
           </label>
 
           <button class="primary" type="submit">生成并执行</button>
@@ -146,6 +158,18 @@
           </label>
           <label>黑名单关键词
             <input id="watchBlacklist" placeholder="逗号分隔">
+          </label>
+          <label>白名单正则（每行一条）
+            <textarea id="watchWhitelistRegex" rows="3" placeholder="(?i)剧集"></textarea>
+          </label>
+          <label>黑名单正则（每行一条）
+            <textarea id="watchBlacklistRegex" rows="3" placeholder="(?i)广告"></textarea>
+          </label>
+          <label>提取正则（extract 模式使用，每行一条）
+            <textarea id="watchExtractPatterns" rows="3" placeholder="(?i)magnet:[^\\s]+"></textarea>
+          </label>
+          <label class="check">
+            <input id="watchAppendDn" type="checkbox"> 自动补全磁力链接 DN
           </label>
           <button class="primary" type="submit">保存规则</button>
           <div id="watchMessage" class="message" hidden></div>
@@ -321,6 +345,6 @@
     </section>
   </main>
 
-  <script src="{{ url_for('static', filename='js/merged.js') }}?v=20260904-ajax-setup"></script>
+  <script src="{{ url_for('static', filename='js/merged.js') }}?v=20260904-full-watch-settings"></script>
 </body>
 </html>

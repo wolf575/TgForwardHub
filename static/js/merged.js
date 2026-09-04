@@ -34,6 +34,21 @@ async function apiFetch(url, options = {}) {
   }
 }
 
+const THEME_KEY = "tg_forward_hub_theme";
+const THEMES = ["dark", "light", "ocean", "amber"];
+
+function applyTheme(theme) {
+  const selected = THEMES.includes(theme) ? theme : "dark";
+  document.documentElement.dataset.theme = selected;
+  document.querySelectorAll(".theme-swatch").forEach((button) => {
+    button.setAttribute(
+      "aria-pressed",
+      button.dataset.theme === selected ? "true" : "false"
+    );
+  });
+  localStorage.setItem(THEME_KEY, selected);
+}
+
 let setupState = {
   stage: "idle",
   setupId: "",
@@ -690,7 +705,9 @@ async function loadHistory() {
       $("endValue").value = state.endValue || "";
       $("forwardMode").value = state.forwardMode || "clone";
       $("excludeKeywords").value = state.excludeKeywords || "";
+      $("excludeRegex").value = state.excludeRegex || "";
       $("removeKeywords").value = state.removeKeywords || "";
+      $("removeRegex").value = state.removeRegex || "";
       $("descFlag").checked = !!state.desc;
       setMessage("batchMessage", `已恢复任务: ${title.textContent}`);
     });
@@ -747,7 +764,9 @@ async function submitBatch(event) {
     forward_mode: $("forwardMode").value,
     reverse: $("descFlag").checked,
     exclude_keywords: $("excludeKeywords").value,
+    exclude_regex: $("excludeRegex").value,
     remove_keywords: $("removeKeywords").value,
+    remove_regex: $("removeRegex").value,
   };
 
   try {
@@ -778,6 +797,25 @@ function parseList(value) {
     .split(",")
     .map((x) => x.trim())
     .filter(Boolean);
+}
+
+function parseRegexList(value) {
+  return String(value || "")
+    .split(/\r?\n/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+function validateRegexList(value, label) {
+  const patterns = parseRegexList(value);
+  for (const pattern of patterns) {
+    try {
+      new RegExp(pattern);
+    } catch (error) {
+      throw new Error(`${label}格式错误：${error.message}`);
+    }
+  }
+  return patterns;
 }
 
 function fillFromTelegramLink(input) {
@@ -837,19 +875,31 @@ async function loadWatchConfig() {
 async function saveWatch(event) {
   event.preventDefault();
   setMessage("watchMessage", "");
-  const watch = {
-    source: $("watchSource").value.trim(),
-    dest: $("watchDest").value.trim(),
-    record_mode: $("watchMode").value === "record",
-    forward_mode: $("watchForwardMode").value,
-    preserve_forward_source: $("watchPreserve").checked,
-    whitelist: parseList($("watchWhitelist").value),
-    blacklist: parseList($("watchBlacklist").value),
-    whitelist_regex: [],
-    blacklist_regex: [],
-  };
 
   try {
+    const watch = {
+      source: $("watchSource").value.trim(),
+      dest: $("watchDest").value.trim(),
+      record_mode: $("watchMode").value === "record",
+      forward_mode: $("watchForwardMode").value,
+      preserve_forward_source: $("watchPreserve").checked,
+      append_dn_to_magnet: $("watchAppendDn").checked,
+      whitelist: parseList($("watchWhitelist").value),
+      blacklist: parseList($("watchBlacklist").value),
+      whitelist_regex: validateRegexList(
+        $("watchWhitelistRegex").value,
+        "白名单正则",
+      ),
+      blacklist_regex: validateRegexList(
+        $("watchBlacklistRegex").value,
+        "黑名单正则",
+      ),
+      extract_patterns: validateRegexList(
+        $("watchExtractPatterns").value,
+        "提取正则",
+      ),
+    };
+
     await apiFetch("/api/watch-config", {
       method: "POST",
       body: JSON.stringify({
@@ -893,6 +943,11 @@ async function loadNotes() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  applyTheme(localStorage.getItem(THEME_KEY) || "dark");
+  document.querySelectorAll(".theme-swatch").forEach((button) => {
+    button.addEventListener("click", () => applyTheme(button.dataset.theme));
+  });
+
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => switchTab(tab.dataset.tab));
   });

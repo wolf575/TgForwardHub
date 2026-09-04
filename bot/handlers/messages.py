@@ -495,6 +495,60 @@ def _get_private_media_group_messages(acc, chatid, msg):
     return [by_id[message_id] for message_id in sorted(by_id)]
 
 
+def _download_private_media_group(
+    acc,
+    chatid,
+    msg,
+    progress_callback=None,
+    progress_args=None,
+):
+    """Download a complete media group into a temporary directory.
+
+    Returns ``(group_messages, downloads, work_dir)``. The caller owns
+    ``work_dir`` and must remove it after uploading. ``downloads`` is a list of
+    ``(message, file_path, thumbnail_path)`` tuples.
+    """
+    group_messages = _get_private_media_group_messages(acc, chatid, msg)
+    work_dir = tempfile.mkdtemp(prefix="tg_forward_album_")
+    downloads = []
+
+    try:
+        for index, item in enumerate(group_messages):
+            payload = _get_private_media_payload(item)
+            if payload is None:
+                raise RuntimeError(f"媒体组消息 {item.id} 没有可下载的媒体")
+
+            download_kwargs = {
+                "file_name": os.path.join(work_dir, ""),
+            }
+            if progress_callback is not None:
+                download_kwargs["progress"] = progress_callback
+                download_kwargs["progress_args"] = progress_args
+
+            file_path = acc.download_media(item, **download_kwargs)
+            if file_path is None:
+                raise RuntimeError(f"媒体组消息 {item.id} 下载失败")
+
+            thumb = None
+            if get_message_type(item) in (
+                "Document",
+                "Video",
+                "Audio",
+                "Animation",
+            ):
+                thumb = _download_private_media_thumbnail(
+                    acc,
+                    payload,
+                    work_dir,
+                    index,
+                )
+            downloads.append((item, file_path, thumb))
+        return group_messages, downloads, work_dir
+    except Exception:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        raise
+
+
 def _should_forward_private_media_group(message):
     """Mirror the public-link rule for deciding whether to use the album."""
     text = getattr(message, "text", "") or ""
@@ -545,14 +599,27 @@ def _download_private_media_thumbnail(acc, payload, work_dir, index):
         return None
 
 
-def _build_private_media_group_inputs(group_messages, downloads):
+def _build_private_media_group_inputs(
+    group_messages,
+    downloads,
+    caption_override=None,
+    caption_entities_override=None,
+):
     """Build Pyrogram InputMedia objects for a downloaded media group."""
     caption_message = next(
         (item for item in group_messages if getattr(item, "caption", None)),
         group_messages[0],
     )
-    caption = caption_message.caption or ""
-    caption_entities = caption_message.caption_entities
+    caption = (
+        caption_override
+        if caption_override is not None
+        else caption_message.caption or ""
+    )
+    caption_entities = (
+        caption_entities_override
+        if caption_override is not None
+        else caption_message.caption_entities
+    )
     media_inputs = []
 
     for index, (item, file_path, thumb) in enumerate(downloads):
@@ -628,15 +695,29 @@ def _build_private_media_group_inputs(group_messages, downloads):
 
 
 def _send_downloaded_private_media_sequentially(
-    bot, destination_chat_id, source_msg, file_path, thumb=None
+    bot,
+    destination_chat_id,
+    source_msg,
+    file_path,
+    thumb=None,
+    caption_override=None,
+    caption_entities_override=None,
 ):
     """Upload one downloaded private media item with its original format."""
     msg_type = get_message_type(source_msg)
-    caption = source_msg.caption
-    caption_entities = source_msg.caption_entities
+    caption = (
+        caption_override
+        if caption_override is not None
+        else source_msg.caption
+    )
+    caption_entities = (
+        caption_entities_override
+        if caption_override is not None
+        else source_msg.caption_entities
+    )
 
     if msg_type == "Document":
-        bot.send_document(
+        return bot.send_document(
             destination_chat_id,
             file_path,
             thumb=thumb,
@@ -645,7 +726,7 @@ def _send_downloaded_private_media_sequentially(
         )
     elif msg_type == "Video":
         video = source_msg.video
-        bot.send_video(
+        return bot.send_video(
             destination_chat_id,
             file_path,
             duration=video.duration,
@@ -656,30 +737,30 @@ def _send_downloaded_private_media_sequentially(
             caption_entities=caption_entities,
         )
     elif msg_type == "Animation":
-        bot.send_animation(
+        return bot.send_animation(
             destination_chat_id,
             file_path,
             caption=caption,
             caption_entities=caption_entities,
         )
     elif msg_type == "Sticker":
-        bot.send_sticker(destination_chat_id, file_path)
+        return bot.send_sticker(destination_chat_id, file_path)
     elif msg_type == "Voice":
-        bot.send_voice(
+        return bot.send_voice(
             destination_chat_id,
             file_path,
             caption=caption,
             caption_entities=caption_entities,
         )
     elif msg_type == "Audio":
-        bot.send_audio(
+        return bot.send_audio(
             destination_chat_id,
             file_path,
             caption=caption,
             caption_entities=caption_entities,
         )
     elif msg_type == "Photo":
-        bot.send_photo(
+        return bot.send_photo(
             destination_chat_id,
             file_path,
             caption=caption,
@@ -690,14 +771,24 @@ def _send_downloaded_private_media_sequentially(
 
 
 def _send_downloaded_private_media_group(
-    bot, destination_chat_id, group_messages, downloads
+    bot,
+    destination_chat_id,
+    group_messages,
+    downloads,
+    caption_override=None,
+    caption_entities_override=None,
 ):
     """Upload a downloaded group as an album, falling back to item uploads."""
-    media_inputs = _build_private_media_group_inputs(group_messages, downloads)
+    media_inputs = _build_private_media_group_inputs(
+        group_messages,
+        downloads,
+        caption_override=caption_override,
+        caption_entities_override=caption_entities_override,
+    )
 
     try:
-        bot.send_media_group(destination_chat_id, media_inputs)
-        return
+        result = bot.send_media_group(destination_chat_id, media_inputs)
+        return _message_id(result)
     except Exception as exc:
         logger.warning(
             "媒体组上传失败，改为逐条上传: %s: %s",
@@ -705,22 +796,76 @@ def _send_downloaded_private_media_group(
             exc,
         )
 
-    for item, file_path, thumb in downloads:
-        _send_downloaded_private_media_sequentially(
+    forwarded_message_id = None
+    for index, (item, file_path, thumb) in enumerate(downloads):
+        result = _send_downloaded_private_media_sequentially(
             bot,
             destination_chat_id,
             item,
             file_path,
             thumb=thumb,
+            caption_override=caption_override if index == 0 else None,
+            caption_entities_override=caption_entities_override if index == 0 else None,
         )
+        if index == 0:
+            forwarded_message_id = _message_id(result)
+    return forwarded_message_id
+
+
+def _message_id(result):
+    """Extract a stable first message ID from a Pyrogram result."""
+    if isinstance(result, list):
+        if not result:
+            return None
+        result = result[0]
+    if result is None:
+        return None
+    return getattr(result, "id", result)
+
+
+def _download_and_reupload_media_fallback(
+    acc,
+    destination_chat_id,
+    chatid,
+    msg,
+    caption_override=None,
+    caption_entities_override=None,
+):
+    """Download and re-upload restricted media through the user client."""
+    group_messages, downloads, work_dir = _download_private_media_group(
+        acc,
+        chatid,
+        msg,
+    )
+    try:
+        if len(group_messages) > 1:
+            return _send_downloaded_private_media_group(
+                acc,
+                destination_chat_id,
+                group_messages,
+                downloads,
+                caption_override=caption_override,
+                caption_entities_override=caption_entities_override,
+            )
+
+        item, file_path, thumb = downloads[0]
+        return _send_downloaded_private_media_sequentially(
+            acc,
+            destination_chat_id,
+            item,
+            file_path,
+            thumb=thumb,
+            caption_override=caption_override,
+            caption_entities_override=caption_entities_override,
+        )
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def _forward_private_media_group_by_download(
     message, bot, acc, chatid, msg
 ):
     """Download and re-upload a complete restricted private media group."""
-    group_messages = _get_private_media_group_messages(acc, chatid, msg)
-    work_dir = tempfile.mkdtemp(prefix="tg_forward_album_")
     down_status_file = f"downstatus{message.chat.id}{message.id}.txt"
     smsg = bot.send_message(
         message.chat.id,
@@ -733,37 +878,15 @@ def _forward_private_media_group_by_download(
         daemon=True,
     )
     dosta.start()
-    downloads = []
 
     try:
-        for index, item in enumerate(group_messages):
-            payload = _get_private_media_payload(item)
-            if payload is None:
-                raise RuntimeError(f"媒体组消息 {item.id} 没有可下载的媒体")
-
-            file_path = acc.download_media(
-                item,
-                file_name=os.path.join(work_dir, ""),
-                progress=progress,
-                progress_args=[message, "down"],
-            )
-            if file_path is None:
-                raise RuntimeError(f"媒体组消息 {item.id} 下载失败")
-
-            thumb = None
-            if get_message_type(item) in (
-                "Document",
-                "Video",
-                "Audio",
-                "Animation",
-            ):
-                thumb = _download_private_media_thumbnail(
-                    acc,
-                    payload,
-                    work_dir,
-                    index,
-                )
-            downloads.append((item, file_path, thumb))
+        group_messages, downloads, work_dir = _download_private_media_group(
+            acc,
+            chatid,
+            msg,
+            progress_callback=progress,
+            progress_args=[message, "down"],
+        )
 
         if os.path.exists(down_status_file):
             os.remove(down_status_file)
@@ -777,7 +900,8 @@ def _forward_private_media_group_by_download(
     finally:
         if os.path.exists(down_status_file):
             os.remove(down_status_file)
-        shutil.rmtree(work_dir, ignore_errors=True)
+        if "work_dir" in locals():
+            shutil.rmtree(work_dir, ignore_errors=True)
         bot.delete_messages(message.chat.id, [smsg.id])
 
 
