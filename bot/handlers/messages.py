@@ -7,7 +7,12 @@ import os
 import time
 import threading
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import UserAlreadyParticipant, InviteHashExpired, UsernameNotOccupied
+from pyrogram.errors import (
+    FileReferenceExpired,
+    InviteHashExpired,
+    UserAlreadyParticipant,
+    UsernameNotOccupied,
+)
 
 from bot.handlers.instances import get_bot_instance, get_acc_instance
 from bot.handlers.watch_setup import (
@@ -349,47 +354,73 @@ def _get_bot_peer_id(bot):
     return int(me.id)
 
 
+def _copy_single_private_media(acc, destination, chatid, msg):
+    """Copy one private media message with Pyrogram's cached-media path."""
+    try:
+        return acc.copy_message(destination, chatid, msg.id)
+    except FileReferenceExpired as exc:
+        # A newly fetched message normally carries a fresh file reference.
+        # Refetching here can repair an expired reference without downloading.
+        fresh = acc.get_messages(chatid, msg.id)
+        if fresh is None:
+            raise RuntimeError(f"无法重新获取消息 {msg.id}") from exc
+        return acc.copy_message(destination, chatid, fresh.id)
+
+
 def _forward_private_media_direct(bot, acc, chatid, msg):
     """Copy a private media message to the bot chat without downloading it.
 
     The command message lives in the chat between the Telegram account and the
     bot. From the user client's point of view that chat is addressed by the
-    bot's user ID, so ``message.chat.id`` cannot be reused as the destination.
+    bot's user ID, so the command chat ID cannot be reused as the destination.
+
+    ``copy_message`` sends media through ``messages.SendMedia`` using its
+    ``file_id``. It deliberately avoids ``messages.ForwardMessages``, which is
+    the API restricted by Telegram's "no forwarding" chat setting. This matches
+    the public-channel path used by the bot client.
     """
     destination = _get_bot_peer_id(bot)
 
     if getattr(msg, "media_group_id", None):
-        copy_error = None
         try:
-            acc.copy_media_group(destination, chatid, msg.id)
-            return
+            return acc.copy_media_group(destination, chatid, msg.id)
         except Exception as exc:
-            copy_error = exc
+            logger.debug(
+                "媒体组整体复制失败，改逐条复制 %s/%s: %s",
+                chatid,
+                msg.id,
+                type(exc).__name__,
+            )
 
+        media_group = None
         try:
             media_group = acc.get_media_group(chatid, msg.id)
-            message_ids = [item.id for item in media_group] if media_group else [msg.id]
-            acc.forward_messages(destination, chatid, message_ids)
-            return
         except Exception as exc:
-            raise RuntimeError(
-                f"媒体组直接转发失败（复制: {copy_error}; 转发: {exc}）"
-            ) from exc
+            logger.debug("无法获取媒体组 %s/%s: %s", chatid, msg.id, exc)
 
-    copy_error = None
-    try:
-        acc.copy_message(destination, chatid, msg.id)
-        return
-    except Exception as exc:
-        copy_error = exc
+        messages = media_group or [msg]
+        errors = []
+        for item in messages:
+            try:
+                _copy_single_private_media(acc, destination, chatid, item)
+            except Exception as exc:
+                errors.append(f"{item.id}: {type(exc).__name__}: {exc}")
+
+        if not errors:
+            return
+        raise RuntimeError("; ".join(errors))
 
     try:
-        acc.forward_messages(destination, chatid, msg.id)
-        return
+        return _copy_single_private_media(acc, destination, chatid, msg)
     except Exception as exc:
-        raise RuntimeError(
-            f"媒体直接转发失败（复制: {copy_error}; 转发: {exc}）"
-        ) from exc
+        logger.warning(
+            "消息 %s/%s 缓存媒体复制失败: %s: %s",
+            chatid,
+            msg.id,
+            type(exc).__name__,
+            exc,
+        )
+        raise
 
 
 def handle_private(message: pyrogram.types.messages_and_media.message.Message, chatid: int, msgid: int):
@@ -406,10 +437,18 @@ def handle_private(message: pyrogram.types.messages_and_media.message.Message, c
 
     try:
         _forward_private_media_direct(bot, acc, chatid, msg)
-        logger.info(f"✅ 消息 {msgid} 已直接从私有会话复制到 Bot 会话")
+        logger.info(
+            "✅ 消息 %s 已通过缓存媒体直接从私有会话复制到 Bot 会话（未下载）",
+            msgid,
+        )
         return
     except Exception as exc:
-        logger.warning(f"消息 {msgid} 无法直接复制，回退到下载后重传: {exc}")
+        logger.warning(
+            "消息 %s 无法直接复制，回退到下载后重传: %s: %s",
+            msgid,
+            type(exc).__name__,
+            exc,
+        )
 
     down_status_file = f"downstatus{message.chat.id}{message.id}.txt"
     up_status_file = f"upstatus{message.chat.id}{message.id}.txt"

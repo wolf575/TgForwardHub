@@ -1,6 +1,8 @@
 import os
 import unittest
 
+from pyrogram.errors import FileReferenceExpired
+
 from bot.handlers.messages import (
     _forward_private_media_direct,
     _get_bot_peer_id,
@@ -14,15 +16,26 @@ class _Message:
 
 
 class _Acc:
-    def __init__(self, copy_error=None, forward_error=None):
+    def __init__(
+        self,
+        copy_error=None,
+        forward_error=None,
+        media_group_error=None,
+        fetched_message=None,
+        copy_error_once=False,
+    ):
         self.copy_error = copy_error
+        self.copy_error_once = copy_error_once
         self.forward_error = forward_error
+        self.media_group_error = media_group_error
+        self.fetched_message = fetched_message
         self.calls = []
         self.media_group = [_Message(10), _Message(11)]
 
     def copy_message(self, *args):
         self.calls.append(("copy_message", args))
-        if self.copy_error:
+        copy_attempts = sum(1 for call in self.calls if call[0] == "copy_message")
+        if self.copy_error and not (self.copy_error_once and copy_attempts > 1):
             raise self.copy_error
 
     def forward_messages(self, *args):
@@ -32,12 +45,16 @@ class _Acc:
 
     def copy_media_group(self, *args):
         self.calls.append(("copy_media_group", args))
-        if self.copy_error:
-            raise self.copy_error
+        if self.media_group_error:
+            raise self.media_group_error
 
     def get_media_group(self, *args):
         self.calls.append(("get_media_group", args))
         return self.media_group
+
+    def get_messages(self, *args):
+        self.calls.append(("get_messages", args))
+        return self.fetched_message
 
 
 class _Bot:
@@ -60,16 +77,16 @@ class PrivateMessageDirectForwardTests(unittest.TestCase):
             ("copy_message", (9001, -1004445556667, 55)),
         )
 
-    def test_forward_is_attempted_when_copy_is_restricted(self):
+    def test_forward_is_not_used_when_copy_is_restricted(self):
         acc = _Acc(copy_error=RuntimeError("copy forbidden"))
         message = _Message(55)
 
-        _forward_private_media_direct(_Bot(9001), acc, -1004445556667, message)
+        with self.assertRaises(RuntimeError):
+            _forward_private_media_direct(
+                _Bot(9001), acc, -1004445556667, message
+            )
 
-        self.assertEqual(
-            acc.calls[1],
-            ("forward_messages", (9001, -1004445556667, 55)),
-        )
+        self.assertNotIn("forward_messages", [call[0] for call in acc.calls])
 
     def test_media_group_is_copied_as_a_group(self):
         acc = _Acc()
@@ -85,7 +102,6 @@ class PrivateMessageDirectForwardTests(unittest.TestCase):
     def test_direct_failure_is_reported_for_download_fallback(self):
         acc = _Acc(
             copy_error=RuntimeError("copy forbidden"),
-            forward_error=RuntimeError("forward forbidden"),
         )
 
         with self.assertRaises(RuntimeError):
@@ -95,6 +111,41 @@ class PrivateMessageDirectForwardTests(unittest.TestCase):
                 -1004445556667,
                 _Message(55),
             )
+
+    def test_expired_file_reference_is_refetched_and_copied(self):
+        fresh_message = _Message(55)
+        acc = _Acc(
+            copy_error=FileReferenceExpired(400, "FILE_REFERENCE_EXPIRED"),
+            fetched_message=fresh_message,
+            copy_error_once=True,
+        )
+
+        _forward_private_media_direct(_Bot(9001), acc, -1004445556667, _Message(55))
+
+        self.assertEqual(
+            acc.calls,
+            [
+                ("copy_message", (9001, -1004445556667, 55)),
+                ("get_messages", (-1004445556667, 55)),
+                ("copy_message", (9001, -1004445556667, 55)),
+            ],
+        )
+
+    def test_media_group_falls_back_to_cached_copies_not_forwarding(self):
+        acc = _Acc(media_group_error=RuntimeError("album copy failed"))
+        message = _Message(55, media_group_id="album")
+
+        _forward_private_media_direct(_Bot(9001), acc, -1004445556667, message)
+
+        self.assertEqual(
+            acc.calls,
+            [
+                ("copy_media_group", (9001, -1004445556667, 55)),
+                ("get_media_group", (-1004445556667, 55)),
+                ("copy_message", (9001, -1004445556667, 10)),
+                ("copy_message", (9001, -1004445556667, 11)),
+            ],
+        )
 
     def test_old_progress_status_filename_is_not_used(self):
         source_path = os.path.join(
