@@ -4,9 +4,18 @@ Message handlers for the bot
 import pyrogram
 import re
 import os
+import shutil
+import tempfile
 import time
 import threading
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    InputMediaAudio,
+    InputMediaDocument,
+    InputMediaPhoto,
+    InputMediaVideo,
+)
 from pyrogram.errors import (
     ChatForwardsRestricted,
     FileReferenceExpired,
@@ -465,6 +474,313 @@ def _forward_private_media_via_bot(bot, destination_chat_id, chatid, msgid):
         return False
 
 
+def _get_private_media_group_messages(acc, chatid, msg):
+    """Return the complete private media group, ordered by message ID."""
+    if not getattr(msg, "media_group_id", None):
+        return [msg]
+
+    try:
+        media_group = acc.get_media_group(chatid, msg.id) or []
+    except Exception as exc:
+        logger.debug(
+            "无法获取私有媒体组 %s/%s，将仅处理当前消息: %s",
+            chatid,
+            msg.id,
+            exc,
+        )
+        media_group = []
+
+    by_id = {item.id: item for item in media_group}
+    by_id[msg.id] = msg
+    return [by_id[message_id] for message_id in sorted(by_id)]
+
+
+def _should_forward_private_media_group(message):
+    """Mirror the public-link rule for deciding whether to use the album."""
+    text = getattr(message, "text", "") or ""
+    if "?single" in text:
+        return True
+
+    datas = text.split("/")
+    if len(datas) < 2:
+        return False
+
+    parts = datas[-1].replace("?single", "").split("-")
+    try:
+        if len(parts) == 1:
+            from_id = to_id = int(parts[0].strip())
+        elif len(parts) == 2:
+            from_id, to_id = (
+                int(parts[0].strip()),
+                int(parts[1].strip()),
+            )
+        else:
+            return False
+    except (TypeError, ValueError):
+        return False
+    return from_id == to_id
+
+
+def _get_private_media_payload(item):
+    """Return the media object attached to a private message, if any."""
+    msg_type = get_message_type(item)
+    if msg_type == "Text":
+        return None
+    return getattr(item, msg_type.lower(), None)
+
+
+def _download_private_media_thumbnail(acc, payload, work_dir, index):
+    """Download an optional thumbnail without failing the whole media group."""
+    thumbs = getattr(payload, "thumbs", None)
+    if not thumbs:
+        return None
+
+    try:
+        return acc.download_media(
+            thumbs[0].file_id,
+            file_name=os.path.join(work_dir, f"thumb_{index}.jpg"),
+        )
+    except Exception as exc:
+        logger.debug("无法下载媒体组第 %s 项缩略图: %s", index + 1, exc)
+        return None
+
+
+def _build_private_media_group_inputs(group_messages, downloads):
+    """Build Pyrogram InputMedia objects for a downloaded media group."""
+    caption_message = next(
+        (item for item in group_messages if getattr(item, "caption", None)),
+        group_messages[0],
+    )
+    caption = caption_message.caption or ""
+    caption_entities = caption_message.caption_entities
+    media_inputs = []
+
+    for index, (item, file_path, thumb) in enumerate(downloads):
+        item_caption = caption if index == 0 else ""
+        item_caption_entities = caption_entities if index == 0 else None
+        msg_type = get_message_type(item)
+
+        if msg_type == "Photo":
+            media_inputs.append(
+                InputMediaPhoto(
+                    file_path,
+                    caption=item_caption,
+                    caption_entities=item_caption_entities,
+                    has_spoiler=getattr(item, "has_media_spoiler", None),
+                )
+            )
+        elif msg_type == "Video":
+            video = item.video
+            media_inputs.append(
+                InputMediaVideo(
+                    file_path,
+                    thumb=thumb,
+                    caption=item_caption,
+                    caption_entities=item_caption_entities,
+                    width=video.width or 0,
+                    height=video.height or 0,
+                    duration=video.duration or 0,
+                    supports_streaming=(
+                        video.supports_streaming
+                        if video.supports_streaming is not None
+                        else True
+                    ),
+                    has_spoiler=getattr(item, "has_media_spoiler", None),
+                )
+            )
+        elif msg_type == "Document":
+            media_inputs.append(
+                InputMediaDocument(
+                    file_path,
+                    thumb=thumb,
+                    caption=item_caption,
+                    caption_entities=item_caption_entities,
+                )
+            )
+        elif msg_type == "Audio":
+            audio = item.audio
+            media_inputs.append(
+                InputMediaAudio(
+                    file_path,
+                    thumb=thumb,
+                    caption=item_caption,
+                    caption_entities=item_caption_entities,
+                    duration=audio.duration or 0,
+                    performer=audio.performer or "",
+                    title=audio.title or "",
+                )
+            )
+        elif msg_type in ("Animation", "Sticker", "Voice"):
+            # These are not accepted as native album entries by Telegram. Send
+            # them as documents so every item is still delivered together.
+            media_inputs.append(
+                InputMediaDocument(
+                    file_path,
+                    thumb=thumb,
+                    caption=item_caption,
+                    caption_entities=item_caption_entities,
+                )
+            )
+        else:
+            raise RuntimeError(f"媒体组包含不支持的消息类型: {msg_type}")
+
+    return media_inputs
+
+
+def _send_downloaded_private_media_sequentially(
+    bot, destination_chat_id, source_msg, file_path, thumb=None
+):
+    """Upload one downloaded private media item with its original format."""
+    msg_type = get_message_type(source_msg)
+    caption = source_msg.caption
+    caption_entities = source_msg.caption_entities
+
+    if msg_type == "Document":
+        bot.send_document(
+            destination_chat_id,
+            file_path,
+            thumb=thumb,
+            caption=caption,
+            caption_entities=caption_entities,
+        )
+    elif msg_type == "Video":
+        video = source_msg.video
+        bot.send_video(
+            destination_chat_id,
+            file_path,
+            duration=video.duration,
+            width=video.width,
+            height=video.height,
+            thumb=thumb,
+            caption=caption,
+            caption_entities=caption_entities,
+        )
+    elif msg_type == "Animation":
+        bot.send_animation(
+            destination_chat_id,
+            file_path,
+            caption=caption,
+            caption_entities=caption_entities,
+        )
+    elif msg_type == "Sticker":
+        bot.send_sticker(destination_chat_id, file_path)
+    elif msg_type == "Voice":
+        bot.send_voice(
+            destination_chat_id,
+            file_path,
+            caption=caption,
+            caption_entities=caption_entities,
+        )
+    elif msg_type == "Audio":
+        bot.send_audio(
+            destination_chat_id,
+            file_path,
+            caption=caption,
+            caption_entities=caption_entities,
+        )
+    elif msg_type == "Photo":
+        bot.send_photo(
+            destination_chat_id,
+            file_path,
+            caption=caption,
+            caption_entities=caption_entities,
+        )
+    else:
+        raise RuntimeError(f"不支持的消息类型: {msg_type}")
+
+
+def _send_downloaded_private_media_group(
+    bot, destination_chat_id, group_messages, downloads
+):
+    """Upload a downloaded group as an album, falling back to item uploads."""
+    media_inputs = _build_private_media_group_inputs(group_messages, downloads)
+
+    try:
+        bot.send_media_group(destination_chat_id, media_inputs)
+        return
+    except Exception as exc:
+        logger.warning(
+            "媒体组上传失败，改为逐条上传: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+
+    for item, file_path, thumb in downloads:
+        _send_downloaded_private_media_sequentially(
+            bot,
+            destination_chat_id,
+            item,
+            file_path,
+            thumb=thumb,
+        )
+
+
+def _forward_private_media_group_by_download(
+    message, bot, acc, chatid, msg
+):
+    """Download and re-upload a complete restricted private media group."""
+    group_messages = _get_private_media_group_messages(acc, chatid, msg)
+    work_dir = tempfile.mkdtemp(prefix="tg_forward_album_")
+    down_status_file = f"downstatus{message.chat.id}{message.id}.txt"
+    smsg = bot.send_message(
+        message.chat.id,
+        "__⬇️ 正在下载媒体组__",
+        reply_to_message_id=message.id,
+    )
+    dosta = threading.Thread(
+        target=downstatus,
+        args=(down_status_file, smsg, bot),
+        daemon=True,
+    )
+    dosta.start()
+    downloads = []
+
+    try:
+        for index, item in enumerate(group_messages):
+            payload = _get_private_media_payload(item)
+            if payload is None:
+                raise RuntimeError(f"媒体组消息 {item.id} 没有可下载的媒体")
+
+            file_path = acc.download_media(
+                item,
+                file_name=os.path.join(work_dir, ""),
+                progress=progress,
+                progress_args=[message, "down"],
+            )
+            if file_path is None:
+                raise RuntimeError(f"媒体组消息 {item.id} 下载失败")
+
+            thumb = None
+            if get_message_type(item) in (
+                "Document",
+                "Video",
+                "Audio",
+                "Animation",
+            ):
+                thumb = _download_private_media_thumbnail(
+                    acc,
+                    payload,
+                    work_dir,
+                    index,
+                )
+            downloads.append((item, file_path, thumb))
+
+        if os.path.exists(down_status_file):
+            os.remove(down_status_file)
+        bot.edit_message_text(smsg.chat.id, smsg.id, "__⬆️ 正在上传媒体组__")
+        _send_downloaded_private_media_group(
+            bot,
+            message.chat.id,
+            group_messages,
+            downloads,
+        )
+    finally:
+        if os.path.exists(down_status_file):
+            os.remove(down_status_file)
+        shutil.rmtree(work_dir, ignore_errors=True)
+        bot.delete_messages(message.chat.id, [smsg.id])
+
+
 def handle_private(message: pyrogram.types.messages_and_media.message.Message, chatid: int, msgid: int):
     """Forward a private message, preferring a server-side copy."""
     bot = get_bot_instance()
@@ -508,6 +824,24 @@ def handle_private(message: pyrogram.types.messages_and_media.message.Message, c
             "Bot 客户端也无法直接复制消息 %s，回退到下载后重传",
             msgid,
         )
+
+    group_messages = _get_private_media_group_messages(acc, chatid, msg)
+    if (
+        len(group_messages) > 1
+        and _should_forward_private_media_group(message)
+    ):
+        logger.info(
+            "✅ 检测到受限私有媒体组，共 %s 项，开始整组下载后重传",
+            len(group_messages),
+        )
+        _forward_private_media_group_by_download(
+            message,
+            bot,
+            acc,
+            chatid,
+            msg,
+        )
+        return
 
     down_status_file = f"downstatus{message.chat.id}{message.id}.txt"
     up_status_file = f"upstatus{message.chat.id}{message.id}.txt"
