@@ -6,6 +6,7 @@ Flask request short enough for Cloudflare.
 """
 
 import sys
+import time
 import traceback
 from typing import Any, Dict
 
@@ -16,6 +17,10 @@ from web_setup import (
     _remove_session_files,
     _update_job,
 )
+
+
+_FLOW_TIMEOUT = 600
+_POLL_INTERVAL = 0.4
 
 
 def _friendly_pyrogram_error(exc: Exception) -> str:
@@ -98,7 +103,10 @@ def run_start(setup_id: str) -> int:
     _update_job(setup_id, status="running", message="正在连接 Telegram 并发送验证码")
 
     client = None
+    finished = False
     try:
+        from pyrogram.errors import PasswordHashInvalid, SessionPasswordNeeded
+
         client = _new_client(job)
         client.connect()
         sent_code = client.send_code(job["phone_number"])
@@ -113,7 +121,129 @@ def run_start(setup_id: str) -> int:
             message=None,
             error=None,
         )
-        return 0
+
+        deadline = time.time() + _FLOW_TIMEOUT
+        waiting_password = False
+
+        while time.time() < deadline:
+            current = _read_job(setup_id)
+            if not current:
+                return 1
+
+            if current.get("status") != "queued":
+                time.sleep(_POLL_INTERVAL)
+                continue
+
+            if waiting_password:
+                password = str(current.get("two_factor_password") or "")
+                if not password:
+                    time.sleep(_POLL_INTERVAL)
+                    continue
+
+                _update_job(
+                    setup_id,
+                    status="running",
+                    message="正在验证两步验证密码",
+                    two_factor_password=None,
+                )
+                try:
+                    client.check_password(password)
+                except PasswordHashInvalid as exc:
+                    _update_job(
+                        setup_id,
+                        stage="password",
+                        status="error",
+                        error=_friendly_pyrogram_error(exc),
+                    )
+                    continue
+                except Exception as exc:
+                    _update_job(
+                        setup_id,
+                        stage="password",
+                        status="error",
+                        error=_friendly_pyrogram_error(exc),
+                    )
+                    print(
+                        f"[web-auth] password failed for {setup_id}: "
+                        f"{type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                    traceback.print_exc()
+                    return 1
+
+                session_string = client.export_session_string()
+                _update_job(
+                    setup_id,
+                    stage="done",
+                    status="done",
+                    session_string=session_string,
+                    message="Session String 已生成，正在写入配置",
+                    error=None,
+                )
+                finished = True
+                return 0
+
+            code = str(current.get("login_code") or "").strip()
+            if not code:
+                time.sleep(_POLL_INTERVAL)
+                continue
+
+            _update_job(
+                setup_id,
+                status="running",
+                message="正在验证验证码",
+                login_code=None,
+            )
+            try:
+                client.sign_in(
+                    job["phone_number"],
+                    phone_code_hash,
+                    code,
+                )
+            except SessionPasswordNeeded:
+                _update_job(
+                    setup_id,
+                    stage="password",
+                    status="ready",
+                    message="账号已开启两步验证，请输入两步验证密码",
+                    error=None,
+                )
+                waiting_password = True
+                continue
+            except Exception as exc:
+                _update_job(
+                    setup_id,
+                    stage="code",
+                    status="error",
+                    error=_friendly_pyrogram_error(exc),
+                )
+                print(
+                    f"[web-auth] code failed for {setup_id}: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+                traceback.print_exc()
+                return 1
+
+            session_string = client.export_session_string()
+            _update_job(
+                setup_id,
+                stage="done",
+                status="done",
+                session_string=session_string,
+                message="Session String 已生成，正在写入配置",
+                error=None,
+            )
+            finished = True
+            return 0
+
+        _update_job(
+            setup_id,
+            stage="code",
+            status="error",
+            error="验证码已过期，请重新获取验证码",
+        )
+        return 1
     except Exception as exc:
         _update_job(
             setup_id,
@@ -121,7 +251,6 @@ def run_start(setup_id: str) -> int:
             stage="code",
             error=_friendly_pyrogram_error(exc),
         )
-        _remove_session_files(job["session_name"])
         print(
             f"[web-auth] start failed for {setup_id}: {type(exc).__name__}: {exc}",
             flush=True,
@@ -130,6 +259,10 @@ def run_start(setup_id: str) -> int:
         return 1
     finally:
         _disconnect(client)
+        if not finished:
+            current = _read_job(setup_id)
+            if current and current.get("status") != "done":
+                _remove_session_files(job["session_name"])
 
 
 def run_code(setup_id: str) -> int:

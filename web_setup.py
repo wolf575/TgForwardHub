@@ -30,7 +30,7 @@ SESSION_DIR = os.path.join(DATA_DIR, "auth_sessions")
 AUTH_JOBS_DIR = os.path.join(DATA_DIR, "auth_jobs")
 WORKER_SCRIPT = os.path.join(BASE_DIR, "web_auth_worker.py")
 
-_AUTH_WORKER_TIMEOUT = 90
+_AUTH_WORKER_TIMEOUT = 660
 _finalize_lock = threading.Lock()
 _job_lock = threading.Lock()
 _finalize_scheduled: set = set()
@@ -383,7 +383,7 @@ def start_session_auth(
 
 
 def submit_code(setup_id: str, code: str) -> Dict[str, Any]:
-    """Submit a Telegram login code in a fresh isolated process."""
+    """Queue a Telegram login code for the already-running auth worker."""
     job = _read_job(setup_id)
     if not job:
         return {"error": "登录流程不存在或已过期，请重新开始"}
@@ -396,7 +396,7 @@ def submit_code(setup_id: str, code: str) -> Dict[str, Any]:
             "error": "验证码不能为空",
         }
 
-    allowed_statuses = {"sent", "error"}
+    allowed_statuses = {"sent"}
     if job.get("status") not in allowed_statuses:
         return {"error": "验证码尚未发送或登录流程已过期，请重新开始"}
 
@@ -407,9 +407,6 @@ def submit_code(setup_id: str, code: str) -> Dict[str, Any]:
         message="正在验证验证码",
         login_code=code,
     )
-    spawn_error = _spawn_worker(setup_id, "code")
-    if spawn_error:
-        return {"error": spawn_error.get("error", "无法启动 Telegram 鉴权进程")}
 
     return {
         "setup_id": setup_id,
@@ -418,7 +415,7 @@ def submit_code(setup_id: str, code: str) -> Dict[str, Any]:
 
 
 def submit_password(setup_id: str, password: str) -> Dict[str, Any]:
-    """Complete two-factor authentication in a fresh isolated process."""
+    """Queue a two-factor password for the already-running auth worker."""
     job = _read_job(setup_id)
     if not job:
         return {"error": "登录流程不存在或已过期，请重新开始"}
@@ -442,9 +439,6 @@ def submit_password(setup_id: str, password: str) -> Dict[str, Any]:
         message="正在完成两步验证",
         two_factor_password=password,
     )
-    spawn_error = _spawn_worker(setup_id, "password")
-    if spawn_error:
-        return {"error": spawn_error.get("error", "无法启动 Telegram 鉴权进程")}
 
     return {
         "setup_id": setup_id,

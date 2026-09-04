@@ -205,8 +205,15 @@ async function resumeSetupFlow(pending) {
 
     if (status.status === "error") {
       setSetupMessage(status.error || "Telegram 登录流程失败");
-      if (pending.action === "start") {
+      const shouldReset =
+        pending.action === "start" ||
+        /验证码已过期|验证码不正确|验证码为空|重新获取验证码/.test(
+          status.error || ""
+        );
+      if (shouldReset) {
         setSetupStage("idle");
+        setPendingSetupFields("", "");
+        clearSetupQuery();
       }
       return;
     }
