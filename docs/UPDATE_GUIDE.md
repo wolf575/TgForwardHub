@@ -6,15 +6,15 @@
 
 ```bash
 tar -czf save-restricted-bot-backup-$(date +%Y%m%d).tar.gz \
-  data .env docker-compose.yml
+  data downloads docker-compose.yml
 ```
 
-Windows 可手动复制 `data`、`.env`、`docker-compose.yml` 到备份目录。
+Windows 可手动复制 `data`、`downloads`、`docker-compose.yml` 到备份目录。
 
 ## 常规更新
 
 ```bash
-cd Save-Restricted-Bot
+cd TgForwardHub
 docker compose down
 git pull
 docker compose build --no-cache
@@ -42,15 +42,17 @@ docker compose logs -f --tail=200
 2. 修改 Token、API ID、API Hash 或重新生成 Session String
 3. 保存后重启容器
 
-也可以手动编辑 `data/config/config.json` 或项目根目录 `.env`。
+也可以手动编辑 `data/config/config.json`。Docker 部署不需要 `.env`。
 
 ## 数据迁移
 
-将旧服务器的 `data/`、`downloads/`、`.env` 复制到新服务器项目目录，然后：
+将旧服务器的 `data/`、`downloads/` 复制到新服务器持久化目录，然后：
 
 ```bash
 docker compose up -d --build
 ```
+
+如果使用云端镜像，迁移后直接重新执行 `docker run`，不要添加 `--env-file .env`。
 
 ## 清理
 
@@ -67,4 +69,3 @@ git checkout <上一个可用提交>
 docker compose build --no-cache
 docker compose up -d
 ```
-

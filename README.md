@@ -14,7 +14,8 @@ TG Forward Hub 是一个把「网页端批量转发」和「Telegram 自动监�
 - 批量转发只使用用户客户端；受限私聊无法缓存复制时，自动整组下载后重传，避免媒体组只发送第一项。
 - 支持两种转发方式：
   - `保留来源`：使用 `forward_messages` 保留原消息的来源签名。
-  - `隐藏来源`：使用 `copy_message` 复制消息，不显示原来源。
+  - `隐藏来源`：优先使用用户客户端原生的 `messages.ForwardMessages`
+    `drop_author=True` 路径保留 Telegram 缓存媒体并隐藏原来源；失败后再回退到缓存复制和下载重传，全程不使用 Bot 身份。
 - 任务实时展示进度、成功、失败和跳过数量，可取消任务。
 - 命令历史持久化到 `data/history.db`，刷新页面后仍可查看历史任务。
 
@@ -67,7 +68,7 @@ TgForwardHub/
 ├── docker-compose.yml
 ├── docker-run.ps1         # Windows 一键 docker run
 ├── docker-run.sh          # Linux/macOS 一键 docker run
-└── .env.example
+└── config.json.example    # Web UI 配置格式参考
 ```
 
 ## 准备 Telegram 凭据
@@ -119,16 +120,6 @@ docker compose logs -f
 
 打开 `http://服务器IP:10000`。
 
-如果你愿意提前填写凭据，也可以创建可选的 `.env`：
-
-```dotenv
-TOKEN=123456789:AA...
-ID=123456
-HASH=abc...
-STRING=1...
-FLASK_SECRET_KEY=replace-with-a-long-random-string
-```
-
 默认账号为 `admin` / `admin`。
 
 ## Docker Run 部署
@@ -140,7 +131,8 @@ FLASK_SECRET_KEY=replace-with-a-long-random-string
 3. 进入「设置」页，在统一表单中填写 Bot Token、API ID、API Hash，并生成 Session String。
 4. 配置会持久化到 `/app/data/config/config.json`，重启容器不会丢失。
 
-你不需要提前创建 `.env` 文件。
+你不需要提前创建 `.env` 文件，也不需要把 `TOKEN`、`ID`、`HASH`、`STRING`
+写在 Docker 环境变量或 Compose 配置里。
 
 > `docker run` 命令中不要添加 `--env-file .env`。云端容器通过 Web UI 初始化
 > 凭据，不使用宿主机 `.env`；添加该参数会因为没有这个文件而直接报错：
@@ -255,7 +247,7 @@ docker run -d `
 
 ## 数据与安全
 
-- 所有敏感数据（`.env`、`config.json`、Session 文件）均已加入 `.gitignore` 和 `.dockerignore`，不会提交到 Git，也不会进入 Docker 镜像。
+- Docker 部署不依赖 `.env`；`config.json` 和 Session 文件已加入 `.gitignore` 与 `.dockerignore`，不会提交到 Git，也不会进入 Docker 镜像。
 - 持久化数据保存在宿主机 `data` 目录，下载媒体保存在 `downloads` 目录。
 - 公网部署时务必修改 `FLASK_SECRET_KEY` 和管理员密码。
 - Telegram 登录凭据和 Session String 具有账号控制权限，请勿泄露。

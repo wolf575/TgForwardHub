@@ -1,5 +1,8 @@
 # 时区修复说明 (Timezone Fix)
 
+当前 Docker 部署直接在 `docker run` / `docker compose` 的基础环境变量中设置
+`TZ=Asia/Shanghai`，不需要 `.env`。
+
 ## 问题描述
 
 之前版本的 Save-Restricted-Bot 使用 UTC 时间（世界标准时间）来记录笔记的时间戳，导致中国用户看到的时间比实际时间早 8 小时。
@@ -39,12 +42,7 @@ environment:
 ```
 
 #### 本地运行
-在 `.env` 文件中添加：
-```env
-TZ=Asia/Shanghai
-```
-
-或在启动前设置环境变量：
+在启动前设置环境变量：
 ```bash
 # Linux/macOS
 export TZ=Asia/Shanghai
@@ -97,7 +95,7 @@ docker-compose logs -f
 ```
 
 #### 本地运行用户
-1. 在 `.env` 文件中添加 `TZ=Asia/Shanghai`
+1. 启动前设置 `TZ=Asia/Shanghai`
 2. 重启 Bot：
 ```bash
 # 停止当前运行的 Bot (Ctrl+C)
@@ -139,9 +137,10 @@ environment:
 ```
 
 #### 本地运行
-编辑 `.env` 文件：
-```env
-TZ=Asia/Tokyo  # 修改为你的时区
+在启动命令前设置环境变量：
+```bash
+export TZ=Asia/Tokyo
+python main.py
 ```
 
 ## 验证时区设置
@@ -207,7 +206,6 @@ python --version
 - `database.py` - 添加时区导入和时间戳生成
 - `clean_duplicates.py` - 添加时区导入和文件命名
 - `docker-compose.yml` - 添加 TZ 环境变量
-- `.env.example` - 添加 TZ 配置示例
 - `TIMEZONE_FIX.md` - 本文档
 
 ## 更新日志

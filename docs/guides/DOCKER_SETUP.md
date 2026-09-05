@@ -1,93 +1,78 @@
-# Docker 部署快速指南 / Docker Setup Quick Guide
+# Docker 部署指南
 
-[English](#english) | [中文](#中文)
+本项目采用开箱即用的 Web UI 初始化方式。容器启动时只需要提供数据目录、下载目录、容器内端口和时区；Bot Token、API ID、API Hash、Session String 全部在网页中填写并保存到持久化的 `/app/data/config/config.json`。
 
----
-
-## English
-
-### Quick Start with Docker Compose
-
-1. Clone the repository
-2. Copy `.env.example` to `.env` and fill in your credentials
-3. Run `docker-compose up -d`
-
-### Environment Variables
-
-- `TOKEN`: Your bot token from @BotFather
-- `ID`: Your API ID from my.telegram.org
-- `HASH`: Your API Hash from my.telegram.org
-- `STRING`: Your session string (optional)
-
-### Useful Commands
+## 使用云端镜像
 
 ```bash
-# Start the bot
-docker-compose up -d
+docker pull ghcr.io/wolf575/tg-forward-hub:latest
 
-# View logs
-docker-compose logs -f
-
-# Restart the bot
-docker-compose restart
-
-# Stop the bot
-docker-compose down
-
-# Update the bot
-docker-compose down
-docker-compose build --no-cache
-docker-compose up -d
+docker run -d \
+  --name tg-forward-hub \
+  --restart unless-stopped \
+  -p 10001:10000 \
+  -v /docker-data/tfh/data:/app/data \
+  -v /docker-data/tfh/downloads:/app/downloads \
+  -e DATA_DIR=/app/data \
+  -e PORT=10000 \
+  -e TZ=Asia/Shanghai \
+  ghcr.io/wolf575/tg-forward-hub:latest
 ```
 
----
+容器内 Web 服务监听 `10000`，宿主机通过 `10001` 访问：
+`http://服务器IP:10001`。
 
-## 中文
-
-### 使用 Docker Compose 快速开始
-
-1. 克隆仓库
-2. 复制 `.env.example` 为 `.env` 并填入你的凭据
-3. 运行 `docker-compose up -d`
-
-### 环境变量
-
-- `TOKEN`: 从 @BotFather 获取的机器人 token
-- `ID`: 从 my.telegram.org 获取的 API ID
-- `HASH`: 从 my.telegram.org 获取的 API Hash
-- `STRING`: 会话字符串（可选）
-
-### 常用命令
+## 使用 Docker Compose
 
 ```bash
-# 启动机器人
-docker-compose up -d
+cd TgForwardHub
+docker compose up -d --build
+docker compose logs -f
+```
 
+默认地址为 `http://服务器IP:10000`。Compose 只声明运行所需的基础环境，不要求创建 `.env`，也不读取 Bot 凭据。
+
+## 初始化
+
+1. 打开 Web 页面，使用默认账号 `admin` / `admin` 登录。
+2. 进入「设置」，填写 Bot Token、API ID 和 API Hash。
+3. 填写 Telegram 手机号，依次完成验证码和两步验证，生成 Session String。
+4. 保存后后台会自动启动 Bot 和用户客户端。
+
+配置保存在宿主机 `data` 目录，重建容器不会丢失。
+
+## 常用命令
+
+```bash
 # 查看日志
-docker-compose logs -f
+docker logs -f tg-forward-hub
 
-# 重启机器人
-docker-compose restart
+# 重启容器
+docker restart tg-forward-hub
 
-# 停止机器人
-docker-compose down
-
-# 更新机器人
-docker-compose down
-docker-compose build --no-cache
-docker-compose up -d
+# 更新到最新镜像
+docker pull ghcr.io/wolf575/tg-forward-hub:latest
+docker rm -f tg-forward-hub
+# 再执行上面的 docker run 命令
 ```
 
-### 目录结构
+## 端口与持久化
 
+- `-p 10001:10000`：宿主机 `10001` 映射到容器内 Web 端口 `10000`。
+- 如需同时修改容器内端口，必须让 `-p` 的右侧和 `PORT` 保持一致，例如
+  `-p 10001:10001 -e PORT=10001`。
+- `data` 保存配置、会话、数据库和历史记录。
+- `downloads` 保存受限媒体下载回退时的临时上传文件。
+
+## 禁止使用 `.env`
+
+不要创建 `.env`，也不要在 `docker run` 或 `docker compose` 命令中添加
+`--env-file .env`。这个项目的云端容器不读取宿主机凭据文件；没有该文件时，
+Docker 会直接报错：
+
+```text
+docker: --env-file: open .env: no such file or directory
 ```
-.
-├── main.py              # 主程序
-├── app.py               # Flask Web 服务
-├── Dockerfile           # Docker 镜像配置
-├── docker-compose.yml   # Docker Compose 配置
-├── .env.example         # 环境变量示例
-├── config.json.example  # 配置文件示例
-├── requirements.txt     # Python 依赖
-└── downloads/           # 下载文件目录（自动创建）
-```
+
+需要重置配置时，在 Web UI 中重新填写，或删除持久化目录里的
+`data/config/config.json` 后重启容器。
