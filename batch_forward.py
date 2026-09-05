@@ -16,12 +16,17 @@ import uuid
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from pyrogram.errors import ChatForwardsRestricted, FileReferenceExpired
+from pyrogram.errors import (
+    ChatForwardsRestricted,
+    FileReferenceExpired,
+    FloodWait,
+    InternalServerError,
+    Timeout as TelegramTimeout,
+)
 
 from database import DATA_DIR
 from bot.handlers.messages import (
     _copy_single_private_media,
-    _download_private_media_group,
     _download_private_media_thumbnail,
     _get_private_media_group_messages,
     _get_private_media_payload,
@@ -30,11 +35,14 @@ from bot.handlers.messages import (
 )
 from bot.handlers.instances import get_acc_instance
 from bot.utils.helpers import get_message_type
+from bot.utils.logger import get_logger
 from bot.workers.message_worker import MessageWorker
 from pyrogram_compat import apply_pyrogram_peer_id_compat, normalize_private_channel_ref
 
 
 apply_pyrogram_peer_id_compat()
+
+logger = get_logger(__name__)
 
 
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
@@ -384,6 +392,212 @@ def _worker_execute(worker, name, operation):
     return worker._execute_with_flood_retry(name, operation)
 
 
+def _emit_log(message, log, level="info"):
+    """Write a batch step to the container log and the in-memory task log."""
+    if log is not None:
+        try:
+            log(message, level=level)
+        except Exception:
+            pass
+    else:
+        getattr(logger, level, logger.info)("[batch] %s", message)
+
+
+def _is_transient_download_error(exc):
+    return isinstance(
+        exc,
+        (
+            FloodWait,
+            InternalServerError,
+            TelegramTimeout,
+            TimeoutError,
+            ConnectionError,
+            OSError,
+        ),
+    )
+
+
+def _download_batch_media_with_retry(
+    acc,
+    item,
+    file_name,
+    log,
+    attempts=3,
+):
+    """Download one media item, retrying Telegram's transient failures."""
+    item_id = getattr(item, "id", "unknown")
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        _emit_log(
+            f"开始下载受限媒体 {item_id}，第 {attempt}/{attempts} 次",
+            log,
+        )
+        try:
+            file_path = acc.download_media(item, file_name=file_name)
+            if file_path is None:
+                last_error = RuntimeError(
+                    f"媒体 {item_id} 下载失败：Telegram 未返回文件数据"
+                )
+                _emit_log(
+                    f"受限媒体 {item_id} 第 {attempt}/{attempts} 次下载返回空结果，"
+                    "将稍后重试",
+                    log,
+                    "warning",
+                )
+                if attempt < attempts:
+                    time.sleep(1.5 * attempt)
+                    continue
+                break
+            _emit_log(
+                f"受限媒体 {item_id} 下载完成: {file_path}",
+                log,
+            )
+            return file_path
+        except FloodWait as exc:
+            last_error = exc
+            wait = int(getattr(exc, "value", 0) or 0) + 1
+            _emit_log(
+                f"受限媒体 {item_id} 下载遇到 FloodWait，等待 {wait} 秒",
+                log,
+                "warning",
+            )
+            if attempt < attempts:
+                time.sleep(wait)
+                continue
+        except Exception as exc:
+            last_error = exc
+            if not _is_transient_download_error(exc):
+                raise
+            _emit_log(
+                f"受限媒体 {item_id} 下载失败: {type(exc).__name__}: {exc}",
+                log,
+                "warning",
+            )
+            if attempt < attempts:
+                time.sleep(1.5 * attempt)
+                continue
+
+    raise last_error
+
+
+def _download_batch_media_group_items(
+    acc,
+    source_id,
+    group_messages,
+    log,
+    attempts=3,
+):
+    """Download each album item with independent retries and transient skips."""
+    work_dir = tempfile.mkdtemp(prefix="tg_forward_album_")
+    downloads = []
+    downloadable_messages = []
+
+    try:
+        for index, item in enumerate(group_messages):
+            try:
+                file_path = _download_batch_media_with_retry(
+                    acc,
+                    item,
+                    os.path.join(work_dir, ""),
+                    log,
+                    attempts=attempts,
+                )
+            except ValueError as exc:
+                if "doesn't contain any downloadable media" in str(exc):
+                    _emit_log(
+                        f"媒体组消息 {item.id} 没有可下载媒体，已跳过",
+                        log,
+                    )
+                    continue
+                raise
+
+            payload = _get_private_media_payload(item)
+            thumb = None
+            if get_message_type(item) in (
+                "Document",
+                "Video",
+                "Audio",
+                "Animation",
+                "VideoNote",
+            ):
+                thumb = _download_private_media_thumbnail(
+                    acc,
+                    payload,
+                    work_dir,
+                    index,
+                )
+
+            downloads.append((item, file_path, thumb))
+            downloadable_messages.append(item)
+
+        if not downloads:
+            raise RuntimeError(
+                f"媒体组消息 {group_messages[0].id} 没有可下载的媒体"
+            )
+        return downloadable_messages, downloads, work_dir
+    except Exception:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        raise
+
+
+def _download_batch_media_group_with_retry(
+    acc,
+    source_id,
+    group_messages,
+    log,
+    attempts=3,
+):
+    """Download a fallback media group with transient-error retries."""
+    item_ids = [item.id for item in group_messages]
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        _emit_log(
+            f"开始下载受限媒体组 {item_ids}，第 {attempt}/{attempts} 次",
+            log,
+        )
+        try:
+            result = _download_batch_media_group_items(
+                acc,
+                source_id,
+                group_messages,
+                log,
+                attempts=attempts,
+            )
+            downloaded_messages, downloads, work_dir = result
+            _emit_log(
+                "受限媒体组下载完成，共 "
+                f"{len(downloads)}/{len(group_messages)} 项: {item_ids}",
+                log,
+            )
+            return result
+        except FloodWait as exc:
+            last_error = exc
+            wait = int(getattr(exc, "value", 0) or 0) + 1
+            _emit_log(
+                f"受限媒体组 {item_ids} 下载遇到 FloodWait，等待 {wait} 秒",
+                log,
+                "warning",
+            )
+            if attempt < attempts:
+                time.sleep(wait)
+                continue
+        except Exception as exc:
+            last_error = exc
+            if not _is_transient_download_error(exc):
+                raise
+            _emit_log(
+                "受限媒体组下载失败 "
+                f"{item_ids}: {type(exc).__name__}: {exc}",
+                log,
+                "warning",
+            )
+            if attempt < attempts:
+                time.sleep(1.5 * attempt)
+                continue
+
+    raise last_error
+
+
 def _copy_batch_media_group_items(
     worker,
     acc,
@@ -393,6 +607,7 @@ def _copy_batch_media_group_items(
     cleaned_text,
     text_changed,
     preserve_source,
+    log=None,
 ):
     """Send a media group item by item using the selected mode only."""
     errors = []
@@ -422,7 +637,14 @@ def _copy_batch_media_group_items(
 
         try:
             _worker_execute(worker, operation_name, operation)
+            _emit_log(f"媒体组第 {index + 1} 项 {item.id} 发送成功", log)
         except Exception as exc:
+            _emit_log(
+                f"媒体组第 {index + 1} 项 {item.id} 发送失败: "
+                f"{type(exc).__name__}: {exc}",
+                log,
+                "warning",
+            )
             errors.append((item, exc))
     return errors
 
@@ -435,14 +657,19 @@ def _reupload_batch_media_group(
     group_messages,
     cleaned_text,
     text_changed,
+    log=None,
 ):
-    group_messages, downloads, work_dir = _download_private_media_group(
+    group_messages, downloads, work_dir = _download_batch_media_group_with_retry(
         acc,
         source_id,
-        group_messages[0],
-        group_messages=group_messages,
+        group_messages,
+        log,
     )
     try:
+        _emit_log(
+            f"开始上传受限媒体组 {[item.id for item in group_messages]}",
+            log,
+        )
         _worker_execute(
             worker,
             "上传受限媒体组",
@@ -455,8 +682,16 @@ def _reupload_batch_media_group(
                 caption_entities_override=None if text_changed else None,
             ),
         )
+        _emit_log(
+            f"受限媒体组 {[item.id for item in group_messages]} 上传完成",
+            log,
+        )
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
+        _emit_log(
+            f"已清理受限媒体组临时目录: {work_dir}",
+            log,
+        )
     return len(group_messages)
 
 
@@ -469,6 +704,7 @@ def _forward_batch_media_group(
     cleaned_text,
     text_changed,
     preserve_source,
+    log=None,
 ):
     anchor = group_messages[0]
     try:
@@ -500,7 +736,13 @@ def _forward_batch_media_group(
                 lambda: acc.copy_media_group(dest_id, source_id, anchor.id),
             )
         return len(group_messages), False
-    except Exception:
+    except Exception as exc:
+        _emit_log(
+            "媒体组直接发送失败，准备逐条发送后回退下载重传: "
+            f"{type(exc).__name__}: {exc}",
+            log,
+            "warning",
+        )
         errors = _copy_batch_media_group_items(
             worker,
             acc,
@@ -510,6 +752,7 @@ def _forward_batch_media_group(
             cleaned_text,
             text_changed,
             preserve_source,
+            log,
         )
         if not errors:
             return len(group_messages), False
@@ -539,6 +782,7 @@ def _forward_batch_media_group(
                     failed_first,
                     cleaned_text,
                     subset_text_changed,
+                    log,
                 )
             else:
                 reuploaded = _reupload_batch_media_group(
@@ -549,6 +793,7 @@ def _forward_batch_media_group(
                     failed_items,
                     cleaned_text,
                     subset_text_changed,
+                    log,
                 )
 
         if non_downloadable_errors:
@@ -568,21 +813,28 @@ def _reupload_batch_single_media(
     message,
     cleaned_text,
     text_changed,
+    log=None,
 ):
     work_dir = tempfile.mkdtemp(prefix="tg_forward_batch_media_")
     try:
-        file_path = acc.download_media(
+        file_path = _download_batch_media_with_retry(
+            acc,
             message,
-            file_name=os.path.join(work_dir, ""),
+            os.path.join(work_dir, ""),
+            log,
         )
-        if file_path is None:
-            raise RuntimeError(f"消息 {message.id} 下载失败")
+        _emit_log(f"开始下载受限媒体 {message.id} 的缩略图", log)
         thumb = _download_private_media_thumbnail(
             acc,
             _get_private_media_payload(message),
             work_dir,
             0,
         )
+        if thumb:
+            _emit_log(f"受限媒体 {message.id} 缩略图下载完成: {thumb}", log)
+        else:
+            _emit_log(f"受限媒体 {message.id} 无缩略图或缩略图下载失败", log)
+        _emit_log(f"开始上传受限单条媒体 {message.id}: {file_path}", log)
         _worker_execute(
             worker,
             "上传受限单条媒体",
@@ -596,8 +848,10 @@ def _reupload_batch_single_media(
                 caption_entities_override=None if text_changed else None,
             ),
         )
+        _emit_log(f"受限单条媒体 {message.id} 上传完成", log)
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
+        _emit_log(f"已清理受限单条媒体临时目录: {work_dir}", log)
     return 1
 
 
@@ -610,6 +864,7 @@ def _forward_batch_single_media(
     cleaned_text,
     text_changed,
     preserve_source,
+    log=None,
 ):
     try:
         if text_changed:
@@ -646,6 +901,11 @@ def _forward_batch_single_media(
             )
         return 1, False
     except Exception as exc:
+        _emit_log(
+            f"单条媒体直接发送失败: {type(exc).__name__}: {exc}",
+            log,
+            "warning",
+        )
         if not isinstance(
             exc,
             (ChatForwardsRestricted, FileReferenceExpired, ValueError),
@@ -661,6 +921,7 @@ def _forward_batch_single_media(
             message,
             cleaned_text,
             text_changed,
+            log,
         )
         return count, True
 
@@ -674,6 +935,7 @@ def _forward_batch_text(
     cleaned_text,
     text_changed,
     preserve_source,
+    log=None,
 ):
     try:
         if text_changed:
@@ -720,6 +982,7 @@ def _forward_batch_unit(
     cleaned_text,
     text_changed,
     preserve_source,
+    log=None,
 ):
     if len(group_messages) > 1:
         return _forward_batch_media_group(
@@ -731,6 +994,7 @@ def _forward_batch_unit(
             cleaned_text,
             text_changed,
             preserve_source,
+            log,
         )
 
     message = group_messages[0]
@@ -745,6 +1009,7 @@ def _forward_batch_unit(
             cleaned_text,
             text_changed,
             preserve_source,
+            log,
         )
     return _forward_batch_single_media(
         worker,
@@ -755,15 +1020,21 @@ def _forward_batch_unit(
         cleaned_text,
         text_changed,
         preserve_source,
+        log,
     )
 
 
 def _run_batch_task(job_id, spec):
     log_lines = []
 
-    def log(message):
+    def log(message, level="info"):
         line = f"[{_now_iso()}] {message}"
         log_lines.append(line)
+        getattr(logger, level, logger.info)(
+            "[batch:%s] %s",
+            job_id,
+            message,
+        )
         _update_task(job_id, stdoutTail=_tail("\n".join(log_lines)))
 
     try:
@@ -849,6 +1120,7 @@ def _run_batch_task(job_id, spec):
                     cleaned,
                     text_changed,
                     preserve_source,
+                    log,
                 )
                 success += sent_count
                 processed += sent_count
@@ -862,7 +1134,10 @@ def _run_batch_task(job_id, spec):
                 unit_count = len(group_messages) if group_messages else 1
                 failed += unit_count
                 processed += unit_count
-                log(f"消息 {message_id} 失败: {type(exc).__name__}: {exc}")
+                log(
+                    f"消息 {message_id} 失败: {type(exc).__name__}: {exc}",
+                    level="error",
+                )
 
             _update_task(
                 job_id,

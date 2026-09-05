@@ -1,9 +1,10 @@
 import os
 import re
 import unittest
+from unittest import mock
 
 from pyrogram.enums import MessageMediaType
-from pyrogram.errors import ChatForwardsRestricted
+from pyrogram.errors import ChatForwardsRestricted, Timeout as TelegramTimeout
 from pyrogram.types import InputMediaPhoto
 
 import batch_forward
@@ -140,6 +141,19 @@ class _RestrictedAcc:
 
     def send_audio(self, *args, **kwargs):
         self.sent.append(("send_audio", args, kwargs))
+
+
+class _FlakyDownloadAcc:
+    def __init__(self, results, download_error=None):
+        self.results = list(results)
+        self.download_error = download_error
+        self.calls = []
+
+    def download_media(self, item, file_name=None, **kwargs):
+        self.calls.append((item.id, file_name))
+        if self.download_error is not None:
+            raise self.download_error
+        return self.results.pop(0)
 
 
 class BatchRestrictedForwardTests(unittest.TestCase):
@@ -633,6 +647,100 @@ class BatchRestrictedForwardTests(unittest.TestCase):
                     "exclude_regex": "(?P<broken",
                 }
             )
+
+    def test_download_none_is_retried_until_success(self):
+        message = _Message(120, photo=_Photo("p23"))
+        acc = _FlakyDownloadAcc(
+            [None, None, os.path.join("tmp", "item_120.jpg")]
+        )
+
+        with mock.patch.object(batch_forward.time, "sleep"):
+            path = batch_forward._download_batch_media_with_retry(
+                acc,
+                message,
+                os.path.join("tmp", ""),
+                None,
+            )
+
+        self.assertTrue(path.endswith("item_120.jpg"))
+        self.assertEqual(len(acc.calls), 3)
+
+    def test_download_telegram_timeout_is_retried(self):
+        message = _Message(121, photo=_Photo("p24"))
+        acc = _FlakyDownloadAcc([])
+        calls = []
+
+        def fail_once(item, file_name=None, **kwargs):
+            calls.append(item.id)
+            if len(calls) == 1:
+                raise TelegramTimeout(
+                    503,
+                    rpc_name="upload.GetFile",
+                )
+            return os.path.join("tmp", "item_121.jpg")
+
+        acc.download_media = fail_once
+
+        with mock.patch.object(batch_forward.time, "sleep"):
+            path = batch_forward._download_batch_media_with_retry(
+                acc,
+                message,
+                os.path.join("tmp", ""),
+                None,
+            )
+
+        self.assertTrue(path.endswith("item_121.jpg"))
+        self.assertEqual(calls, [121, 121])
+
+    def test_download_none_exhaustion_keeps_clear_error(self):
+        message = _Message(122, photo=_Photo("p25"))
+        acc = _FlakyDownloadAcc([None, None, None])
+
+        with mock.patch.object(batch_forward.time, "sleep"):
+            with self.assertRaises(RuntimeError) as raised:
+                batch_forward._download_batch_media_with_retry(
+                    acc,
+                    message,
+                    os.path.join("tmp", ""),
+                    None,
+                )
+
+        self.assertIn("未返回文件数据", str(raised.exception))
+        self.assertEqual(len(acc.calls), 3)
+
+    def test_media_group_retries_one_none_item_without_redownloading_others(self):
+        first = _Message(130, "album", photo=_Photo("p26"))
+        second = _Message(131, "album", photo=_Photo("p27"))
+        acc = _FlakyDownloadAcc(
+            [
+                None,
+                os.path.join("tmp", "item_130.jpg"),
+                os.path.join("tmp", "item_131.jpg"),
+            ]
+        )
+
+        with mock.patch.object(batch_forward.time, "sleep"):
+            messages, downloads, work_dir = (
+                batch_forward._download_batch_media_group_with_retry(
+                    acc,
+                    -1001234567890,
+                    [first, second],
+                    None,
+                    attempts=2,
+                )
+            )
+
+        try:
+            self.assertEqual([item.id for item in messages], [130, 131])
+            self.assertEqual(
+                [os.path.basename(path) for _item, path, _thumb in downloads],
+                ["item_130.jpg", "item_131.jpg"],
+            )
+            self.assertEqual([call[0] for call in acc.calls], [130, 130, 131])
+        finally:
+            import shutil
+
+            shutil.rmtree(work_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
