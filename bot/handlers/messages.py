@@ -252,8 +252,10 @@ def save(client: pyrogram.client.Client, message: pyrogram.types.messages_and_me
         # 统计转发结果
         total_messages = toID - fromID + 1
         success_count = 0
-        failed_count = 0
         failed_ids = []
+        skipped_count = 0
+        public_handled_ids = set()
+        public_skipped_ids = set()
 
         logger.info(f"📤 开始批量转发: 共 {total_messages} 条消息 (ID: {fromID}-{toID})")
 
@@ -272,7 +274,6 @@ def save(client: pyrogram.client.Client, message: pyrogram.types.messages_and_me
                     success_count += 1
                     logger.debug(f"✅ 消息 {msgid} 转发成功 ({success_count}/{total_messages})")
                 except Exception as e:
-                    failed_count += 1
                     failed_ids.append(msgid)
                     logger.warning(f"⚠️ 消息 {msgid} 转发失败: {type(e).__name__}: {e}")
 
@@ -288,7 +289,6 @@ def save(client: pyrogram.client.Client, message: pyrogram.types.messages_and_me
                     success_count += 1
                     logger.debug(f"✅ 消息 {msgid} 转发成功 ({success_count}/{total_messages})")
                 except Exception as e:
-                    failed_count += 1
                     failed_ids.append(msgid)
                     logger.warning(f"⚠️ 消息 {msgid} 转发失败: {type(e).__name__}: {e}")
 
@@ -296,57 +296,132 @@ def save(client: pyrogram.client.Client, message: pyrogram.types.messages_and_me
             else:
                 username = datas[3]
 
+                if msgid in public_handled_ids or msgid in public_skipped_ids:
+                    continue
+
                 try:
-                    msg = bot.get_messages(username, msgid)
+                    delivered_ids, skipped = _copy_public_message(
+                        bot,
+                        message.chat.id,
+                        username,
+                        msgid,
+                    )
                 except UsernameNotOccupied:
                     bot.send_message(message.chat.id, f"**❌ 该用户名未被占用**", reply_to_message_id=message.id)
                     return
-                copied = False
-                use_media_group = (fromID == toID) or ("?single" in message.text)
-
-                try:
-                    if use_media_group:
-                        bot.copy_media_group(message.chat.id, msg.chat.id, msg.id)
-                    else:
-                        bot.copy_message(message.chat.id, msg.chat.id, msg.id)
-                    copied = True
-                except Exception:
-                    if use_media_group:
-                        try:
-                            bot.copy_message(message.chat.id, msg.chat.id, msg.id)
-                            copied = True
-                        except Exception:
-                            copied = False
-
-                if copied:
-                    success_count += 1
-                    logger.debug(f"✅ 消息 {msgid} 转发成功 ({success_count}/{total_messages})")
-                else:
+                except Exception as copy_exc:
                     if acc is None:
                         bot.send_message(message.chat.id, f"**❌ 未设置 String Session**", reply_to_message_id=message.id)
                         return
                     try:
                         handle_private(message, username, msgid)
+                        public_handled_ids.add(msgid)
                         success_count += 1
                         logger.debug(f"✅ 消息 {msgid} 转发成功 ({success_count}/{total_messages})")
                     except Exception as e:
-                        failed_count += 1
                         failed_ids.append(msgid)
-                        logger.warning(f"⚠️ 消息 {msgid} 转发失败: {type(e).__name__}: {e}")
+                        logger.warning(
+                            f"⚠️ 消息 {msgid} Bot 复制失败，用户客户端回退也失败: "
+                            f"{type(copy_exc).__name__}: {copy_exc}; "
+                            f"{type(e).__name__}: {e}"
+                        )
+                    continue
+
+                if skipped:
+                    public_skipped_ids.add(msgid)
+                    skipped_count += 1
+                    logger.debug(f"⏭️ 消息 {msgid} 为空或已删除，已跳过")
+                    continue
+
+                public_handled_ids.update(delivered_ids)
+                delivered_in_range = [
+                    item_id for item_id in delivered_ids
+                    if fromID <= item_id <= toID
+                ]
+                success_count += len(delivered_in_range)
+                if len(delivered_ids) > 1:
+                    logger.debug(
+                        f"✅ 消息 {msgid} 所在媒体组转发成功，共 {len(delivered_ids)} 项 "
+                        f"({success_count}/{total_messages})"
+                    )
+                else:
+                    logger.debug(f"✅ 消息 {msgid} 转发成功 ({success_count}/{total_messages})")
 
             # 减少等待时间，避免超时
             time.sleep(1)
 
         # 发送转发结果摘要
+        failed_count = len(failed_ids)
         if failed_count > 0:
             failed_ids_str = ", ".join(map(str, failed_ids))
-            summary = f"📊 **批量转发完成**\n\n✅ 成功: {success_count}/{total_messages}\n❌ 失败: {failed_count}\n\n失败的消息ID: {failed_ids_str}"
+            summary = (
+                f"📊 **批量转发完成**\n\n"
+                f"✅ 成功: {success_count}/{total_messages}\n"
+                f"❌ 失败: {failed_count}\n"
+                f"⏭️ 跳过: {skipped_count}\n\n"
+                f"失败的消息ID: {failed_ids_str}"
+            )
             logger.warning(f"批量转发完成: 成功 {success_count}, 失败 {failed_count}, 失败ID: {failed_ids_str}")
+        elif skipped_count > 0:
+            summary = (
+                f"📊 **批量转发完成**\n\n"
+                f"✅ 成功: {success_count}/{total_messages}\n"
+                f"⏭️ 跳过: {skipped_count}"
+            )
+            logger.info(
+                f"批量转发完成: 成功 {success_count}/{total_messages}, "
+                f"跳过 {skipped_count}"
+            )
         else:
             summary = f"✅ **批量转发完成**\n\n成功转发 {success_count}/{total_messages} 条消息"
             logger.info(f"批量转发完成: 全部成功 ({success_count}/{total_messages})")
 
         bot.send_message(message.chat.id, summary, reply_to_message_id=message.id)
+
+
+def _copy_public_message(bot, destination_chat_id, username, msgid):
+    """Copy one public message while preserving its complete media group.
+
+    Returns ``(delivered_ids, skipped)``. Album members are copied once as a
+    group; the caller can use the returned IDs to avoid copying them again
+    when the link contains an ID range.
+    """
+    msg = bot.get_messages(username, msgid)
+    if msg is None or getattr(msg, "empty", False):
+        return [], True
+
+    source_chat_id = getattr(getattr(msg, "chat", None), "id", username)
+    if not getattr(msg, "media_group_id", None):
+        bot.copy_message(destination_chat_id, source_chat_id, msg.id)
+        return [msg.id], False
+
+    try:
+        media_group = bot.get_media_group(username, msg.id) or [msg]
+    except Exception as exc:
+        logger.debug(
+            "Bot 客户端无法获取公共媒体组 %s/%s，将按当前消息处理: %s",
+            username,
+            msg.id,
+            exc,
+        )
+        media_group = [msg]
+
+    by_id = {item.id: item for item in media_group}
+    by_id[msg.id] = msg
+    group_ids = [item_id for item_id in sorted(by_id)]
+
+    try:
+        bot.copy_media_group(destination_chat_id, source_chat_id, msg.id)
+        return group_ids, False
+    except Exception as exc:
+        logger.debug(
+            "公共媒体组整体复制失败，回退到锚点消息 %s/%s: %s",
+            username,
+            msg.id,
+            type(exc).__name__,
+        )
+        bot.copy_message(destination_chat_id, source_chat_id, msg.id)
+        return [msg.id], False
 
 
 def _get_bot_peer_id(bot):

@@ -725,6 +725,7 @@ def _forward_batch_media_group(
     text_changed,
     preserve_source,
     log=None,
+    restricted_source_ids=None,
 ):
     anchor = group_messages[0]
     if not preserve_source and not text_changed:
@@ -791,6 +792,29 @@ def _forward_batch_media_group(
             )
         return len(group_messages), False
     except Exception as exc:
+        if (
+            restricted_source_ids is not None
+            and isinstance(exc, ChatForwardsRestricted)
+        ):
+            restricted_source_ids.add(source_id)
+            _emit_log(
+                f"媒体组缓存复制被 Telegram 限制: {type(exc).__name__}: {exc}；"
+                "同一来源后续媒体组将直接下载重传",
+                log,
+                "warning",
+            )
+            reuploaded = _reupload_batch_media_group(
+                worker,
+                acc,
+                source_id,
+                dest_id,
+                group_messages,
+                cleaned_text,
+                text_changed,
+                log,
+            )
+            return len(group_messages), True
+
         _emit_log(
             "媒体组直接发送失败，准备逐条发送后回退下载重传: "
             f"{type(exc).__name__}: {exc}",
@@ -808,6 +832,17 @@ def _forward_batch_media_group(
             preserve_source,
             log,
         )
+        if restricted_source_ids is not None:
+            for _item, error in errors:
+                if isinstance(error, ChatForwardsRestricted):
+                    restricted_source_ids.add(source_id)
+                    _emit_log(
+                        f"来源 {source_id} 的媒体组逐条缓存复制受限，"
+                        "已缓存来源限制状态",
+                        log,
+                        "warning",
+                    )
+                    break
         if not errors:
             return len(group_messages), False
 
@@ -919,6 +954,7 @@ def _forward_batch_single_media(
     text_changed,
     preserve_source,
     log=None,
+    restricted_source_ids=None,
 ):
     if not preserve_source and not text_changed:
         try:
@@ -999,6 +1035,17 @@ def _forward_batch_single_media(
             (ChatForwardsRestricted, FileReferenceExpired, ValueError),
         ):
             raise
+        if (
+            restricted_source_ids is not None
+            and isinstance(exc, ChatForwardsRestricted)
+        ):
+            restricted_source_ids.add(source_id)
+            _emit_log(
+                f"来源 {source_id} 的单条缓存复制受限，"
+                "后续消息将直接下载重传",
+                log,
+                "warning",
+            )
         if get_message_type(message) not in DOWNLOADABLE_MEDIA_TYPES:
             raise
 
@@ -1024,6 +1071,7 @@ def _forward_batch_text(
     text_changed,
     preserve_source,
     log=None,
+    restricted_source_ids=None,
 ):
     if not preserve_source and not text_changed:
         try:
@@ -1082,6 +1130,17 @@ def _forward_batch_text(
     except Exception as exc:
         if not isinstance(exc, (ChatForwardsRestricted, FileReferenceExpired)):
             raise
+        if (
+            restricted_source_ids is not None
+            and isinstance(exc, ChatForwardsRestricted)
+        ):
+            restricted_source_ids.add(source_id)
+            _emit_log(
+                f"来源 {source_id} 的文本缓存复制受限，"
+                "后续文本将直接重新发送",
+                log,
+                "warning",
+            )
 
         _worker_execute(
             worker,
@@ -1105,7 +1164,24 @@ def _forward_batch_unit(
     text_changed,
     preserve_source,
     log=None,
+    restricted_source_ids=None,
 ):
+    if restricted_source_ids is not None and source_id in restricted_source_ids:
+        _emit_log(
+            f"来源 {source_id} 已确认限制缓存转发，"
+            "直接使用用户客户端下载重传，跳过重复 RPC 探测",
+            log,
+        )
+        return _reupload_batch_unit(
+            worker,
+            acc,
+            dest_id,
+            group_messages,
+            cleaned_text,
+            text_changed,
+            log,
+        )
+
     if len(group_messages) > 1:
         return _forward_batch_media_group(
             worker,
@@ -1117,6 +1193,7 @@ def _forward_batch_unit(
             text_changed,
             preserve_source,
             log,
+            restricted_source_ids,
         )
 
     message = group_messages[0]
@@ -1132,6 +1209,7 @@ def _forward_batch_unit(
             text_changed,
             preserve_source,
             log,
+            restricted_source_ids,
         )
     return _forward_batch_single_media(
         worker,
@@ -1143,6 +1221,67 @@ def _forward_batch_unit(
         text_changed,
         preserve_source,
         log,
+        restricted_source_ids,
+    )
+
+
+def _reupload_batch_unit(
+    worker,
+    acc,
+    dest_id,
+    group_messages,
+    cleaned_text,
+    text_changed,
+    log=None,
+):
+    """Handle a cached-forward-restricted source without trying forbidden RPCs."""
+    if len(group_messages) > 1:
+        return (
+            _reupload_batch_media_group(
+                worker,
+                acc,
+                None,
+                dest_id,
+                group_messages,
+                cleaned_text,
+                text_changed,
+                log,
+            ),
+            True,
+        )
+
+    message = group_messages[0]
+    msg_type = get_message_type(message)
+    if msg_type in ("Text", None):
+        text = cleaned_text if text_changed else message.text or ""
+        if not text.strip():
+            return 0, True
+        _emit_log(
+            f"受限来源文本消息 {message.id} 直接使用用户客户端重新发送",
+            log,
+        )
+        _worker_execute(
+            worker,
+            "发送受限文本消息",
+            lambda: acc.send_message(
+                dest_id,
+                text,
+                entities=None if text_changed else message.entities,
+            ),
+        )
+        return 1, True
+
+    return (
+        _reupload_batch_single_media(
+            worker,
+            acc,
+            dest_id,
+            message,
+            cleaned_text,
+            text_changed,
+            log,
+        ),
+        True,
     )
 
 
@@ -1191,6 +1330,7 @@ def _run_batch_task(job_id, spec):
         )
         processed = success = failed = skipped = 0
         handled_ids = set()
+        restricted_source_ids = set()
 
         for index, message_id in enumerate(ids, start=1):
             task = get_task(job_id)
@@ -1249,6 +1389,7 @@ def _run_batch_task(job_id, spec):
                     text_changed,
                     preserve_source,
                     log,
+                    restricted_source_ids,
                 )
                 success += sent_count
                 processed += sent_count

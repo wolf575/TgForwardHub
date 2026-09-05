@@ -751,6 +751,72 @@ class BatchRestrictedForwardTests(unittest.TestCase):
             ["item_205.jpg"],
         )
 
+    def test_restricted_source_cache_skips_repeated_cached_copy_attempts(self):
+        source_id = -1001234567890
+        dest_id = -1009876543210
+        first = _Message(300, "album", photo=_Photo("p300"))
+        second = _Message(301, "album", photo=_Photo("p301"))
+        acc = _RestrictedAcc(
+            media_group=[first, second],
+            album_error=ChatForwardsRestricted(
+                400,
+                "CHAT_FORWARDS_RESTRICTED",
+            ),
+        )
+        restricted_sources = set()
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            source_id,
+            dest_id,
+            [first, second],
+            None,
+            False,
+            False,
+            restricted_source_ids=restricted_sources,
+        )
+
+        self.assertEqual((count, used_fallback), (2, True))
+        self.assertEqual(restricted_sources, {source_id})
+        self.assertEqual(len(acc.hidden_forwards), 1)
+        self.assertEqual(len(acc.group_copies), 1)
+        self.assertEqual(acc.copied, [])
+        self.assertEqual(
+            [os.path.basename(path) for path in acc.downloaded],
+            ["item_300.jpg", "item_301.jpg"],
+        )
+
+        acc.hidden_forwards.clear()
+        acc.group_copies.clear()
+        acc.copied.clear()
+        acc.downloaded.clear()
+        acc.sent.clear()
+        next_message = _Message(302, photo=_Photo("p302"))
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            source_id,
+            dest_id,
+            [next_message],
+            None,
+            False,
+            False,
+            restricted_source_ids=restricted_sources,
+        )
+
+        self.assertEqual((count, used_fallback), (1, True))
+        self.assertEqual(acc.hidden_forwards, [])
+        self.assertEqual(acc.group_copies, [])
+        self.assertEqual(acc.copied, [])
+        self.assertEqual(
+            [os.path.basename(path) for path in acc.downloaded],
+            ["item_302.jpg"],
+        )
+        self.assertEqual(len(acc.sent), 1)
+        self.assertEqual(acc.sent[0][0], "send_photo")
+
     def test_direct_mode_does_not_use_hidden_forward_or_copy(self):
         message = _Message(206, photo=_Photo("p34"))
         acc = _RestrictedAcc(forward_error=False)
