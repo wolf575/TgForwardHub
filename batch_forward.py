@@ -33,7 +33,7 @@ from bot.handlers.messages import (
     _send_downloaded_private_media_group,
     _send_downloaded_private_media_sequentially,
 )
-from bot.handlers.instances import get_acc_instance
+from bot.handlers.instances import get_acc_instance, get_bot_instance
 from bot.utils.helpers import get_message_type
 from bot.utils.logger import get_logger
 from bot.workers.message_worker import MessageWorker
@@ -392,6 +392,15 @@ def _worker_execute(worker, name, operation):
     return worker._execute_with_flood_retry(name, operation)
 
 
+def _bot_cached_copy_allowed(bot, bot_worker, preserve_source):
+    """Return whether the Bot identity can honor the requested copy mode."""
+    return (
+        bot is not None
+        and bot_worker is not None
+        and not preserve_source
+    )
+
+
 def _emit_log(message, log, level="info"):
     """Write a batch step to the container log and the in-memory task log."""
     if log is not None:
@@ -705,8 +714,42 @@ def _forward_batch_media_group(
     text_changed,
     preserve_source,
     log=None,
+    bot=None,
+    bot_worker=None,
 ):
     anchor = group_messages[0]
+    if _bot_cached_copy_allowed(bot, bot_worker, preserve_source):
+        try:
+            if text_changed:
+                _worker_execute(
+                    bot_worker,
+                    "Bot 缓存复制媒体组并修改 caption",
+                    lambda: bot.copy_media_group(
+                        dest_id,
+                        source_id,
+                        anchor.id,
+                        captions=[cleaned_text],
+                    ),
+                )
+            else:
+                _worker_execute(
+                    bot_worker,
+                    "Bot 缓存复制媒体组",
+                    lambda: bot.copy_media_group(dest_id, source_id, anchor.id),
+                )
+            _emit_log(
+                f"媒体组 {anchor.id} 已通过 Bot 身份缓存复制，无需下载重传",
+                log,
+            )
+            return len(group_messages), False
+        except Exception as exc:
+            _emit_log(
+                f"Bot 无法缓存复制媒体组 {anchor.id}，回退用户客户端: "
+                f"{type(exc).__name__}: {exc}",
+                log,
+                "warning",
+            )
+
     try:
         if text_changed:
             _worker_execute(
@@ -865,7 +908,46 @@ def _forward_batch_single_media(
     text_changed,
     preserve_source,
     log=None,
+    bot=None,
+    bot_worker=None,
 ):
+    if _bot_cached_copy_allowed(bot, bot_worker, preserve_source):
+        try:
+            if text_changed:
+                _worker_execute(
+                    bot_worker,
+                    "Bot 缓存复制单条媒体并修改 caption",
+                    lambda: bot.copy_message(
+                        dest_id,
+                        source_id,
+                        message.id,
+                        caption=cleaned_text,
+                    ),
+                )
+            else:
+                _worker_execute(
+                    bot_worker,
+                    "Bot 缓存复制单条媒体",
+                    lambda: _copy_single_private_media(
+                        bot,
+                        dest_id,
+                        source_id,
+                        message,
+                    ),
+                )
+            _emit_log(
+                f"单条媒体 {message.id} 已通过 Bot 身份缓存复制，无需下载重传",
+                log,
+            )
+            return 1, False
+        except Exception as exc:
+            _emit_log(
+                f"Bot 无法缓存复制单条媒体 {message.id}，回退用户客户端: "
+                f"{type(exc).__name__}: {exc}",
+                log,
+                "warning",
+            )
+
     try:
         if text_changed:
             _worker_execute(
@@ -936,7 +1018,36 @@ def _forward_batch_text(
     text_changed,
     preserve_source,
     log=None,
+    bot=None,
+    bot_worker=None,
 ):
+    if _bot_cached_copy_allowed(bot, bot_worker, preserve_source):
+        try:
+            if text_changed:
+                _worker_execute(
+                    bot_worker,
+                    "Bot 发送修改后的文本",
+                    lambda: bot.send_message(dest_id, cleaned_text),
+                )
+            else:
+                _worker_execute(
+                    bot_worker,
+                    "Bot 缓存复制文本消息",
+                    lambda: bot.copy_message(dest_id, source_id, message.id),
+                )
+            _emit_log(
+                f"文本消息 {message.id} 已通过 Bot 身份处理",
+                log,
+            )
+            return 1, False
+        except Exception as exc:
+            _emit_log(
+                f"Bot 无法处理文本消息 {message.id}，回退用户客户端: "
+                f"{type(exc).__name__}: {exc}",
+                log,
+                "warning",
+            )
+
     try:
         if text_changed:
             _worker_execute(
@@ -983,6 +1094,8 @@ def _forward_batch_unit(
     text_changed,
     preserve_source,
     log=None,
+    bot=None,
+    bot_worker=None,
 ):
     if len(group_messages) > 1:
         return _forward_batch_media_group(
@@ -995,6 +1108,8 @@ def _forward_batch_unit(
             text_changed,
             preserve_source,
             log,
+            bot,
+            bot_worker,
         )
 
     message = group_messages[0]
@@ -1010,6 +1125,8 @@ def _forward_batch_unit(
             text_changed,
             preserve_source,
             log,
+            bot,
+            bot_worker,
         )
     return _forward_batch_single_media(
         worker,
@@ -1021,6 +1138,8 @@ def _forward_batch_unit(
         text_changed,
         preserve_source,
         log,
+        bot,
+        bot_worker,
     )
 
 
@@ -1043,6 +1162,8 @@ def _run_batch_task(job_id, spec):
             raise RuntimeError("用户客户端尚未初始化，请先完成 /setup 配置")
 
         worker = MessageWorker(None, acc, max_retries=3)
+        bot = get_bot_instance()
+        bot_worker = MessageWorker(None, bot, max_retries=3) if bot else None
         source_id = _resolve_chat(acc, spec.get("source"))
         dest_id = _resolve_chat(acc, spec.get("target"))
         ids = _collect_message_ids(acc, source_id, spec)
@@ -1121,6 +1242,8 @@ def _run_batch_task(job_id, spec):
                     text_changed,
                     preserve_source,
                     log,
+                    bot=bot,
+                    bot_worker=bot_worker,
                 )
                 success += sent_count
                 processed += sent_count

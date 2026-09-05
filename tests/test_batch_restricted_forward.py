@@ -71,9 +71,13 @@ class _RestrictedAcc:
     ):
         self.media_group = media_group or []
         self.album_error = album_error
-        self.copy_error = copy_error or ChatForwardsRestricted(
-            400,
-            "CHAT_FORWARDS_RESTRICTED",
+        self.copy_error = (
+            ChatForwardsRestricted(
+                400,
+                "CHAT_FORWARDS_RESTRICTED",
+            )
+            if copy_error is None
+            else copy_error
         )
         self.item_copy_error = (
             self.copy_error
@@ -87,6 +91,7 @@ class _RestrictedAcc:
         self.media_groups = []
         self.sent = []
         self.copied = []
+        self.group_copies = []
         self.forwarded = []
         self.get_media_group_calls = []
 
@@ -99,7 +104,10 @@ class _RestrictedAcc:
             raise error
 
     def copy_media_group(self, *args, **kwargs):
-        raise self.album_error or self.copy_error
+        self.group_copies.append((args, kwargs))
+        error = self.album_error or self.copy_error
+        if error:
+            raise error
 
     def forward_messages(self, *args, **kwargs):
         self.forwarded.append((args, kwargs))
@@ -593,6 +601,177 @@ class BatchRestrictedForwardTests(unittest.TestCase):
         self.assertEqual(len(acc.sent), 1)
         self.assertEqual(acc.sent[0][0], "send_photo")
         self.assertTrue(acc.sent[0][1].endswith("item_30.jpg"))
+
+    def test_clone_single_media_uses_bot_cached_copy_first(self):
+        message = _Message(200, photo=_Photo("p28"))
+        bot = _RestrictedAcc(item_copy_error=False)
+        acc = _RestrictedAcc()
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            -1001234567890,
+            -1009876543210,
+            [message],
+            None,
+            False,
+            False,
+            bot=bot,
+            bot_worker=_Worker(),
+        )
+
+        self.assertEqual((count, used_fallback), (1, False))
+        self.assertEqual([call[0][2] for call in bot.copied], [200])
+        self.assertEqual(acc.copied, [])
+        self.assertEqual(acc.downloaded, [])
+        self.assertEqual(acc.forwarded, [])
+
+    def test_clone_media_group_uses_bot_cached_copy_first(self):
+        first = _Message(201, "album", photo=_Photo("p29"))
+        second = _Message(202, "album", photo=_Photo("p30"))
+        bot = _RestrictedAcc(
+            album_error=False,
+            copy_error=False,
+            item_copy_error=False,
+        )
+        acc = _RestrictedAcc()
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            -1001234567890,
+            -1009876543210,
+            [first, second],
+            None,
+            False,
+            False,
+            bot=bot,
+            bot_worker=_Worker(),
+        )
+
+        self.assertEqual((count, used_fallback), (2, False))
+        self.assertEqual(len(bot.group_copies), 1)
+        self.assertEqual(bot.group_copies[0][0][2], 201)
+        self.assertEqual(acc.downloaded, [])
+        self.assertEqual(acc.forwarded, [])
+
+    def test_modified_caption_uses_bot_cached_copy(self):
+        message = _Message(203, photo=_Photo("p31"), caption="原始说明")
+        bot = _RestrictedAcc(item_copy_error=False)
+        acc = _RestrictedAcc()
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            -1001234567890,
+            -1009876543210,
+            [message],
+            "清理后的说明",
+            True,
+            False,
+            bot=bot,
+            bot_worker=_Worker(),
+        )
+
+        self.assertEqual((count, used_fallback), (1, False))
+        self.assertEqual(bot.copied[0][1]["caption"], "清理后的说明")
+        self.assertEqual(acc.copied, [])
+
+    def test_bot_copy_failure_falls_back_to_user_cached_copy(self):
+        message = _Message(204, photo=_Photo("p32"))
+        bot = _RestrictedAcc()
+        acc = _RestrictedAcc(item_copy_error=False)
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            -1001234567890,
+            -1009876543210,
+            [message],
+            None,
+            False,
+            False,
+            bot=bot,
+            bot_worker=_Worker(),
+        )
+
+        self.assertEqual((count, used_fallback), (1, False))
+        self.assertEqual(len(bot.copied), 1)
+        self.assertEqual([call[0][2] for call in acc.copied], [204])
+        self.assertEqual(acc.downloaded, [])
+
+    def test_bot_and_user_copy_failure_reuploads_without_forward(self):
+        message = _Message(205, photo=_Photo("p33"))
+        bot = _RestrictedAcc()
+        acc = _RestrictedAcc()
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            -1001234567890,
+            -1009876543210,
+            [message],
+            None,
+            False,
+            False,
+            bot=bot,
+            bot_worker=_Worker(),
+        )
+
+        self.assertEqual((count, used_fallback), (1, True))
+        self.assertEqual(len(bot.copied), 1)
+        self.assertEqual(len(acc.copied), 1)
+        self.assertEqual(acc.forwarded, [])
+        self.assertEqual(
+            [os.path.basename(path) for path in acc.downloaded],
+            ["item_205.jpg"],
+        )
+
+    def test_direct_mode_does_not_use_bot_copy(self):
+        message = _Message(206, photo=_Photo("p34"))
+        bot = _RestrictedAcc(item_copy_error=False)
+        acc = _RestrictedAcc(forward_error=False)
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            -1001234567890,
+            -1009876543210,
+            [message],
+            None,
+            False,
+            True,
+            bot=bot,
+            bot_worker=_Worker(),
+        )
+
+        self.assertEqual((count, used_fallback), (1, False))
+        self.assertEqual(bot.copied, [])
+        self.assertEqual(len(acc.forwarded), 1)
+        self.assertEqual(acc.forwarded[0][0][2], 206)
+
+    def test_direct_mode_modified_caption_does_not_use_bot_copy(self):
+        message = _Message(207, photo=_Photo("p35"), caption="原始说明")
+        bot = _RestrictedAcc(item_copy_error=False)
+        acc = _RestrictedAcc(item_copy_error=False)
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            -1001234567890,
+            -1009876543210,
+            [message],
+            "修改后的说明",
+            True,
+            True,
+            bot=bot,
+            bot_worker=_Worker(),
+        )
+
+        self.assertEqual((count, used_fallback), (1, False))
+        self.assertEqual(bot.copied, [])
+        self.assertEqual(acc.copied[0][1]["caption"], "修改后的说明")
+        self.assertEqual(acc.forwarded, [])
 
     def test_album_fallback_keeps_modified_caption_on_first_item_only(self):
         first = _Message(40, "album", photo=_Photo("p4"), caption="原始说明")
