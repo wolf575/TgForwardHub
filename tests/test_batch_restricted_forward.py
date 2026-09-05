@@ -1,5 +1,6 @@
 import os
 import re
+import tempfile
 import unittest
 from unittest import mock
 
@@ -974,6 +975,28 @@ class BatchRestrictedForwardTests(unittest.TestCase):
 
         self.assertIn("未返回文件数据", str(raised.exception))
         self.assertEqual(len(acc.calls), 3)
+
+    def test_download_zero_byte_file_is_retried_and_removed(self):
+        message = _Message(123, photo=_Photo("p36"))
+        with tempfile.TemporaryDirectory() as work_dir:
+            empty_path = os.path.join(work_dir, "empty.jpg")
+            valid_path = os.path.join(work_dir, "valid.jpg")
+            open(empty_path, "wb").close()
+            with open(valid_path, "wb") as valid_file:
+                valid_file.write(b"photo")
+            acc = _FlakyDownloadAcc([empty_path, valid_path])
+
+            with mock.patch.object(batch_forward.time, "sleep"):
+                path = batch_forward._download_batch_media_with_retry(
+                    acc,
+                    message,
+                    os.path.join(work_dir, ""),
+                    None,
+                )
+
+            self.assertEqual(path, valid_path)
+            self.assertEqual(len(acc.calls), 2)
+            self.assertFalse(os.path.exists(empty_path))
 
     def test_media_group_retries_one_none_item_without_redownloading_others(self):
         first = _Message(130, "album", photo=_Photo("p26"))

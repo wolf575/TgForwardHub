@@ -1,14 +1,18 @@
 import os
 import shutil
+import tempfile
 import unittest
 
 from pyrogram.enums import MessageMediaType
 from pyrogram.types import InputMediaPhoto
 
 from bot.handlers.messages import (
+    _build_private_media_group_inputs,
     _download_private_media_group,
+    _download_private_media_thumbnail,
     _forward_private_media_group_by_download,
     _get_private_media_group_messages,
+    _send_downloaded_private_media_group,
     _should_forward_private_media_group,
 )
 
@@ -147,6 +151,32 @@ class _Bot:
         self.calls.append(("delete_messages", args, kwargs))
 
 
+class _EmptyThumbnailPayload:
+    def __init__(self, file_id):
+        self.thumbs = [type("_Thumb", (), {"file_id": file_id})()]
+
+
+class _EmptyThumbnailAcc:
+    def __init__(self, file_path):
+        self.file_path = file_path
+
+    def download_media(self, _item, file_name=None, **kwargs):
+        path = file_name or self.file_path
+        open(path, "wb").close()
+        return path
+
+
+class _RetryAlbumBot:
+    def __init__(self):
+        self.calls = []
+
+    def send_media_group(self, chat_id, media):
+        self.calls.append(media)
+        if len(self.calls) == 1:
+            raise ValueError("File size equals to 0 B")
+        return [_StatusMessage(9200), _StatusMessage(9201)]
+
+
 class PrivateMediaGroupFallbackTests(unittest.TestCase):
     def test_single_query_and_single_id_select_the_album(self):
         self.assertTrue(
@@ -268,6 +298,66 @@ class PrivateMediaGroupFallbackTests(unittest.TestCase):
             self.assertEqual([item.id for item, _path, _thumb in downloads], [41])
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
+
+    def test_empty_thumbnail_is_removed_before_album_input_is_built(self):
+        item = _Message(50, "album", video=_Video("v3"))
+        work_dir = tempfile.mkdtemp()
+        try:
+            media_path = os.path.join(work_dir, "item_50.mp4")
+            thumb_path = os.path.join(work_dir, "thumb_0.jpg")
+            with open(media_path, "wb") as media_file:
+                media_file.write(b"video")
+            open(thumb_path, "wb").close()
+
+            inputs = _build_private_media_group_inputs(
+                [item],
+                [(item, media_path, thumb_path)],
+            )
+
+            self.assertEqual(len(inputs), 1)
+            self.assertIsNone(inputs[0].thumb)
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+    def test_empty_thumbnail_download_is_deleted_and_ignored(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            acc = _EmptyThumbnailAcc(os.path.join(work_dir, "thumb_0.jpg"))
+            payload = _EmptyThumbnailPayload("thumbnail-file-id")
+
+            thumb = _download_private_media_thumbnail(
+                acc,
+                payload,
+                work_dir,
+                0,
+            )
+
+            self.assertIsNone(thumb)
+            self.assertFalse(os.path.exists(acc.file_path))
+
+    def test_album_retries_without_thumbnails_before_item_fallback(self):
+        first = _Message(51, "album", video=_Video("v4"))
+        second = _Message(52, "album", video=_Video("v5"))
+        bot = _RetryAlbumBot()
+        with tempfile.TemporaryDirectory() as work_dir:
+            thumb_path = os.path.join(work_dir, "thumb_1.jpg")
+            with open(thumb_path, "wb") as thumb_file:
+                thumb_file.write(b"thumbnail")
+            downloads = [
+                (first, os.path.join(work_dir, "item_51.mp4"), thumb_path),
+                (second, os.path.join(work_dir, "item_52.mp4"), None),
+            ]
+
+            message_id = _send_downloaded_private_media_group(
+                bot,
+                123456,
+                [first, second],
+                downloads,
+            )
+
+            self.assertEqual(message_id, 9200)
+            self.assertEqual(len(bot.calls), 2)
+            self.assertIsNotNone(bot.calls[0][0].thumb)
+            self.assertIsNone(bot.calls[1][0].thumb)
 
 
 if __name__ == "__main__":

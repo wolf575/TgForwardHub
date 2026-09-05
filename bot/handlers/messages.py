@@ -687,6 +687,16 @@ def _get_private_media_payload(item):
     return getattr(item, attribute_name, None)
 
 
+def _nonempty_file(path):
+    """Return True when path points to a non-empty regular file."""
+    if not path:
+        return False
+    try:
+        return os.path.isfile(path) and os.path.getsize(path) > 0
+    except OSError:
+        return False
+
+
 def _download_private_media_thumbnail(acc, payload, work_dir, index):
     """Download an optional thumbnail without failing the whole media group."""
     thumbs = getattr(payload, "thumbs", None)
@@ -694,13 +704,27 @@ def _download_private_media_thumbnail(acc, payload, work_dir, index):
         return None
 
     try:
-        return acc.download_media(
+        thumb_path = acc.download_media(
             thumbs[0].file_id,
             file_name=os.path.join(work_dir, f"thumb_{index}.jpg"),
         )
     except Exception as exc:
         logger.debug("无法下载媒体组第 %s 项缩略图: %s", index + 1, exc)
         return None
+
+    if not _nonempty_file(thumb_path):
+        if thumb_path and os.path.isfile(thumb_path):
+            try:
+                os.remove(thumb_path)
+            except OSError as exc:
+                logger.debug(
+                    "无法删除媒体组第 %s 项空缩略图: %s",
+                    index + 1,
+                    exc,
+                )
+        logger.warning("媒体组第 %s 项缩略图为空，上传时已忽略", index + 1)
+        return None
+    return thumb_path
 
 
 def _build_private_media_group_inputs(
@@ -730,6 +754,7 @@ def _build_private_media_group_inputs(
         item_caption = caption if index == 0 else ""
         item_caption_entities = caption_entities if index == 0 else None
         msg_type = get_message_type(item)
+        thumb = thumb if _nonempty_file(thumb) else None
 
         if msg_type == "Photo":
             media_inputs.append(
@@ -903,11 +928,44 @@ def _send_downloaded_private_media_group(
         result = bot.send_media_group(destination_chat_id, media_inputs)
         return _message_id(result)
     except Exception as exc:
-        logger.warning(
-            "媒体组上传失败，改为逐条上传: %s: %s",
-            type(exc).__name__,
-            exc,
-        )
+        has_thumb = any(thumb for _item, _file_path, thumb in downloads)
+        if has_thumb:
+            thumbless_downloads = [
+                (item, file_path, None)
+                for item, file_path, _thumb in downloads
+            ]
+            thumbless_inputs = _build_private_media_group_inputs(
+                group_messages,
+                thumbless_downloads,
+                caption_override=caption_override,
+                caption_entities_override=caption_entities_override,
+            )
+            try:
+                result = bot.send_media_group(
+                    destination_chat_id,
+                    thumbless_inputs,
+                )
+                logger.info(
+                    "去除缩略图后媒体组上传成功: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
+                return _message_id(result)
+            except Exception as retry_exc:
+                logger.warning(
+                    "去除缩略图后媒体组上传仍失败，改为逐条上传: "
+                    "%s: %s -> %s: %s",
+                    type(exc).__name__,
+                    exc,
+                    type(retry_exc).__name__,
+                    retry_exc,
+                )
+        else:
+            logger.warning(
+                "媒体组上传失败，改为逐条上传: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
 
     forwarded_message_id = None
     for index, (item, file_path, thumb) in enumerate(downloads):

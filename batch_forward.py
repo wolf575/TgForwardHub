@@ -31,6 +31,7 @@ from bot.handlers.messages import (
     _download_private_media_thumbnail,
     _get_private_media_group_messages,
     _get_private_media_payload,
+    _nonempty_file,
     _send_downloaded_private_media_group,
     _send_downloaded_private_media_sequentially,
 )
@@ -461,6 +462,29 @@ def _download_batch_media_with_retry(
                 _emit_log(
                     f"受限媒体 {item_id} 第 {attempt}/{attempts} 次下载返回空结果，"
                     "将稍后重试",
+                    log,
+                    "warning",
+                )
+                if attempt < attempts:
+                    time.sleep(1.5 * attempt)
+                    continue
+                break
+            if os.path.isfile(file_path) and not _nonempty_file(file_path):
+                if os.path.isfile(file_path):
+                    try:
+                        os.remove(file_path)
+                    except OSError as exc:
+                        _emit_log(
+                            f"受限媒体 {item_id} 空文件删除失败: {exc}",
+                            log,
+                            "warning",
+                        )
+                last_error = RuntimeError(
+                    f"媒体 {item_id} 下载失败：Telegram 返回了 0 字节文件"
+                )
+                _emit_log(
+                    f"受限媒体 {item_id} 第 {attempt}/{attempts} 次下载得到 "
+                    "0 字节文件，将稍后重试",
                     log,
                     "warning",
                 )
