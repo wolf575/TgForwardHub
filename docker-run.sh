@@ -18,9 +18,6 @@ docker run -d \
     -p "${HOST_PORT}:10000" \
     -v "${DATA_DIR}:/app/data" \
     -v "${DOWNLOADS_DIR}:/app/downloads" \
-    -e DATA_DIR=/app/data \
-    -e PORT=10000 \
-    -e TZ=Asia/Shanghai \
     "$IMAGE_NAME"
 
 echo "TG Forward Hub is running at http://localhost:${HOST_PORT}"

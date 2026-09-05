@@ -13,6 +13,7 @@ import math
 import requests
 import sys
 from urllib.parse import urlencode
+from app_settings import get_app_settings, save_app_timezone
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your-secret-key-change-this-in-production')
@@ -149,6 +150,30 @@ def api_setup_status():
         return jsonify({'error': 'setup_id 不能为空'}), 400
 
     return jsonify(get_setup_status(setup_id))
+
+
+@app.route('/api/app-settings', methods=['GET'])
+def api_app_settings():
+    if 'username' not in session:
+        return jsonify({'error': '未登录'}), 401
+    return jsonify(get_app_settings())
+
+
+@app.route('/api/app-settings', methods=['POST'])
+def api_app_settings_save():
+    if 'username' not in session:
+        return jsonify({'error': '未登录'}), 401
+
+    data = request.get_json(silent=True) or {}
+    timezone_name = str(data.get('timezone') or '').strip()
+    if not timezone_name:
+        return jsonify({'error': '时区不能为空'}), 400
+
+    try:
+        settings = save_app_timezone(timezone_name)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    return jsonify({'ok': True, **settings, 'message': '时区设置已保存'})
 
 
 @app.route('/api/setup/save', methods=['POST'])

@@ -29,11 +29,12 @@ docker run -d \
   -p 10001:10000 \
   -v /docker-data/tfh/data:/app/data \
   -v /docker-data/tfh/downloads:/app/downloads \
-  -e DATA_DIR=/app/data \
-  -e PORT=10000 \
-  -e TZ=Asia/Shanghai \
   ghcr.io/wolf575/tg-forward-hub:latest
 ```
+
+容器内置 `DATA_DIR=/app/data`、`PORT=10000` 和默认时区
+`Asia/Shanghai`，无需再传这三个参数。需要其他时区时，在 Web UI 设置页中
+选择即可，不需要修改启动命令。
 
 ## Docker Compose
 

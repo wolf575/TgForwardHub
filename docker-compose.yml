@@ -8,9 +8,6 @@ services:
     ports:
       - "10000:10000"
     environment:
-      - DATA_DIR=/app/data
-      - PORT=10000
-      - TZ=Asia/Shanghai
       - FLASK_APP=app.py
       - FLASK_SECRET_KEY=change-this-secret
     volumes:

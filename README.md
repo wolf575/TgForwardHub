@@ -82,11 +82,10 @@ TgForwardHub/
 | `HASH` | Telegram API Hash | 是 |
 | `STRING` | 用户账号 Session String | 自动转发、批量转发的用户客户端需要 |
 | `FLASK_SECRET_KEY` | Flask Session 加密密钥，生产环境必须修改 | 建议 |
-| `DATA_DIR` | 容器内数据目录，默认 `/app/data` | Docker 中保持默认 |
-| `PORT` | Web 服务监听端口，默认 `10000` | 可选 |
-| `TZ` | 时区，默认 `Asia/Shanghai` | 可选 |
 
 > 也可以通过网页端「设置」页生成 Session String，不必手动复制长字符串。
+> Docker 内置 `DATA_DIR=/app/data`、`PORT=10000`、`TZ=Asia/Shanghai`
+> 默认值，日常运行不需要重复传入。时区可以在网页端「设置」页修改。
 
 ## 本地运行
 
@@ -157,21 +156,10 @@ docker run -d \
   -p 10001:10000 \
   -v /docker-data/tfh/data:/app/data \
   -v /docker-data/tfh/downloads:/app/downloads \
-  -e DATA_DIR=/app/data \
-  -e PORT=10000 \
-  -e TZ=Asia/Shanghai \
   ghcr.io/wolf575/tg-forward-hub:latest
 ```
 
 容器内 Web 服务继续监听 `10000`，宿主机通过 `10001` 访问。打开 `http://服务器IP:10001` 即可。
-
-如果你想同时把容器内部端口也改成 `10001`，端口映射和 `PORT` 环境变量要保持一致：
-
-```bash
--p 10001:10001 -e PORT=10001
-```
-
-不要使用 `-p 10001:10000` 搭配 `-e PORT=10001`，这会让宿主机映射到容器 `10000`，但 Flask 实际监听在 `10001`，导致页面无法访问。
 
 ### Windows PowerShell
 
@@ -201,9 +189,6 @@ docker run -d \
   -p 10000:10000 \
   -v "$(pwd)/data:/app/data" \
   -v "$(pwd)/downloads:/app/downloads" \
-  -e DATA_DIR=/app/data \
-  -e PORT=10000 \
-  -e TZ=Asia/Shanghai \
   tg-forward-hub
 ```
 
@@ -216,9 +201,6 @@ docker run -d `
   -p 10000:10000 `
   -v "C:\path\to\TgForwardHub\data:/app/data" `
   -v "C:\path\to\TgForwardHub\downloads:/app/downloads" `
-  -e DATA_DIR=/app/data `
-  -e PORT=10000 `
-  -e TZ=Asia/Shanghai `
   tg-forward-hub
 ```
 

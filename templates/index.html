@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>TG Forward Hub</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/merged.css') }}?v=20260904-full-watch-settings">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/merged.css') }}?v=20260906-timezone-refresh">
 </head>
 <body>
   <header class="topbar">
@@ -265,6 +265,26 @@
       </div>
 
       <div class="settings-card-grid">
+        <form id="timezoneForm" class="form-card">
+          <div class="panel-subhead"><h2>时区</h2></div>
+          <div id="timezoneMessage" class="message" hidden></div>
+          <label>时区
+            <select id="timezoneSelect">
+              <option value="Asia/Shanghai">亚洲/上海</option>
+              <option value="Asia/Hong_Kong">亚洲/香港</option>
+              <option value="Asia/Taipei">亚洲/台北</option>
+              <option value="Asia/Singapore">亚洲/新加坡</option>
+              <option value="Asia/Tokyo">亚洲/东京</option>
+              <option value="Europe/London">欧洲/伦敦</option>
+              <option value="Europe/Berlin">欧洲/柏林</option>
+              <option value="America/New_York">美洲/纽约</option>
+              <option value="America/Los_Angeles">美洲/洛杉矶</option>
+              <option value="UTC">协调世界时 UTC</option>
+            </select>
+          </label>
+          <button id="timezoneSaveBtn" class="primary" type="button">保存时区</button>
+        </form>
+
         <form id="passwordForm" class="form-card">
           <div class="panel-subhead"><h2>修改密码</h2></div>
           <div id="passwordMessage" class="message" hidden></div>
@@ -345,6 +365,6 @@
     </section>
   </main>
 
-  <script src="{{ url_for('static', filename='js/merged.js') }}?v=20260904-full-watch-settings"></script>
+  <script src="{{ url_for('static', filename='js/merged.js') }}?v=20260906-timezone-refresh"></script>
 </body>
 </html>

@@ -14,9 +14,9 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 
-from pyrogram import raw
+from pyrogram import raw, utils
+from pyrogram.enums import MessageEntityType
 from pyrogram.errors import (
     ChatForwardsRestricted,
     FileReferenceExpired,
@@ -26,6 +26,7 @@ from pyrogram.errors import (
 )
 
 from database import DATA_DIR
+from app_settings import get_app_timezone
 from bot.handlers.messages import (
     _copy_single_private_media,
     _download_private_media_thumbnail,
@@ -47,7 +48,6 @@ apply_pyrogram_peer_id_compat()
 logger = get_logger(__name__)
 
 
-CHINA_TZ = ZoneInfo("Asia/Shanghai")
 HISTORY_DB = os.path.join(DATA_DIR, "history.db")
 DOWNLOADABLE_MEDIA_TYPES = {
     "Audio",
@@ -92,10 +92,17 @@ def init_history_db():
             )
             """
         )
+        conn.execute(
+            """
+            UPDATE history
+            SET status = 'interrupted', exitCode = COALESCE(exitCode, 130)
+            WHERE status = 'running'
+            """
+        )
 
 
 def _now_iso():
-    return datetime.now(CHINA_TZ).isoformat(timespec="seconds")
+    return datetime.now(get_app_timezone()).isoformat(timespec="seconds")
 
 
 def _record_to_dict(row):
@@ -158,6 +165,20 @@ def list_history():
     with _connect() as conn:
         rows = conn.execute("SELECT * FROM history ORDER BY createdAt DESC").fetchall()
         return [_record_to_dict(row) for row in rows]
+
+
+def get_history_record(job_id):
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM history
+            WHERE id = ? OR jobId = ?
+            ORDER BY createdAt DESC
+            LIMIT 1
+            """,
+            (job_id, job_id),
+        ).fetchone()
+    return _record_to_dict(row) if row else None
 
 
 def clear_history():
@@ -276,7 +297,7 @@ def _parse_timestamp(value):
     if re.fullmatch(r"\d{10}", value):
         return int(value)
     try:
-        dt = datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=CHINA_TZ)
+        dt = datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=get_app_timezone())
         return int(dt.timestamp())
     except ValueError:
         return None
@@ -409,6 +430,113 @@ def _user_hidden_forward(acc, source_id, dest_id, message_ids, drop_author=True)
             id=list(message_ids),
             random_id=[acc.rnd_id() for _ in message_ids],
             drop_author=drop_author,
+        )
+    )
+
+
+def _media_file_id(message):
+    for attribute in (
+        "photo",
+        "video",
+        "document",
+        "audio",
+        "animation",
+        "sticker",
+        "voice",
+        "video_note",
+    ):
+        media = getattr(message, attribute, None)
+        if media is not None and getattr(media, "file_id", None):
+            return media.file_id
+    return None
+
+
+def _raw_message_entities(entities):
+    """Convert Pyrogram MessageEntity objects to raw input entities.
+
+    Text-mention entities need an InputUser peer and are intentionally skipped
+    rather than producing an invalid RPC. All ordinary caption formatting is
+    preserved by this helper.
+    """
+    if not entities:
+        return None
+    raw_entities = []
+    for entity in entities:
+        entity_type = getattr(entity, "type", None)
+        try:
+            raw_type = (
+                entity_type.value
+                if isinstance(entity_type, MessageEntityType)
+                else MessageEntityType[str(entity_type).upper()].value
+            )
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+        if raw_type is None or raw_type in (
+            raw.types.MessageEntityMentionName,
+            raw.types.InputMessageEntityMentionName,
+        ):
+            continue
+        kwargs = {
+            "offset": int(entity.offset),
+            "length": int(entity.length),
+        }
+        if raw_type is raw.types.MessageEntityTextUrl:
+            kwargs["url"] = entity.url or ""
+        elif raw_type is raw.types.MessageEntityPre:
+            kwargs["language"] = entity.language or ""
+        elif raw_type is raw.types.MessageEntityCustomEmoji:
+            kwargs["document_id"] = int(entity.custom_emoji_id or 0)
+        try:
+            raw_entities.append(raw_type(**kwargs))
+        except (TypeError, ValueError):
+            continue
+    return raw_entities or None
+
+
+def _raw_cached_send_media_group(acc, dest_id, group_messages, caption, text_changed):
+    multi_media = []
+    for index, message in enumerate(group_messages):
+        file_id = _media_file_id(message)
+        if not file_id:
+            raise ValueError(f"消息 {message.id} 没有可用的 Telegram file_id")
+        caption_text = ""
+        entities = None
+        if index == 0:
+            caption_text = caption if text_changed else message.caption or ""
+            entities = None if text_changed else _raw_message_entities(
+                getattr(message, "caption_entities", None)
+            )
+        multi_media.append(
+            raw.types.InputSingleMedia(
+                media=utils.get_input_media_from_file_id(file_id),
+                random_id=acc.rnd_id(),
+                message=caption_text,
+                entities=entities,
+            )
+        )
+    return acc.invoke(
+        raw.functions.messages.SendMultiMedia(
+            peer=acc.resolve_peer(dest_id),
+            multi_media=multi_media,
+        )
+    )
+
+
+def _raw_cached_send_media(acc, dest_id, message, caption, text_changed):
+    file_id = _media_file_id(message)
+    if not file_id:
+        raise ValueError(f"消息 {message.id} 没有可用的 Telegram file_id")
+    caption_text = caption if text_changed else getattr(message, "caption", "") or ""
+    entities = None if text_changed else _raw_message_entities(
+        getattr(message, "caption_entities", None)
+    )
+    return acc.invoke(
+        raw.functions.messages.SendMedia(
+            peer=acc.resolve_peer(dest_id),
+            media=utils.get_input_media_from_file_id(file_id),
+            message=caption_text,
+            random_id=acc.rnd_id(),
+            entities=entities,
         )
     )
 
@@ -786,6 +914,59 @@ def _forward_batch_media_group(
                 "warning",
             )
 
+    if not preserve_source:
+        try:
+            _emit_log(
+                f"媒体组 {anchor.id} 使用 Telegram 缓存 file_id 直接发送: "
+                f"{source_id} -> {dest_id}，"
+                "RPC=messages.SendMultiMedia",
+                log,
+            )
+            _worker_execute(
+                worker,
+                "用户客户端缓存 file_id 媒体组发送",
+                lambda: _raw_cached_send_media_group(
+                    acc,
+                    dest_id,
+                    group_messages,
+                    cleaned_text,
+                    text_changed,
+                ),
+            )
+            _emit_log(
+                f"媒体组 {anchor.id} 已通过缓存 file_id 原样发送，无需下载重传: "
+                f"{source_id} -> {dest_id}",
+                log,
+            )
+            return len(group_messages), False
+        except Exception as exc:
+            _emit_log(
+                f"媒体组 {anchor.id} 缓存 file_id 发送失败: "
+                f"{type(exc).__name__}: {exc}",
+                log,
+                "warning",
+            )
+            if isinstance(exc, ChatForwardsRestricted):
+                if restricted_source_ids is not None:
+                    restricted_source_ids.add(source_id)
+                _emit_log(
+                    f"来源 {source_id} 已确认限制缓存媒体发送，"
+                    "后续消息将直接下载重传",
+                    log,
+                    "warning",
+                )
+                reuploaded = _reupload_batch_media_group(
+                    worker,
+                    acc,
+                    source_id,
+                    dest_id,
+                    group_messages,
+                    cleaned_text,
+                    text_changed,
+                    log,
+                )
+                return len(group_messages), True
+
     try:
         if text_changed:
             _worker_execute(
@@ -1013,6 +1194,60 @@ def _forward_batch_single_media(
                 log,
                 "warning",
             )
+
+    if not preserve_source:
+        try:
+            _emit_log(
+                f"单条媒体 {message.id} 使用 Telegram 缓存 file_id 直接发送: "
+                f"{source_id} -> {dest_id}，"
+                "RPC=messages.SendMedia",
+                log,
+            )
+            _worker_execute(
+                worker,
+                "用户客户端缓存 file_id 单条媒体发送",
+                lambda: _raw_cached_send_media(
+                    acc,
+                    dest_id,
+                    message,
+                    cleaned_text,
+                    text_changed,
+                ),
+            )
+            _emit_log(
+                f"单条媒体 {message.id} 已通过缓存 file_id 原样发送，无需下载重传: "
+                f"{source_id} -> {dest_id}",
+                log,
+            )
+            return 1, False
+        except Exception as exc:
+            _emit_log(
+                f"单条媒体 {message.id} 缓存 file_id 发送失败: "
+                f"{type(exc).__name__}: {exc}",
+                log,
+                "warning",
+            )
+            if isinstance(exc, ChatForwardsRestricted):
+                if restricted_source_ids is not None:
+                    restricted_source_ids.add(source_id)
+                _emit_log(
+                    f"来源 {source_id} 已确认限制单条缓存媒体发送，"
+                    "后续消息将直接下载重传",
+                    log,
+                    "warning",
+                )
+                if get_message_type(message) not in DOWNLOADABLE_MEDIA_TYPES:
+                    raise
+                count = _reupload_batch_single_media(
+                    worker,
+                    acc,
+                    dest_id,
+                    message,
+                    cleaned_text,
+                    text_changed,
+                    log,
+                )
+                return count, True
 
     try:
         if text_changed:
@@ -1321,6 +1556,7 @@ def _run_batch_task(job_id, spec):
             message,
         )
         _update_task(job_id, stdoutTail=_tail("\n".join(log_lines)))
+        _persist_task_history(job_id)
 
     try:
         acc = get_acc_instance()
@@ -1442,6 +1678,7 @@ def _run_batch_task(job_id, spec):
                     "skipped": skipped,
                 },
             )
+            _persist_task_history(job_id)
             if index % 10 == 0:
                 log(f"进度 {processed}/{total}，成功 {success}，失败 {failed}，跳过 {skipped}")
             time.sleep(0.1)
@@ -1536,7 +1773,18 @@ def cancel_batch_task(job_id):
 def batch_status(job_id):
     task = get_task(job_id)
     if not task:
-        return None
+        history = get_history_record(job_id)
+        if not history:
+            return None
+        return {
+            "jobId": job_id,
+            "status": history.get("status") or "unknown",
+            "exitCode": history.get("exitCode"),
+            "progress": history.get("progress") or {},
+            "stdoutTail": history.get("stdoutTail") or "",
+            "stderrTail": history.get("stderrTail") or "",
+            "spec": history.get("task_spec") or {},
+        }
     return {
         "jobId": job_id,
         "status": task.get("status"),

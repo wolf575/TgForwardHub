@@ -1,18 +1,15 @@
 import sqlite3
 import bcrypt
 from datetime import datetime
-from zoneinfo import ZoneInfo
 import os
 import json
 import logging
 import re
 from contextlib import contextmanager
+from app_settings import get_app_timezone
 from constants import DB_DEDUP_WINDOW
 
 logger = logging.getLogger(__name__)
-
-# 设置中国时区
-CHINA_TZ = ZoneInfo("Asia/Shanghai")
 
 # 数据目录 - 独立存储，防止更新时丢失
 DEFAULT_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), 'data'))
@@ -338,7 +335,7 @@ def add_note(user_id, source_chat_id, source_name, message_text, media_type=None
             magnet_link = _extract_magnet_link(message_text)
 
             # Generate China timezone timestamp
-            china_timestamp = datetime.now(CHINA_TZ).strftime('%Y-%m-%d %H:%M:%S')
+            china_timestamp = datetime.now(get_app_timezone()).strftime('%Y-%m-%d %H:%M:%S')
 
             # Insert note (filename留空，由自动校准填充)
             cursor.execute('''
@@ -775,7 +772,7 @@ def add_calibration_task(note_id, magnet_hash, delay_seconds=600):
                 return None
 
             # 使用中国时区时间
-            now_china = datetime.now(CHINA_TZ)
+            now_china = datetime.now(get_app_timezone())
             next_attempt = now_china + timedelta(seconds=delay_seconds)
 
             # 明确设置created_at为中国时间,防止SQLite的CURRENT_TIMESTAMP使用UTC
@@ -801,7 +798,7 @@ def get_pending_calibration_tasks(limit=100):
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
-        now = datetime.now(CHINA_TZ).strftime('%Y-%m-%d %H:%M:%S')
+        now = datetime.now(get_app_timezone()).strftime('%Y-%m-%d %H:%M:%S')
 
         cursor.execute('''
             SELECT * FROM calibration_tasks
@@ -828,10 +825,10 @@ def update_calibration_task(task_id, status, error_message=None, next_retry_seco
     with get_db_connection() as conn:
         cursor = conn.cursor()
 
-        now = datetime.now(CHINA_TZ).strftime('%Y-%m-%d %H:%M:%S')
+        now = datetime.now(get_app_timezone()).strftime('%Y-%m-%d %H:%M:%S')
 
         if status == 'retrying' and next_retry_seconds:
-            next_attempt = datetime.now(CHINA_TZ) + timedelta(seconds=next_retry_seconds)
+            next_attempt = datetime.now(get_app_timezone()) + timedelta(seconds=next_retry_seconds)
             cursor.execute('''
                 UPDATE calibration_tasks
                 SET status = ?,
@@ -874,7 +871,7 @@ def get_calibration_stats():
 
         # 待处理任务数
         from datetime import datetime
-        now = datetime.now(CHINA_TZ).strftime('%Y-%m-%d %H:%M:%S')
+        now = datetime.now(get_app_timezone()).strftime('%Y-%m-%d %H:%M:%S')
         cursor.execute('''
             SELECT COUNT(*) FROM calibration_tasks
             WHERE status IN ('pending', 'retrying') AND next_attempt <= ?
@@ -919,7 +916,7 @@ def clear_completed_calibration_tasks(days=7):
 
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cutoff_date = (datetime.now(CHINA_TZ) - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+        cutoff_date = (datetime.now(get_app_timezone()) - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
 
         cursor.execute('''
             DELETE FROM calibration_tasks

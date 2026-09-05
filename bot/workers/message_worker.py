@@ -11,10 +11,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 from datetime import datetime
-from zoneinfo import ZoneInfo
 import pyrogram
 from pyrogram.errors import ChatForwardsRestricted, FileReferenceExpired, FloodWait
 
+from app_settings import get_app_timezone
 from database import add_note
 from config import load_watch_config, load_webdav_config, MEDIA_DIR
 from bot.filters import check_whitelist, check_blacklist, check_whitelist_regex, check_blacklist_regex, extract_content
@@ -26,9 +26,6 @@ from constants import (
 )
 
 logger = logging.getLogger(__name__)
-
-# China timezone
-CHINA_TZ = ZoneInfo("Asia/Shanghai")
 
 
 class UnrecoverableError(Exception):
@@ -427,7 +424,7 @@ class MessageWorker:
                     # 处理图片
                     if msg.photo:
                         media_type = "photo"
-                        file_name = f"{msg.id}_{idx}_{datetime.now(CHINA_TZ).strftime('%Y%m%d_%H%M%S')}.jpg"
+                        file_name = f"{msg.id}_{idx}_{datetime.now(get_app_timezone()).strftime('%Y%m%d_%H%M%S')}.jpg"
                         file_path = os.path.join(MEDIA_DIR, file_name)
                         try:
                             # 下载到本地临时文件
@@ -453,7 +450,7 @@ class MessageWorker:
                             media_type = "video"
                         if msg.video.thumbs and len(msg.video.thumbs) > 0:
                             thumb = msg.video.thumbs[-1]
-                            file_name = f"{msg.id}_{idx}_thumb_{datetime.now(CHINA_TZ).strftime('%Y%m%d_%H%M%S')}.jpg"
+                            file_name = f"{msg.id}_{idx}_thumb_{datetime.now(get_app_timezone()).strftime('%Y%m%d_%H%M%S')}.jpg"
                             file_path = os.path.join(MEDIA_DIR, file_name)
                             try:
                                 # 下载到本地临时文件
@@ -479,7 +476,7 @@ class MessageWorker:
                             media_type = "animation"
                         if msg.animation.thumbs and len(msg.animation.thumbs) > 0:
                             thumb = msg.animation.thumbs[-1]
-                            file_name = f"{msg.id}_{idx}_gif_thumb_{datetime.now(CHINA_TZ).strftime('%Y%m%d_%H%M%S')}.jpg"
+                            file_name = f"{msg.id}_{idx}_gif_thumb_{datetime.now(get_app_timezone()).strftime('%Y%m%d_%H%M%S')}.jpg"
                             file_path = os.path.join(MEDIA_DIR, file_name)
                             try:
                                 # 下载到本地临时文件
@@ -521,7 +518,7 @@ class MessageWorker:
         """Handle single photo download"""
         logger.info(f"   📷 处理单张图片")
         media_type = "photo"
-        file_name = f"{message.id}_{datetime.now(CHINA_TZ).strftime('%Y%m%d_%H%M%S')}.jpg"
+        file_name = f"{message.id}_{datetime.now(get_app_timezone()).strftime('%Y%m%d_%H%M%S')}.jpg"
         file_path = os.path.join(MEDIA_DIR, file_name)
 
         # 下载到本地临时文件
@@ -548,7 +545,7 @@ class MessageWorker:
         try:
             if message.video.thumbs and len(message.video.thumbs) > 0:
                 thumb = message.video.thumbs[-1]
-                file_name = f"{message.id}_{datetime.now(CHINA_TZ).strftime('%Y%m%d_%H%M%S')}_thumb.jpg"
+                file_name = f"{message.id}_{datetime.now(get_app_timezone()).strftime('%Y%m%d_%H%M%S')}_thumb.jpg"
                 file_path = os.path.join(MEDIA_DIR, file_name)
 
                 # 下载到本地临时文件
@@ -584,7 +581,7 @@ class MessageWorker:
         try:
             if message.animation.thumbs and len(message.animation.thumbs) > 0:
                 thumb = message.animation.thumbs[-1]
-                file_name = f"{message.id}_{datetime.now(CHINA_TZ).strftime('%Y%m%d_%H%M%S')}_gif_thumb.jpg"
+                file_name = f"{message.id}_{datetime.now(get_app_timezone()).strftime('%Y%m%d_%H%M%S')}_gif_thumb.jpg"
                 file_path = os.path.join(MEDIA_DIR, file_name)
 
                 # 下载到本地临时文件

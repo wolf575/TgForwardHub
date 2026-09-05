@@ -35,6 +35,7 @@ async function apiFetch(url, options = {}) {
 }
 
 const THEME_KEY = "tg_forward_hub_theme";
+const BATCH_JOB_KEY = "tg_forward_hub_batch_job";
 const THEMES = ["dark", "light", "ocean", "amber"];
 
 function applyTheme(theme) {
@@ -518,6 +519,36 @@ async function savePassword() {
   }
 }
 
+async function loadAppSettings() {
+  try {
+    const settings = await apiFetch("/api/app-settings");
+    const select = $("timezoneSelect");
+    select.textContent = "";
+    for (const option of settings.timezone_options || []) {
+      const item = document.createElement("option");
+      item.value = option.value;
+      item.textContent = option.label;
+      select.appendChild(item);
+    }
+    select.value = settings.timezone || "Asia/Shanghai";
+  } catch (error) {
+    setMessage("timezoneMessage", error.message);
+  }
+}
+
+async function saveTimezone() {
+  setMessage("timezoneMessage", "");
+  try {
+    const result = await apiFetch("/api/app-settings", {
+      method: "POST",
+      body: JSON.stringify({ timezone: $("timezoneSelect").value }),
+    });
+    setMessage("timezoneMessage", result.message || "时区设置已保存");
+  } catch (error) {
+    setMessage("timezoneMessage", error.message);
+  }
+}
+
 async function loadWebdavConfig() {
   try {
     const config = await apiFetch("/api/admin/webdav");
@@ -738,15 +769,41 @@ async function pollBatch(jobId) {
   try {
     const data = await apiFetch(`/api/batch-forward/${jobId}`);
     updateMonitor(data);
-    if (["done", "error", "cancelled"].includes(data.status)) {
+    if (["done", "error", "cancelled", "interrupted"].includes(data.status)) {
+      localStorage.removeItem(BATCH_JOB_KEY);
       setMessage("batchMessage", `任务 ${data.status}`);
       loadHistory();
       return;
     }
+    localStorage.setItem(BATCH_JOB_KEY, jobId);
   } catch (error) {
+    if (/job not found|HTTP 404/.test(error.message)) {
+      localStorage.removeItem(BATCH_JOB_KEY);
+    }
     setMessage("batchMessage", error.message);
   }
   pollingTimer = setTimeout(() => pollBatch(jobId), 1200);
+}
+
+async function restoreBatchTask() {
+  const jobId = localStorage.getItem(BATCH_JOB_KEY);
+  if (!jobId) return;
+
+  try {
+    const data = await apiFetch(`/api/batch-forward/${jobId}`);
+    updateMonitor(data);
+    if (data.status === "running") {
+      setMessage("batchMessage", "已恢复刷新前的执行状态");
+      pollBatch(jobId);
+      return;
+    }
+    localStorage.removeItem(BATCH_JOB_KEY);
+    if (["done", "error", "cancelled", "interrupted"].includes(data.status)) {
+      setMessage("batchMessage", `上次任务状态: ${data.status}`);
+    }
+  } catch (_) {
+    localStorage.removeItem(BATCH_JOB_KEY);
+  }
 }
 
 async function submitBatch(event) {
@@ -774,6 +831,7 @@ async function submitBatch(event) {
       method: "POST",
       body: JSON.stringify(spec),
     });
+    localStorage.setItem(BATCH_JOB_KEY, result.jobId);
     $("jobId").textContent = `jobId: ${result.jobId}`;
     $("jobStatus").textContent = "running";
     $("cancelBtn").hidden = false;
@@ -985,12 +1043,15 @@ document.addEventListener("DOMContentLoaded", () => {
   $("setupResetBtn").addEventListener("click", loadSetupState);
   $("setupLockBtn").addEventListener("click", toggleSetupLock);
   $("passwordSaveBtn").addEventListener("click", savePassword);
+  $("timezoneSaveBtn").addEventListener("click", saveTimezone);
   $("webdavSaveBtn").addEventListener("click", saveWebdavConfig);
   $("calibrationSaveBtn").addEventListener("click", saveCalibrationConfig);
   $("viewerSaveBtn").addEventListener("click", saveViewerConfig);
 
   loadStatus();
   loadSetupState();
+  loadAppSettings();
+  restoreBatchTask();
   loadWebdavConfig();
   loadCalibrationConfig();
   loadViewerConfig();

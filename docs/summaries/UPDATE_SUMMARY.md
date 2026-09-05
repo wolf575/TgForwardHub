@@ -25,8 +25,8 @@ docker run -d \
   -p 10001:10000 \
   -v /docker-data/tfh/data:/app/data \
   -v /docker-data/tfh/downloads:/app/downloads \
-  -e DATA_DIR=/app/data \
-  -e PORT=10000 \
-  -e TZ=Asia/Shanghai \
   ghcr.io/wolf575/tg-forward-hub:latest
 ```
+
+`DATA_DIR`、`PORT` 和 `TZ` 均使用容器内置默认值，默认时区为
+`Asia/Shanghai`，可在设置页修改。

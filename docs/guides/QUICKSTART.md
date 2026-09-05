@@ -13,11 +13,11 @@ docker run -d \
   -p 10001:10000 \
   -v /docker-data/tfh/data:/app/data \
   -v /docker-data/tfh/downloads:/app/downloads \
-  -e DATA_DIR=/app/data \
-  -e PORT=10000 \
-  -e TZ=Asia/Shanghai \
   ghcr.io/wolf575/tg-forward-hub:latest
 ```
+
+数据目录、容器端口和时区都已内置，默认分别是 `/app/data`、`10000` 和
+`Asia/Shanghai`，启动命令中不需要再次指定。
 
 打开 `http://服务器IP:10001`，使用默认账号 `admin` / `admin` 登录，然后在「设置」中填写：
 

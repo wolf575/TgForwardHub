@@ -288,7 +288,7 @@ Bot: [Automatically forwards 10 messages in sequence]
 
 1. **Session String 相当于账号密码**，请妥善保管
 2. **建议使用小号**生成 Session String
-3. **不要分享配置文件**（.env 和 config.json）
+3. **不要分享配置文件**（`data/config/config.json`、Session String）
 4. **定期检查登录设备**，及时删除异常会话
 
 ### 💡 最佳实践 | Best Practices
@@ -308,7 +308,8 @@ Bot: [Automatically forwards 10 messages in sequence]
 
 **解决**：
 1. 运行 `python setup.py` 重新配置
-2. 确认 `.env` 文件中 `STRING` 值正确
+2. 在 Web UI 设置页确认用户客户端已连接；如需检查持久化配置，可查看
+   `data/config/config.json`，但不要手工公开或分享其中的 Session String
 3. 如果只转发公开内容，可忽略此错误
 
 ---
