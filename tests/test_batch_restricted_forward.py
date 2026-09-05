@@ -239,14 +239,13 @@ class BatchRestrictedForwardTests(unittest.TestCase):
         self.assertNotIn("caption", acc.copied[0][1])
         self.assertNotIn("caption", acc.copied[1][1])
 
-    def test_clone_group_copy_failure_falls_back_to_whole_group_forward(self):
+    def test_clone_group_copy_failure_reuploads_without_forward(self):
         first = _Message(100, "album", photo=_Photo("p10"))
         second = _Message(101, "album", photo=_Photo("p11"))
         acc = _RestrictedAcc(
             media_group=[first, second],
             album_error=ValueError("Message with this type can't be copied."),
             item_copy_error=ValueError("Can't copy this message"),
-            forward_error=False,
         )
 
         count, used_fallback = batch_forward._forward_batch_unit(
@@ -260,16 +259,19 @@ class BatchRestrictedForwardTests(unittest.TestCase):
             False,
         )
 
-        self.assertEqual((count, used_fallback), (2, False))
-        self.assertEqual(acc.downloaded, [])
-        self.assertEqual(len(acc.forwarded), 1)
-        self.assertEqual(acc.forwarded[0][0][2], [100, 101])
+        self.assertEqual((count, used_fallback), (2, True))
+        self.assertEqual(
+            [os.path.basename(path) for path in acc.downloaded],
+            ["item_100.jpg", "item_101.jpg"],
+        )
+        self.assertEqual(acc.forwarded, [])
+        self.assertEqual(len(acc.media_groups), 1)
+        self.assertEqual(len(acc.media_groups[0]), 2)
 
-    def test_clone_single_copy_failure_falls_back_to_forward(self):
+    def test_clone_single_copy_failure_reuploads_without_forward(self):
         message = _Message(102, photo=_Photo("p12"))
         acc = _RestrictedAcc(
             copy_error=ValueError("Can't copy this message"),
-            forward_error=False,
         )
 
         count, used_fallback = batch_forward._forward_batch_unit(
@@ -283,11 +285,16 @@ class BatchRestrictedForwardTests(unittest.TestCase):
             False,
         )
 
-        self.assertEqual((count, used_fallback), (1, False))
-        self.assertEqual(acc.downloaded, [])
-        self.assertEqual(acc.forwarded[0][0][2], 102)
+        self.assertEqual((count, used_fallback), (1, True))
+        self.assertEqual(
+            [os.path.basename(path) for path in acc.downloaded],
+            ["item_102.jpg"],
+        )
+        self.assertEqual(acc.forwarded, [])
+        self.assertEqual(len(acc.sent), 1)
+        self.assertEqual(acc.sent[0][0], "send_photo")
 
-    def test_mixed_group_uses_forward_for_one_item_and_copy_for_another(self):
+    def test_mixed_group_clone_reuploads_uncopyable_item_without_forward(self):
         first = _Message(103, "album", photo=_Photo("p13"))
         second = _Message(104, "album", photo=_Photo("p14"))
 
@@ -296,16 +303,10 @@ class BatchRestrictedForwardTests(unittest.TestCase):
                 return ValueError("Can't copy this message")
             return None
 
-        def forward_error(args, kwargs):
-            if isinstance(args[2], list):
-                return ValueError("Message with this type can't be copied.")
-            return None
-
         acc = _RestrictedAcc(
             media_group=[first, second],
             album_error=ValueError("Message with this type can't be copied."),
             item_copy_error=item_copy_error,
-            forward_error=forward_error,
         )
 
         count, used_fallback = batch_forward._forward_batch_unit(
@@ -319,11 +320,70 @@ class BatchRestrictedForwardTests(unittest.TestCase):
             False,
         )
 
-        self.assertEqual((count, used_fallback), (2, False))
-        self.assertEqual(acc.downloaded, [])
+        self.assertEqual((count, used_fallback), (2, True))
+        self.assertEqual(
+            [os.path.basename(path) for path in acc.downloaded],
+            ["item_103.jpg"],
+        )
         self.assertEqual([call[0][2] for call in acc.copied], [103, 104])
-        self.assertEqual(acc.forwarded[0][0][2], [103, 104])
-        self.assertEqual(acc.forwarded[1][0][2], 103)
+        self.assertEqual(acc.forwarded, [])
+        self.assertEqual(len(acc.sent), 1)
+        self.assertEqual(acc.sent[0][0], "send_photo")
+
+    def test_direct_group_uses_native_forward_without_copies(self):
+        first = _Message(111, "album", photo=_Photo("p19"))
+        second = _Message(112, "album", photo=_Photo("p20"))
+        acc = _RestrictedAcc(
+            media_group=[first, second],
+            forward_error=False,
+        )
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            -1001234567890,
+            -1009876543210,
+            [first, second],
+            None,
+            False,
+            True,
+        )
+
+        self.assertEqual((count, used_fallback), (2, False))
+        self.assertEqual(acc.copied, [])
+        self.assertEqual(acc.downloaded, [])
+        self.assertEqual(len(acc.forwarded), 1)
+        self.assertEqual(acc.forwarded[0][0][2], [111, 112])
+
+    def test_direct_group_forward_failure_uses_per_item_forwards(self):
+        first = _Message(113, "album", photo=_Photo("p21"))
+        second = _Message(114, "album", photo=_Photo("p22"))
+
+        def forward_error(args, kwargs):
+            if isinstance(args[2], list):
+                return ValueError("album forwarding failed")
+            return None
+
+        acc = _RestrictedAcc(
+            media_group=[first, second],
+            forward_error=forward_error,
+        )
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            -1001234567890,
+            -1009876543210,
+            [first, second],
+            None,
+            False,
+            True,
+        )
+
+        self.assertEqual((count, used_fallback), (2, False))
+        self.assertEqual(acc.copied, [])
+        self.assertEqual(acc.downloaded, [])
+        self.assertEqual([call[0][2] for call in acc.forwarded], [[113, 114], 113, 114])
 
     def test_restricted_mixed_group_reuploads_only_uncopyable_item(self):
         first = _Message(109, "album", photo=_Photo("p17"), caption="受限图片")
@@ -334,17 +394,10 @@ class BatchRestrictedForwardTests(unittest.TestCase):
                 return ValueError("Can't copy this message")
             return None
 
-        def forward_error(args, kwargs):
-            return ChatForwardsRestricted(
-                400,
-                "CHAT_FORWARDS_RESTRICTED",
-            )
-
         acc = _RestrictedAcc(
             media_group=[first, second],
             album_error=ValueError("Message with this type can't be copied."),
             item_copy_error=item_copy_error,
-            forward_error=forward_error,
         )
 
         count, used_fallback = batch_forward._forward_batch_unit(
@@ -364,8 +417,7 @@ class BatchRestrictedForwardTests(unittest.TestCase):
             ["item_109.jpg"],
         )
         self.assertEqual([call[0][2] for call in acc.copied], [109, 110])
-        self.assertEqual(acc.forwarded[0][0][2], [109, 110])
-        self.assertEqual(acc.forwarded[1][0][2], 109)
+        self.assertEqual(acc.forwarded, [])
         self.assertEqual(len(acc.sent), 1)
         self.assertEqual(acc.sent[0][0], "send_photo")
 

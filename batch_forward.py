@@ -394,7 +394,7 @@ def _copy_batch_media_group_items(
     text_changed,
     preserve_source,
 ):
-    """Send a media group item by item with copy/forward fallbacks."""
+    """Send a media group item by item using the selected mode only."""
     errors = []
     for index, item in enumerate(group_messages):
         caption = cleaned_text if text_changed and index == 0 else None
@@ -413,23 +413,17 @@ def _copy_batch_media_group_items(
                 caption=caption,
             )
 
-        operations = []
         if preserve_source and not text_changed:
-            operations.append((forward_name, forward_item))
+            operation_name = forward_name
+            operation = forward_item
         else:
-            operations.append((copy_name, copy_item))
-            if not preserve_source and not text_changed:
-                operations.append((forward_name, forward_item))
+            operation_name = copy_name
+            operation = copy_item
 
-        last_error = None
-        for operation_name, operation in operations:
-            try:
-                _worker_execute(worker, operation_name, operation)
-                break
-            except Exception as exc:
-                last_error = exc
-        else:
-            errors.append((item, last_error))
+        try:
+            _worker_execute(worker, operation_name, operation)
+        except Exception as exc:
+            errors.append((item, exc))
     return errors
 
 
@@ -507,21 +501,6 @@ def _forward_batch_media_group(
             )
         return len(group_messages), False
     except Exception:
-        if not text_changed and not preserve_source:
-            try:
-                _worker_execute(
-                    worker,
-                    "转发媒体组（复制失败回退）",
-                    lambda: acc.forward_messages(
-                        dest_id,
-                        source_id,
-                        [item.id for item in group_messages],
-                    ),
-                )
-                return len(group_messages), False
-            except Exception:
-                pass
-
         errors = _copy_batch_media_group_items(
             worker,
             acc,
@@ -667,21 +646,6 @@ def _forward_batch_single_media(
             )
         return 1, False
     except Exception as exc:
-        if not text_changed and not preserve_source:
-            try:
-                _worker_execute(
-                    worker,
-                    "转发单条媒体（复制失败回退）",
-                    lambda: acc.forward_messages(
-                        dest_id,
-                        source_id,
-                        message.id,
-                    ),
-                )
-                return 1, False
-            except Exception:
-                pass
-
         if not isinstance(
             exc,
             (ChatForwardsRestricted, FileReferenceExpired, ValueError),
@@ -732,21 +696,6 @@ def _forward_batch_text(
             )
         return 1, False
     except Exception as exc:
-        if not text_changed and not preserve_source:
-            try:
-                _worker_execute(
-                    worker,
-                    "转发文本消息（复制失败回退）",
-                    lambda: acc.forward_messages(
-                        dest_id,
-                        source_id,
-                        message.id,
-                    ),
-                )
-                return 1, False
-            except Exception:
-                pass
-
         if not isinstance(exc, (ChatForwardsRestricted, FileReferenceExpired)):
             raise
 
