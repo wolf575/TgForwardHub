@@ -66,6 +66,7 @@ class _RestrictedAcc:
         album_error=None,
         copy_error=None,
         item_copy_error="same-as-copy",
+        forward_error="same-as-copy",
     ):
         self.media_group = media_group or []
         self.album_error = album_error
@@ -78,19 +79,34 @@ class _RestrictedAcc:
             if item_copy_error == "same-as-copy"
             else item_copy_error
         )
+        self.forward_error = (
+            self.copy_error if forward_error == "same-as-copy" else forward_error
+        )
         self.downloaded = []
         self.media_groups = []
         self.sent = []
         self.copied = []
+        self.forwarded = []
         self.get_media_group_calls = []
 
     def copy_message(self, *args, **kwargs):
         self.copied.append((args, kwargs))
-        if self.item_copy_error:
-            raise self.item_copy_error
+        error = self.item_copy_error
+        if callable(error):
+            error = error(args, kwargs)
+        if error:
+            raise error
 
     def copy_media_group(self, *args, **kwargs):
         raise self.album_error or self.copy_error
+
+    def forward_messages(self, *args, **kwargs):
+        self.forwarded.append((args, kwargs))
+        error = self.forward_error
+        if callable(error):
+            error = error(args, kwargs)
+        if error:
+            raise error
 
     def get_media_group(self, chat_id, message_id):
         self.get_media_group_calls.append((chat_id, message_id))
@@ -222,6 +238,188 @@ class BatchRestrictedForwardTests(unittest.TestCase):
         )
         self.assertNotIn("caption", acc.copied[0][1])
         self.assertNotIn("caption", acc.copied[1][1])
+
+    def test_clone_group_copy_failure_falls_back_to_whole_group_forward(self):
+        first = _Message(100, "album", photo=_Photo("p10"))
+        second = _Message(101, "album", photo=_Photo("p11"))
+        acc = _RestrictedAcc(
+            media_group=[first, second],
+            album_error=ValueError("Message with this type can't be copied."),
+            item_copy_error=ValueError("Can't copy this message"),
+            forward_error=False,
+        )
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            -1001234567890,
+            -1009876543210,
+            [first, second],
+            None,
+            False,
+            False,
+        )
+
+        self.assertEqual((count, used_fallback), (2, False))
+        self.assertEqual(acc.downloaded, [])
+        self.assertEqual(len(acc.forwarded), 1)
+        self.assertEqual(acc.forwarded[0][0][2], [100, 101])
+
+    def test_clone_single_copy_failure_falls_back_to_forward(self):
+        message = _Message(102, photo=_Photo("p12"))
+        acc = _RestrictedAcc(
+            copy_error=ValueError("Can't copy this message"),
+            forward_error=False,
+        )
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            -1001234567890,
+            -1009876543210,
+            [message],
+            None,
+            False,
+            False,
+        )
+
+        self.assertEqual((count, used_fallback), (1, False))
+        self.assertEqual(acc.downloaded, [])
+        self.assertEqual(acc.forwarded[0][0][2], 102)
+
+    def test_mixed_group_uses_forward_for_one_item_and_copy_for_another(self):
+        first = _Message(103, "album", photo=_Photo("p13"))
+        second = _Message(104, "album", photo=_Photo("p14"))
+
+        def item_copy_error(args, kwargs):
+            if args[2] == first.id:
+                return ValueError("Can't copy this message")
+            return None
+
+        def forward_error(args, kwargs):
+            if isinstance(args[2], list):
+                return ValueError("Message with this type can't be copied.")
+            return None
+
+        acc = _RestrictedAcc(
+            media_group=[first, second],
+            album_error=ValueError("Message with this type can't be copied."),
+            item_copy_error=item_copy_error,
+            forward_error=forward_error,
+        )
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            -1001234567890,
+            -1009876543210,
+            [first, second],
+            None,
+            False,
+            False,
+        )
+
+        self.assertEqual((count, used_fallback), (2, False))
+        self.assertEqual(acc.downloaded, [])
+        self.assertEqual([call[0][2] for call in acc.copied], [103, 104])
+        self.assertEqual(acc.forwarded[0][0][2], [103, 104])
+        self.assertEqual(acc.forwarded[1][0][2], 103)
+
+    def test_restricted_mixed_group_reuploads_only_uncopyable_item(self):
+        first = _Message(109, "album", photo=_Photo("p17"), caption="受限图片")
+        second = _Message(110, "album", photo=_Photo("p18"))
+
+        def item_copy_error(args, kwargs):
+            if args[2] == first.id:
+                return ValueError("Can't copy this message")
+            return None
+
+        def forward_error(args, kwargs):
+            return ChatForwardsRestricted(
+                400,
+                "CHAT_FORWARDS_RESTRICTED",
+            )
+
+        acc = _RestrictedAcc(
+            media_group=[first, second],
+            album_error=ValueError("Message with this type can't be copied."),
+            item_copy_error=item_copy_error,
+            forward_error=forward_error,
+        )
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            -1001234567890,
+            -1009876543210,
+            [first, second],
+            "受限图片",
+            False,
+            False,
+        )
+
+        self.assertEqual((count, used_fallback), (2, True))
+        self.assertEqual(
+            [os.path.basename(path) for path in acc.downloaded],
+            ["item_109.jpg"],
+        )
+        self.assertEqual([call[0][2] for call in acc.copied], [109, 110])
+        self.assertEqual(acc.forwarded[0][0][2], [109, 110])
+        self.assertEqual(acc.forwarded[1][0][2], 109)
+        self.assertEqual(len(acc.sent), 1)
+        self.assertEqual(acc.sent[0][0], "send_photo")
+
+    def test_modified_caption_never_uses_forward_fallback(self):
+        first = _Message(105, "album", photo=_Photo("p15"), caption="原始说明")
+        second = _Message(106, "album", photo=_Photo("p16"))
+        acc = _RestrictedAcc(
+            media_group=[first, second],
+            album_error=ChatForwardsRestricted(
+                400,
+                "CHAT_FORWARDS_RESTRICTED",
+            ),
+        )
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            -1001234567890,
+            -1009876543210,
+            [first, second],
+            "清理后的说明",
+            True,
+            False,
+        )
+
+        self.assertEqual((count, used_fallback), (2, True))
+        self.assertEqual(acc.forwarded, [])
+        self.assertEqual(acc.media_groups[0][0].caption, "清理后的说明")
+
+    def test_unsupported_non_downloadable_group_has_clear_error(self):
+        first = _Message(107, "album")
+        second = _Message(108, "album")
+        first.media = MessageMediaType.CONTACT
+        second.media = MessageMediaType.CONTACT
+        acc = _RestrictedAcc(
+            media_group=[first, second],
+            album_error=ValueError("Message with this type can't be copied."),
+            item_copy_error=ValueError("Can't copy this message"),
+        )
+
+        with self.assertRaises(RuntimeError) as raised:
+            batch_forward._forward_batch_unit(
+                _Worker(),
+                acc,
+                -1001234567890,
+                -1009876543210,
+                [first, second],
+                None,
+                False,
+                False,
+            )
+
+        self.assertIn("无法缓存复制且不可下载", str(raised.exception))
+        self.assertEqual(acc.downloaded, [])
 
     def test_modified_caption_is_kept_when_group_copy_falls_back(self):
         first = _Message(

@@ -394,35 +394,42 @@ def _copy_batch_media_group_items(
     text_changed,
     preserve_source,
 ):
-    """Copy a media group item by item through Telegram's cached-media path."""
+    """Send a media group item by item with copy/forward fallbacks."""
     errors = []
     for index, item in enumerate(group_messages):
+        caption = cleaned_text if text_changed and index == 0 else None
+        forward_name = f"逐条转发媒体组 {index + 1}/{len(group_messages)}"
+        copy_name = f"逐条复制媒体组 {index + 1}/{len(group_messages)}"
+
+        def forward_item(item=item):
+            return acc.forward_messages(dest_id, source_id, item.id)
+
+        def copy_item(item=item, caption=caption):
+            return _copy_single_private_media(
+                acc,
+                dest_id,
+                source_id,
+                item,
+                caption=caption,
+            )
+
+        operations = []
         if preserve_source and not text_changed:
-            operation_name = f"逐条转发媒体组 {index + 1}/{len(group_messages)}"
-
-            def forward_item(item=item):
-                return acc.forward_messages(dest_id, source_id, item.id)
-
-            operation = forward_item
+            operations.append((forward_name, forward_item))
         else:
-            caption = cleaned_text if text_changed and index == 0 else None
-            operation_name = f"逐条复制媒体组 {index + 1}/{len(group_messages)}"
+            operations.append((copy_name, copy_item))
+            if not preserve_source and not text_changed:
+                operations.append((forward_name, forward_item))
 
-            def copy_item(item=item, caption=caption):
-                return _copy_single_private_media(
-                    acc,
-                    dest_id,
-                    source_id,
-                    item,
-                    caption=caption,
-                )
-
-            operation = copy_item
-
-        try:
-            _worker_execute(worker, operation_name, operation)
-        except Exception as exc:
-            errors.append((item, exc))
+        last_error = None
+        for operation_name, operation in operations:
+            try:
+                _worker_execute(worker, operation_name, operation)
+                break
+            except Exception as exc:
+                last_error = exc
+        else:
+            errors.append((item, last_error))
     return errors
 
 
@@ -500,6 +507,21 @@ def _forward_batch_media_group(
             )
         return len(group_messages), False
     except Exception:
+        if not text_changed and not preserve_source:
+            try:
+                _worker_execute(
+                    worker,
+                    "转发媒体组（复制失败回退）",
+                    lambda: acc.forward_messages(
+                        dest_id,
+                        source_id,
+                        [item.id for item in group_messages],
+                    ),
+                )
+                return len(group_messages), False
+            except Exception:
+                pass
+
         errors = _copy_batch_media_group_items(
             worker,
             acc,
@@ -644,7 +666,30 @@ def _forward_batch_single_media(
                 ),
             )
         return 1, False
-    except (ChatForwardsRestricted, FileReferenceExpired):
+    except Exception as exc:
+        if not text_changed and not preserve_source:
+            try:
+                _worker_execute(
+                    worker,
+                    "转发单条媒体（复制失败回退）",
+                    lambda: acc.forward_messages(
+                        dest_id,
+                        source_id,
+                        message.id,
+                    ),
+                )
+                return 1, False
+            except Exception:
+                pass
+
+        if not isinstance(
+            exc,
+            (ChatForwardsRestricted, FileReferenceExpired, ValueError),
+        ):
+            raise
+        if get_message_type(message) not in DOWNLOADABLE_MEDIA_TYPES:
+            raise
+
         count = _reupload_batch_single_media(
             worker,
             acc,
@@ -686,7 +731,25 @@ def _forward_batch_text(
                 lambda: acc.copy_message(dest_id, source_id, message.id),
             )
         return 1, False
-    except (ChatForwardsRestricted, FileReferenceExpired):
+    except Exception as exc:
+        if not text_changed and not preserve_source:
+            try:
+                _worker_execute(
+                    worker,
+                    "转发文本消息（复制失败回退）",
+                    lambda: acc.forward_messages(
+                        dest_id,
+                        source_id,
+                        message.id,
+                    ),
+                )
+                return 1, False
+            except Exception:
+                pass
+
+        if not isinstance(exc, (ChatForwardsRestricted, FileReferenceExpired)):
+            raise
+
         _worker_execute(
             worker,
             "发送受限文本消息",
