@@ -1,207 +1,211 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>登录 - Telegram 笔记</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+    <title>登录 - TG Forward Hub</title>
+    <script>
+        (function () {
+            const themes = ["dark", "light", "ocean", "amber"];
+            const saved = localStorage.getItem("tg_forward_hub_theme");
+            document.documentElement.dataset.theme = themes.includes(saved) ? saved : "dark";
+        })();
+    </script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/merged.css') }}?v=20260906-login">
     <style>
-        /* Page-specific styles for login */
         body {
-            display: flex;
-            justify-content: center;
-            align-items: center;
+            min-height: 100vh;
+            display: grid;
+            place-items: center;
+            padding: 22px;
+            background:
+                linear-gradient(180deg, color-mix(in srgb, var(--accent) 7%, transparent), transparent 42%),
+                var(--bg);
         }
-        
-        .login-container {
-            background: var(--white);
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            padding: 50px var(--space-2xl);
-            max-width: 420px;
-            width: 100%;
-            animation: slideIn var(--transition-slow) ease-out;
+
+        .login-card {
+            width: min(100%, 430px);
+            padding: 30px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--surface);
+            box-shadow: 0 18px 46px rgba(0, 0, 0, .22);
+            animation: login-in .28s ease-out both;
         }
-        
-        @keyframes slideIn {
+
+        @keyframes login-in {
             from {
                 opacity: 0;
-                transform: translateY(-20px);
+                transform: translateY(10px);
             }
             to {
                 opacity: 1;
                 transform: translateY(0);
             }
         }
-        
-        .logo {
+
+        .login-brand {
             text-align: center;
-            margin-bottom: var(--space-xl);
+            margin-bottom: 26px;
         }
-        
-        .logo-icon {
-            width: 80px;
-            height: 80px;
-            background: var(--primary-gradient);
-            border-radius: var(--radius-full);
-            margin: 0 auto var(--space-lg);
+
+        .login-mark {
+            width: 64px;
+            height: 64px;
+            margin: 0 auto 14px;
+            display: grid;
+            place-items: center;
+            border-radius: 8px;
+            background: var(--accent);
+            color: var(--accent-contrast);
+            font-size: 24px;
+            font-weight: 800;
+            letter-spacing: 0;
+        }
+
+        .login-brand h1 {
+            font-size: 24px;
+            font-weight: 800;
+        }
+
+        .login-brand p {
+            margin: 6px 0 0;
+            color: var(--muted);
+            font-size: 14px;
+        }
+
+        .login-message {
+            margin: 0 0 16px;
+            padding: 10px 12px;
+            border: 1px solid color-mix(in srgb, var(--danger) 42%, transparent);
+            border-radius: 6px;
+            background: var(--danger-bg);
+            color: var(--danger);
+            font-size: 13px;
+        }
+
+        .login-field {
+            margin-bottom: 16px;
+        }
+
+        .login-field input {
+            margin-top: 7px;
+            min-height: 44px;
+        }
+
+        .login-options {
             display: flex;
-            justify-content: center;
+            justify-content: space-between;
             align-items: center;
-            font-size: 40px;
+            gap: 12px;
+            margin-bottom: 20px;
         }
-        
-        .logo h1 {
-            color: var(--gray-800);
-            font-size: var(--font-size-3xl);
-            margin-bottom: var(--space-sm);
+
+        .login-options .check {
+            font-size: 13px;
         }
-        
-        .subtitle {
-            color: var(--gray-600);
-            font-size: var(--font-size-base);
-        }
-        
-        .btn-login {
+
+        .login-submit {
             width: 100%;
-            padding: var(--space-md);
-            font-size: var(--font-size-lg);
+            min-height: 44px;
+            font-size: 15px;
         }
-        
-        .footer {
-            margin-top: var(--space-xl);
+
+        .login-footer {
+            margin: 22px 0 0;
             text-align: center;
-            color: var(--gray-500);
-            font-size: var(--font-size-xs);
+            color: var(--muted);
+            font-size: 12px;
         }
-        
-        .remember-me {
-            display: flex;
-            align-items: center;
-            margin-bottom: var(--space-lg);
-        }
-        
-        .remember-me input[type="checkbox"] {
-            width: 18px;
-            height: 18px;
-            margin-right: 8px;
-            cursor: pointer;
-            accent-color: var(--primary-start);
-        }
-        
-        .remember-me label {
-            margin: 0;
-            font-size: var(--font-size-base);
-            font-weight: 400;
-            color: var(--gray-600);
-            cursor: pointer;
-            user-select: none;
-        }
-        
+
         @media (max-width: 480px) {
-            .login-container {
-                padding: var(--space-xl) var(--space-lg);
-            }
-            
-            .logo-icon {
-                width: 60px;
-                height: 60px;
-                font-size: 32px;
-            }
-            
-            .logo h1 {
-                font-size: var(--font-size-2xl);
+            .login-card {
+                padding: 24px 20px;
             }
         }
     </style>
 </head>
 <body>
-    <div class="login-container">
-        <div class="logo">
-            <div class="logo-icon">📝</div>
-            <h1>Telegram 笔记</h1>
-            <p class="subtitle">管理员登录</p>
+    <main class="login-card">
+        <div class="login-brand">
+            <div class="login-mark" aria-hidden="true">TFH</div>
+            <h1>TG Forward Hub</h1>
+            <p>管理员登录</p>
         </div>
 
         {% if error %}
-        <div class="error-message">
-            {{ error }}
-        </div>
+        <div class="login-message">{{ error }}</div>
         {% endif %}
 
         <form method="POST" action="/login">
-            <div class="form-group">
+            <div class="login-field">
                 <label for="username">用户名</label>
-                <input type="text" id="username" name="username" required autofocus>
+                <input id="username" name="username" type="text" autocomplete="username" required autofocus>
             </div>
 
-            <div class="form-group">
+            <div class="login-field">
                 <label for="password">密码</label>
-                <input type="password" id="password" name="password" required>
+                <input id="password" name="password" type="password" autocomplete="current-password" required>
             </div>
 
-            <div class="remember-me">
-                <input type="checkbox" id="remember" name="remember" value="1">
-                <label for="remember">记住密码</label>
+            <div class="login-options">
+                <label class="check">
+                    <input id="remember" name="remember" type="checkbox" value="1">
+                    记住密码
+                </label>
             </div>
 
-            <button type="submit" class="btn btn-primary btn-login">登录</button>
+            <button class="primary login-submit" type="submit">登录</button>
         </form>
 
-        <div class="footer">
-            Telegram Bot 记录模式 © 2024
-        </div>
-    </div>
+        <p class="login-footer">TG Forward Hub</p>
+    </main>
 
     <script>
-        // 页面加载时，检查是否有保存的凭据
-        window.addEventListener('DOMContentLoaded', function() {
-            const savedUsername = getCookie('saved_username');
-            const savedPassword = getCookie('saved_password');
-
-            if (savedUsername && savedPassword) {
-                document.getElementById('username').value = savedUsername;
-                document.getElementById('password').value = savedPassword;
-                document.getElementById('remember').checked = true;
-            }
-        });
-
-        // 表单提交时，根据复选框状态保存或清除凭据
-        document.querySelector('form').addEventListener('submit', function(e) {
-            const username = document.getElementById('username').value;
-            const password = document.getElementById('password').value;
-            const remember = document.getElementById('remember').checked;
-
-            if (remember) {
-                setCookie('saved_username', username, 30);
-                setCookie('saved_password', password, 30);
-            } else {
-                deleteCookie('saved_username');
-                deleteCookie('saved_password');
-            }
-        });
-
-        // Cookie操作函数
         function setCookie(name, value, days) {
             const expires = new Date();
             expires.setTime(expires.getTime() + days * 24 * 60 * 60 * 1000);
-            document.cookie = name + '=' + encodeURIComponent(value) + ';expires=' + expires.toUTCString() + ';path=/';
+            document.cookie = name + "=" + encodeURIComponent(value) + ";expires=" + expires.toUTCString() + ";path=/";
         }
 
         function getCookie(name) {
-            const nameEQ = name + '=';
-            const ca = document.cookie.split(';');
-            for (let i = 0; i < ca.length; i++) {
-                let c = ca[i];
-                while (c.charAt(0) === ' ') c = c.substring(1, c.length);
-                if (c.indexOf(nameEQ) === 0) return decodeURIComponent(c.substring(nameEQ.length, c.length));
+            const nameEQ = name + "=";
+            const parts = document.cookie.split(";");
+            for (const part of parts) {
+                let item = part;
+                while (item.charAt(0) === " ") item = item.substring(1, item.length);
+                if (item.indexOf(nameEQ) === 0) {
+                    return decodeURIComponent(item.substring(nameEQ.length, item.length));
+                }
             }
             return null;
         }
 
         function deleteCookie(name) {
-            document.cookie = name + '=;expires=Thu, 01 Jan 1970 00:00:00 UTC;path=/';
+            document.cookie = name + "=;expires=Thu, 01 Jan 1970 00:00:00 UTC;path=/";
         }
+
+        window.addEventListener("DOMContentLoaded", function () {
+            const savedUsername = getCookie("saved_username");
+            const savedPassword = getCookie("saved_password");
+            if (savedUsername && savedPassword) {
+                document.getElementById("username").value = savedUsername;
+                document.getElementById("password").value = savedPassword;
+                document.getElementById("remember").checked = true;
+            }
+        });
+
+        document.querySelector("form").addEventListener("submit", function () {
+            const username = document.getElementById("username").value;
+            const password = document.getElementById("password").value;
+            if (document.getElementById("remember").checked) {
+                setCookie("saved_username", username, 30);
+                setCookie("saved_password", password, 30);
+            } else {
+                deleteCookie("saved_username");
+                deleteCookie("saved_password");
+            }
+        });
     </script>
 </body>
 </html>

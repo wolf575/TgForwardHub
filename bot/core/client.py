@@ -13,6 +13,11 @@ apply_pyrogram_peer_id_compat()
 
 logger = get_logger(__name__)
 
+# Pyrogram's default is 1. The user client performs batch download/upload
+# fallback work, so a small bounded increase avoids serializing every file
+# transfer without changing the Bot's message-forwarding behavior.
+USER_MAX_CONCURRENT_TRANSMISSIONS = 4
+
 
 def initialize_clients():
     """
@@ -61,7 +66,12 @@ def initialize_clients():
 
         if os.path.exists(f"{session_file}.session"):
             logger.info("📂 发现已有 Session 文件，将保留 Peer 缓存")
-            acc = Client(session_file, api_id=api_id, api_hash=api_hash)
+            acc = Client(
+                session_file,
+                api_id=api_id,
+                api_hash=api_hash,
+                max_concurrent_transmissions=USER_MAX_CONCURRENT_TRANSMISSIONS,
+            )
         else:
             logger.info("📝 首次启动，使用 Session String 创建 Session 文件")
             # 使用in_memory=False确保Session被保存到文件
@@ -70,7 +80,8 @@ def initialize_clients():
                 api_id=api_id,
                 api_hash=api_hash,
                 session_string=ss,
-                in_memory=False
+                in_memory=False,
+                max_concurrent_transmissions=USER_MAX_CONCURRENT_TRANSMISSIONS,
             )
 
         # 启动User客户端

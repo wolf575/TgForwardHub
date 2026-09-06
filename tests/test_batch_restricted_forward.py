@@ -1,6 +1,8 @@
 import os
 import re
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -217,6 +219,39 @@ class _FlakyDownloadAcc:
         if self.download_error is not None:
             raise self.download_error
         return self.results.pop(0)
+
+
+class _ConcurrentDownloadAcc:
+    def __init__(self, unsupported_ids=(), delay_by_id=None, max_workers=2):
+        self.unsupported_ids = set(unsupported_ids)
+        self.delay_by_id = delay_by_id or {}
+        self.max_workers = max_workers
+        self.active = 0
+        self.peak_active = 0
+        self.lock = threading.Lock()
+        self.calls = []
+
+    def download_media(self, item, file_name=None, **kwargs):
+        item_id = getattr(item, "id", None)
+        if item_id in self.unsupported_ids:
+            raise ValueError(
+                f"Message {item_id} doesn't contain any downloadable media"
+            )
+        self.calls.append(item_id)
+
+        with self.lock:
+            self.active += 1
+            self.peak_active = max(self.peak_active, self.active)
+
+        try:
+            time.sleep(self.delay_by_id.get(item_id, 0.02))
+            path = os.path.join(file_name, f"item_{item_id}.jpg")
+            with open(path, "wb") as file:
+                file.write(b"media")
+            return path
+        finally:
+            with self.lock:
+                self.active -= 1
 
 
 class BatchRestrictedForwardTests(unittest.TestCase):
@@ -1216,6 +1251,7 @@ class BatchRestrictedForwardTests(unittest.TestCase):
                     [first, second],
                     None,
                     attempts=2,
+                    max_workers=1,
                 )
             )
 
@@ -1226,6 +1262,89 @@ class BatchRestrictedForwardTests(unittest.TestCase):
                 ["item_130.jpg", "item_131.jpg"],
             )
             self.assertEqual([call[0] for call in acc.calls], [130, 130, 131])
+        finally:
+            import shutil
+
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+    def test_parallel_group_download_restores_album_order(self):
+        first = _Message(140, "album", photo=_Photo("p40"))
+        second = _Message(141, "album", photo=_Photo("p41"))
+        third = _Message(142, "album", photo=_Photo("p42"))
+        acc = _ConcurrentDownloadAcc(
+            delay_by_id={140: 0.06, 141: 0.02, 142: 0.04}
+        )
+
+        messages, downloads, work_dir = (
+            batch_forward._download_batch_media_group_with_retry(
+                acc,
+                -1001234567890,
+                [first, second, third],
+                None,
+                max_workers=3,
+            )
+        )
+
+        try:
+            self.assertEqual([item.id for item in messages], [140, 141, 142])
+            self.assertEqual(
+                [
+                    os.path.basename(path)
+                    for _item, path, _thumb in downloads
+                ],
+                ["item_140.jpg", "item_141.jpg", "item_142.jpg"],
+            )
+        finally:
+            import shutil
+
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+    def test_parallel_group_download_is_bounded(self):
+        messages = [
+            _Message(message_id, "album", photo=_Photo(f"p{message_id}"))
+            for message_id in (150, 151, 152, 153)
+        ]
+        acc = _ConcurrentDownloadAcc(max_workers=2)
+
+        _messages, downloads, work_dir = (
+            batch_forward._download_batch_media_group_with_retry(
+                acc,
+                -1001234567890,
+                messages,
+                None,
+                max_workers=2,
+            )
+        )
+
+        try:
+            self.assertEqual(len(downloads), 4)
+            self.assertLessEqual(acc.peak_active, 2)
+            self.assertEqual(acc.peak_active, 2)
+        finally:
+            import shutil
+
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+    def test_parallel_group_download_skips_unsupported_item(self):
+        first = _Message(160, "album", photo=_Photo("p50"))
+        unsupported = _Message(161, "album", text="not media")
+        second = _Message(162, "album", photo=_Photo("p51"))
+        acc = _ConcurrentDownloadAcc(unsupported_ids={161})
+
+        messages, downloads, work_dir = (
+            batch_forward._download_batch_media_group_with_retry(
+                acc,
+                -1001234567890,
+                [first, unsupported, second],
+                None,
+                max_workers=2,
+            )
+        )
+
+        try:
+            self.assertEqual([item.id for item in messages], [160, 162])
+            self.assertEqual(len(downloads), 2)
+            self.assertNotIn(161, acc.calls)
         finally:
             import shutil
 

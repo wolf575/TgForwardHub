@@ -16,7 +16,15 @@ async function apiFetch(url, options = {}) {
   try {
     const res = await fetch(url, { ...fetchOptions, headers, signal: controller.signal });
     if (!res.ok) {
-      let message = `HTTP ${res.status}`;
+      const statusMessages = {
+        400: "请求参数有误",
+        401: "登录状态已失效，请重新登录",
+        403: "没有执行此操作的权限",
+        404: "请求的资源不存在",
+        500: "服务器内部错误",
+        503: "服务暂时不可用，请稍后重试",
+      };
+      let message = statusMessages[res.status] || `请求失败（HTTP ${res.status}）`;
       try {
         const data = await res.json();
         message = data.error || message;
@@ -531,8 +539,17 @@ async function loadAppSettings() {
       select.appendChild(item);
     }
     select.value = settings.timezone || "Asia/Shanghai";
+    setMessage("timezoneMessage", "");
   } catch (error) {
-    setMessage("timezoneMessage", error.message);
+    const select = $("timezoneSelect");
+    if (select && !select.value) {
+      select.value = "Asia/Shanghai";
+    }
+    setMessage(
+      "timezoneMessage",
+      "时区配置暂时不可用，已使用默认时区亚洲/上海"
+    );
+    console.warn("App settings failed to load:", error.message);
   }
 }
 

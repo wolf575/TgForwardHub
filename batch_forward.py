@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from pyrogram import raw, utils
@@ -658,49 +659,78 @@ def _download_batch_media_group_items(
     group_messages,
     log,
     attempts=3,
+    max_workers=4,
 ):
-    """Download each album item with independent retries and transient skips."""
+    """Download album items in bounded parallel, then restore album order."""
     work_dir = tempfile.mkdtemp(prefix="tg_forward_album_")
-    downloads = []
-    downloadable_messages = []
+    indexed_downloads = [None] * len(group_messages)
+    log_lock = threading.Lock()
+
+    def thread_log(message, level="info"):
+        with log_lock:
+            _emit_log(message, log, level)
+
+    def download_item(index, item):
+        try:
+            file_path = _download_batch_media_with_retry(
+                acc,
+                item,
+                os.path.join(work_dir, ""),
+                thread_log,
+                attempts=attempts,
+            )
+        except ValueError as exc:
+            if "doesn't contain any downloadable media" in str(exc):
+                thread_log(
+                    f"媒体组消息 {item.id} 没有可下载媒体，已跳过",
+                    "warning",
+                )
+                return None
+            raise
+
+        payload = _get_private_media_payload(item)
+        thumb = None
+        if get_message_type(item) in (
+            "Document",
+            "Video",
+            "Audio",
+            "Animation",
+            "VideoNote",
+        ):
+            thumb = _download_private_media_thumbnail(
+                acc,
+                payload,
+                work_dir,
+                index,
+            )
+        return (item, file_path, thumb)
 
     try:
-        for index, item in enumerate(group_messages):
-            try:
-                file_path = _download_batch_media_with_retry(
-                    acc,
-                    item,
-                    os.path.join(work_dir, ""),
-                    log,
-                    attempts=attempts,
-                )
-            except ValueError as exc:
-                if "doesn't contain any downloadable media" in str(exc):
-                    _emit_log(
-                        f"媒体组消息 {item.id} 没有可下载媒体，已跳过",
-                        log,
-                    )
-                    continue
-                raise
+        if max_workers > 1 and len(group_messages) > 1:
+            _emit_log(
+                f"并行下载媒体组 {len(group_messages)} 项，"
+                f"最多 {max_workers} 个并发",
+                log,
+            )
+            with ThreadPoolExecutor(
+                max_workers=max_workers,
+                thread_name_prefix="tg_forward_download",
+            ) as executor:
+                futures = {
+                    executor.submit(download_item, index, item): index
+                    for index, item in enumerate(group_messages)
+                }
+                for future in as_completed(futures):
+                    index = futures[future]
+                    result = future.result()
+                    if result is not None:
+                        indexed_downloads[index] = result
+        else:
+            for index, item in enumerate(group_messages):
+                indexed_downloads[index] = download_item(index, item)
 
-            payload = _get_private_media_payload(item)
-            thumb = None
-            if get_message_type(item) in (
-                "Document",
-                "Video",
-                "Audio",
-                "Animation",
-                "VideoNote",
-            ):
-                thumb = _download_private_media_thumbnail(
-                    acc,
-                    payload,
-                    work_dir,
-                    index,
-                )
-
-            downloads.append((item, file_path, thumb))
-            downloadable_messages.append(item)
+        downloads = [download for download in indexed_downloads if download]
+        downloadable_messages = [download[0] for download in downloads]
 
         if not downloads:
             raise RuntimeError(
@@ -718,6 +748,7 @@ def _download_batch_media_group_with_retry(
     group_messages,
     log,
     attempts=3,
+    max_workers=4,
 ):
     """Download a fallback media group with transient-error retries."""
     item_ids = [item.id for item in group_messages]
@@ -734,6 +765,7 @@ def _download_batch_media_group_with_retry(
                 group_messages,
                 log,
                 attempts=attempts,
+                max_workers=max_workers,
             )
             downloaded_messages, downloads, work_dir = result
             _emit_log(
