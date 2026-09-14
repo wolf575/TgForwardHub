@@ -285,6 +285,17 @@
           <button id="timezoneSaveBtn" class="primary" type="button">保存时区</button>
         </form>
 
+        <form id="botNotificationForm" class="form-card">
+          <div class="panel-subhead"><h2>机器人发送通知</h2></div>
+          <div id="botNotificationMessage" class="message" hidden></div>
+          <label class="check">
+            <input id="batchNotificationsEnabled" type="checkbox">
+            发送“批量转发完成”通知
+          </label>
+          <p class="muted">关闭后，机器人仍会返回你需要的转发内容，但不再额外发送完成状态。</p>
+          <button id="botNotificationSaveBtn" class="primary" type="button">保存通知设置</button>
+        </form>
+
         <form id="passwordForm" class="form-card">
           <div class="panel-subhead"><h2>修改密码</h2></div>
           <div id="passwordMessage" class="message" hidden></div>
@@ -365,6 +376,6 @@
     </section>
   </main>
 
-  <script src="{{ url_for('static', filename='js/merged.js') }}?v=20260906-timezone-refresh"></script>
+  <script src="{{ url_for('static', filename='js/merged.js') }}?v=20260914-notifications"></script>
 </body>
 </html>

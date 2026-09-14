@@ -13,7 +13,7 @@ import math
 import requests
 import sys
 from urllib.parse import urlencode
-from app_settings import get_app_settings, save_app_timezone
+from app_settings import get_app_settings, save_app_preferences
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'your-secret-key-change-this-in-production')
@@ -165,15 +165,45 @@ def api_app_settings_save():
         return jsonify({'error': '未登录'}), 401
 
     data = request.get_json(silent=True) or {}
-    timezone_name = str(data.get('timezone') or '').strip()
-    if not timezone_name:
-        return jsonify({'error': '时区不能为空'}), 400
+    has_timezone = 'timezone' in data
+    has_batch_notifications = (
+        'batch_completion_notifications_enabled' in data
+    )
+    if not has_timezone and not has_batch_notifications:
+        return jsonify({'error': '没有需要保存的设置'}), 400
+
+    timezone_name = None
+    if has_timezone:
+        timezone_name = str(data.get('timezone') or '').strip()
+        if not timezone_name:
+            return jsonify({'error': '时区不能为空'}), 400
+
+    batch_completion_notifications_enabled = None
+    if has_batch_notifications:
+        batch_completion_notifications_enabled = bool(
+            data.get('batch_completion_notifications_enabled')
+        )
 
     try:
-        settings = save_app_timezone(timezone_name)
+        settings = save_app_preferences(
+            timezone_name=timezone_name,
+            batch_completion_notifications_enabled=(
+                batch_completion_notifications_enabled
+            ),
+        )
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
-    return jsonify({'ok': True, **settings, 'message': '时区设置已保存'})
+
+    saved_fields = []
+    if has_timezone:
+        saved_fields.append('时区设置已保存')
+    if has_batch_notifications:
+        saved_fields.append('通知设置已保存')
+    return jsonify({
+        'ok': True,
+        **settings,
+        'message': '，'.join(saved_fields),
+    })
 
 
 @app.route('/api/setup/save', methods=['POST'])

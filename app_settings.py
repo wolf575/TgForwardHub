@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 DEFAULT_TIMEZONE = "Asia/Shanghai"
+DEFAULT_BATCH_COMPLETION_NOTIFICATIONS = True
 DEFAULT_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "data"))
 DATA_DIR = os.environ.get("DATA_DIR", DEFAULT_DATA_DIR)
 SETTINGS_DIR = os.path.join(DATA_DIR, "config")
@@ -49,11 +50,22 @@ def get_app_settings():
     timezone_name = str(settings.get("timezone") or DEFAULT_TIMEZONE)
     if not is_valid_timezone(timezone_name):
         timezone_name = DEFAULT_TIMEZONE
+    batch_completion_notifications = settings.get(
+        "batch_completion_notifications_enabled",
+        DEFAULT_BATCH_COMPLETION_NOTIFICATIONS,
+    )
+    if not isinstance(batch_completion_notifications, bool):
+        batch_completion_notifications = str(
+            batch_completion_notifications
+        ).strip().lower() in {"1", "true", "yes", "on"}
     return {
         "timezone": timezone_name,
         "timezone_options": [
             {"value": value, "label": label} for value, label in TIMEZONE_OPTIONS
         ],
+        "batch_completion_notifications_enabled": (
+            batch_completion_notifications
+        ),
     }
 
 
@@ -69,12 +81,31 @@ def get_app_timezone():
     return ZoneInfo(get_app_settings()["timezone"])
 
 
-def save_app_timezone(timezone_name):
-    timezone_name = str(timezone_name or "").strip()
-    if not is_valid_timezone(timezone_name):
-        raise ValueError("时区无效")
+def batch_completion_notifications_enabled():
+    return bool(
+        get_app_settings()["batch_completion_notifications_enabled"]
+    )
+
+
+def save_app_preferences(
+    timezone_name=None,
+    batch_completion_notifications_enabled=None,
+):
+    """Save optional app preferences without overwriting unrelated settings."""
     with SETTINGS_LOCK:
         settings = _read_settings()
-        settings["timezone"] = timezone_name
+        if timezone_name is not None:
+            timezone_name = str(timezone_name or "").strip()
+            if not is_valid_timezone(timezone_name):
+                raise ValueError("时区无效")
+            settings["timezone"] = timezone_name
+        if batch_completion_notifications_enabled is not None:
+            settings["batch_completion_notifications_enabled"] = bool(
+                batch_completion_notifications_enabled
+            )
         _write_settings(settings)
     return get_app_settings()
+
+
+def save_app_timezone(timezone_name):
+    return save_app_preferences(timezone_name=timezone_name)

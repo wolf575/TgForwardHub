@@ -539,6 +539,8 @@ async function loadAppSettings() {
       select.appendChild(item);
     }
     select.value = settings.timezone || "Asia/Shanghai";
+    $("batchNotificationsEnabled").checked =
+      settings.batch_completion_notifications_enabled !== false;
     setMessage("timezoneMessage", "");
   } catch (error) {
     const select = $("timezoneSelect");
@@ -563,6 +565,25 @@ async function saveTimezone() {
     setMessage("timezoneMessage", result.message || "时区设置已保存");
   } catch (error) {
     setMessage("timezoneMessage", error.message);
+  }
+}
+
+async function saveBotNotificationSettings() {
+  setMessage("botNotificationMessage", "");
+  try {
+    const result = await apiFetch("/api/app-settings", {
+      method: "POST",
+      body: JSON.stringify({
+        batch_completion_notifications_enabled:
+          $("batchNotificationsEnabled").checked,
+      }),
+    });
+    setMessage(
+      "botNotificationMessage",
+      result.message || "通知设置已保存"
+    );
+  } catch (error) {
+    setMessage("botNotificationMessage", error.message);
   }
 }
 
@@ -1061,6 +1082,10 @@ document.addEventListener("DOMContentLoaded", () => {
   $("setupLockBtn").addEventListener("click", toggleSetupLock);
   $("passwordSaveBtn").addEventListener("click", savePassword);
   $("timezoneSaveBtn").addEventListener("click", saveTimezone);
+  $("botNotificationSaveBtn").addEventListener(
+    "click",
+    saveBotNotificationSettings
+  );
   $("webdavSaveBtn").addEventListener("click", saveWebdavConfig);
   $("calibrationSaveBtn").addEventListener("click", saveCalibrationConfig);
   $("viewerSaveBtn").addEventListener("click", saveViewerConfig);

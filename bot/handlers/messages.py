@@ -34,6 +34,7 @@ from bot.utils.helpers import get_message_type
 from bot.utils.progress import progress, downstatus, upstatus
 from bot.utils.logger import get_logger
 from config import load_watch_config, save_watch_config
+from app_settings import batch_completion_notifications_enabled
 
 logger = get_logger(__name__)
 
@@ -376,7 +377,14 @@ def save(client: pyrogram.client.Client, message: pyrogram.types.messages_and_me
             summary = f"✅ **批量转发完成**\n\n成功转发 {success_count}/{total_messages} 条消息"
             logger.info(f"批量转发完成: 全部成功 ({success_count}/{total_messages})")
 
-        bot.send_message(message.chat.id, summary, reply_to_message_id=message.id)
+        if batch_completion_notifications_enabled():
+            bot.send_message(
+                message.chat.id,
+                summary,
+                reply_to_message_id=message.id,
+            )
+        else:
+            logger.info("批量转发完成通知已关闭，跳过结果摘要")
 
 
 def _copy_public_message(bot, destination_chat_id, username, msgid):
