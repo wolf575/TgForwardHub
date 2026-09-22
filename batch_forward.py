@@ -599,8 +599,17 @@ def _copy_messages_to_relay(
 ):
     """Copy one batch unit into the relay chat using the Bot identity."""
     source_ref = _bot_source_ref(source_id, group_messages, source_username)
+
+    # Resolve and cache the source peer in the Bot client before copying.
+    # Numeric IDs are often unavailable until the Bot has successfully read
+    # the chat once, especially for private channels where the Bot is a member.
+    anchor = group_messages[0]
+    try:
+        bot.get_messages(source_ref, anchor.id)
+    except Exception:
+        pass
+
     if len(group_messages) > 1:
-        anchor = group_messages[0]
         kwargs = {"captions": [cleaned_text]} if text_changed else {}
         result = bot.copy_media_group(
             relay_id,
@@ -645,6 +654,12 @@ def _forward_cache_via_bot_relay(
                 source_id,
                 source_id,
             )
+        if not resolved_username:
+            resolved_username = _resolve_source_username(
+                bot,
+                source_id,
+                source_id,
+            )
         if not resolved_username and group_messages:
             chat = getattr(group_messages[0], "chat", None)
             resolved_username = getattr(chat, "username", None)
@@ -654,6 +669,13 @@ def _forward_cache_via_bot_relay(
             group_messages,
             resolved_username,
         )
+        if str(source_ref).lstrip("-").isdigit():
+            _emit_log(
+                "来源未解析到公开 username；Bot 将尝试用数字 ID 读取来源会话。"
+                "若这是私有频道且 Bot 不是成员，中转会回退到下载重传",
+                log,
+                "warning",
+            )
         _emit_log(
             f"Bot 中转受限消息: {source_ref} -> 缓冲会话 {relay_id}，"
             "RPC=copy_message/copy_media_group",
