@@ -317,11 +317,75 @@ def _resolve_chat(client, ref):
     raise ValueError(f"无法解析聊天: {ref}")
 
 
-def _resolve_relay_chat(client, ref):
-    """Resolve a Bot/user shared relay chat reference."""
-    chat_id = _resolve_chat(client, ref)
+def _member_is_joined(client, chat_id):
+    """Return True/False/None for a client's membership in ``chat_id``.
+
+    ``None`` means the client does not expose ``get_chat_member`` and the
+    caller should skip membership validation. This keeps the lightweight test
+    doubles usable without forcing every test to implement Telegram chat APIs.
+    """
+    getter = getattr(client, "get_chat_member", None)
+    if getter is None:
+        return None
+    try:
+        member = getter(chat_id, "me")
+    except Exception:
+        return False
+    if not member:
+        return False
+    status = getattr(member, "status", None)
+    status_name = getattr(status, "name", None) if status else None
+    if status_name in ("LEFT", "BANNED", "KICKED"):
+        return False
+    return True
+
+
+def _can_join_chat_ref(ref):
+    """Return whether ``ref`` is an explicit joinable link/username reference."""
+    normalized = normalize_private_channel_ref(ref)
+    if re.fullmatch(r"-?\d+", normalized):
+        return False
+    stripped = str(ref or "").strip()
+    return stripped.startswith("@") or bool(
+        re.match(r"^(?:https?://)?(?:www\.)?t\.me/", stripped, re.IGNORECASE)
+    )
+
+
+def _resolve_relay_chat(worker, acc, bot, ref):
+    """Resolve and validate a Bot/user shared relay chat reference.
+
+    The user client and Bot both need to be in the relay chat. If the Bot is
+    missing and the reference is an invite link or public username, we try to
+    let the Bot join automatically. Numeric IDs cannot be joined this way, so
+    they fail with an explicit message instead of a later ``CHANNEL_INVALID``.
+    """
+    chat_id = _resolve_chat(acc, ref)
     if chat_id == "me":
         raise ValueError("中转缓冲会话必须是 Bot 和用户都已加入的频道或群组")
+
+    user_joined = _member_is_joined(acc, chat_id)
+    if user_joined is False:
+        raise ValueError(f"用户客户端未加入中转会话 {chat_id}，请先加入并授予权限")
+
+    bot_joined = _member_is_joined(bot, chat_id)
+    if bot_joined is False and _can_join_chat_ref(ref):
+        try:
+            _worker_execute(
+                worker,
+                "Bot 加入中转缓冲会话",
+                lambda: bot.join_chat(ref),
+            )
+            bot_joined = _member_is_joined(bot, chat_id)
+        except Exception as exc:
+            raise ValueError(
+                f"Bot 自动加入中转会话失败: {type(exc).__name__}: {exc}"
+            ) from exc
+
+    if bot_joined is False:
+        raise ValueError(
+            f"Bot 未加入中转会话 {chat_id}；请先把 Bot 添加为该频道或群组成员"
+            "并授予发消息权限，或改用 Bot 可以加入的邀请链接/公开用户名"
+        )
     return chat_id
 
 
@@ -1598,6 +1662,16 @@ def _run_batch_task(job_id, spec):
         _update_task(job_id, stdoutTail=_tail("\n".join(log_lines)))
         _persist_task_history(job_id)
 
+    def finish_cancelled():
+        log("任务已取消")
+        _update_task(
+            job_id,
+            status="cancelled",
+            exitCode=130,
+            stderrTail=_tail("\n".join(log_lines)),
+        )
+        _persist_task_history(job_id)
+
     try:
         acc = get_acc_instance()
         if acc is None:
@@ -1612,7 +1686,7 @@ def _run_batch_task(job_id, spec):
         relay_ref = spec.get("relay_chat")
         if relay_ref and cache_send:
             try:
-                relay_chat_id = _resolve_relay_chat(acc, relay_ref)
+                relay_chat_id = _resolve_relay_chat(worker, acc, bot, relay_ref)
             except Exception as exc:
                 log(
                     "中转缓冲会话无法解析，本次任务将不启用 Bot 中转: "
@@ -1622,6 +1696,9 @@ def _run_batch_task(job_id, spec):
         ids = _collect_message_ids(acc, source_id, spec)
 
         total = len(ids)
+        if get_task(job_id).get("cancelled"):
+            finish_cancelled()
+            return
         _update_task(
             job_id,
             status="running",
@@ -1658,9 +1735,7 @@ def _run_batch_task(job_id, spec):
         for index, message_id in enumerate(ids, start=1):
             task = get_task(job_id)
             if task.get("cancelled"):
-                log("任务已取消")
-                _update_task(job_id, status="cancelled", exitCode=130)
-                _persist_task_history(job_id)
+                finish_cancelled()
                 return
 
             unit_count = 1
@@ -1749,6 +1824,10 @@ def _run_batch_task(job_id, spec):
                 log(f"进度 {processed}/{total}，成功 {success}，失败 {failed}，跳过 {skipped}")
             time.sleep(0.1)
 
+        if get_task(job_id).get("cancelled"):
+            finish_cancelled()
+            return
+
         log(f"任务完成: 成功 {success}，失败 {failed}，跳过 {skipped}")
         _update_task(
             job_id,
@@ -1758,6 +1837,9 @@ def _run_batch_task(job_id, spec):
         )
         _persist_task_history(job_id)
     except Exception as exc:
+        if get_task(job_id).get("cancelled"):
+            finish_cancelled()
+            return
         log(f"任务异常终止: {type(exc).__name__}: {exc}")
         _update_task(
             job_id,
@@ -1834,7 +1916,10 @@ def cancel_batch_task(job_id):
         if not task:
             return False
         task["cancelled"] = True
-        return True
+        task["status"] = "cancelled"
+        task["exitCode"] = 130
+    _persist_task_history(job_id)
+    return True
 
 
 def batch_status(job_id):

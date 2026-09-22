@@ -999,6 +999,60 @@ class BatchRestrictedForwardTests(unittest.TestCase):
         self.assertEqual(status["stdoutTail"], "任务完成")
         self.assertEqual(status["spec"], {"source": "@source"})
 
+    def test_relay_chat_rejects_missing_bot_member(self):
+        class _MemberAcc:
+            def get_chat_member(self, chat_id, user_id):
+                return type(
+                    "Member",
+                    (),
+                    {"status": type("Status", (), {"name": "MEMBER"})()},
+                )()
+
+        class _MissingBot:
+            def get_chat_member(self, chat_id, user_id):
+                raise ValueError("USER_NOT_PARTICIPANT")
+
+        with self.assertRaisesRegex(ValueError, "Bot 未加入中转会话"):
+            batch_forward._resolve_relay_chat(
+                _Worker(),
+                _MemberAcc(),
+                _MissingBot(),
+                "-1005555555555",
+            )
+
+    def test_relay_chat_numeric_accepts_unsupported_membership_api(self):
+        relay_id = batch_forward._resolve_relay_chat(
+            _Worker(),
+            _RestrictedAcc(),
+            _RelayBot(),
+            "-1005555555555",
+        )
+        self.assertEqual(relay_id, -1005555555555)
+
+    def test_cancel_batch_task_persists_cancelled_state(self):
+        task = {
+            "spec": {},
+            "taskName": "cancel-test",
+            "targetId": "",
+            "sourceId": "",
+            "createdAt": "2026-09-22T19:00:00+08:00",
+            "state": {},
+            "status": "running",
+            "exitCode": None,
+            "progress": {},
+            "stdoutTail": "",
+            "stderrTail": "",
+            "cancelled": False,
+        }
+
+        with mock.patch.dict(batch_forward.TASKS, {"cancel-test": task}):
+            with mock.patch.object(batch_forward, "_persist_task_history") as persist:
+                self.assertTrue(batch_forward.cancel_batch_task("cancel-test"))
+                persist.assert_called_once_with("cancel-test")
+            self.assertTrue(batch_forward.TASKS["cancel-test"]["cancelled"])
+            self.assertEqual(batch_forward.TASKS["cancel-test"]["status"], "cancelled")
+            self.assertEqual(batch_forward.TASKS["cancel-test"]["exitCode"], 130)
+
     def test_media_enum_names_are_recognized(self):
         message = _Message(95, animation=_Animation("a4"))
         message.media = MessageMediaType.ANIMATION

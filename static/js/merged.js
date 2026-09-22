@@ -886,6 +886,10 @@ async function cancelBatch() {
   const jobId = text.replace(/^jobId:\s*/, "").trim();
   if (!jobId) return;
   await apiFetch(`/api/batch-forward/${jobId}/cancel`, { method: "POST" });
+  if (pollingTimer) {
+    clearTimeout(pollingTimer);
+    pollingTimer = null;
+  }
   $("jobStatus").textContent = "cancelled";
   $("cancelBtn").hidden = true;
 }
