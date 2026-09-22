@@ -211,6 +211,40 @@ class _RestrictedAcc:
         self.sent.append(("send_audio", args, kwargs))
 
 
+class _RelayBot:
+    def __init__(self, media_group_ids=(), copy_error=None):
+        self.media_group_ids = list(media_group_ids)
+        self.copy_error = copy_error
+        self.copied = []
+        self.group_copies = []
+        self.sent_messages = []
+        self._next_id = 6000
+
+    def _message(self):
+        message_id = self._next_id
+        self._next_id += 1
+        return _Message(message_id, text="")
+
+    def copy_message(self, chat_id, source_id, message_id, **kwargs):
+        self.copied.append((chat_id, source_id, message_id, kwargs))
+        if self.copy_error:
+            raise self.copy_error
+        return self._message()
+
+    def copy_media_group(self, chat_id, source_id, anchor_id, **kwargs):
+        self.group_copies.append((chat_id, source_id, anchor_id, kwargs))
+        if self.copy_error:
+            raise self.copy_error
+        ids = self.media_group_ids or [self._next_id + index for index in range(2)]
+        return [_Message(message_id, text="") for message_id in ids]
+
+    def send_message(self, chat_id, text, **kwargs):
+        self.sent_messages.append((chat_id, text, kwargs))
+        if self.copy_error:
+            raise self.copy_error
+        return self._message()
+
+
 class _FlakyDownloadAcc:
     def __init__(self, results, download_error=None):
         self.results = list(results)
@@ -663,6 +697,167 @@ class BatchRestrictedForwardTests(unittest.TestCase):
         self.assertEqual(len(acc.sent), 1)
         self.assertEqual(acc.sent[0][0], "send_photo")
 
+    def test_cache_restricted_media_group_uses_bot_relay(self):
+        source_id = -1001234567890
+        relay_id = -1005555555555
+        first = _Message(150, "album", photo=_Photo("p50"))
+        second = _Message(151, "album", photo=_Photo("p51"))
+        acc = _RestrictedAcc(
+            media_group=[first, second],
+            album_error=ChatForwardsRestricted(
+                400,
+                "CHAT_FORWARDS_RESTRICTED",
+            ),
+            hidden_forward_error=None,
+        )
+        bot = _RelayBot(media_group_ids=[6100, 6101])
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            source_id,
+            -1009876543210,
+            [first, second],
+            None,
+            False,
+            False,
+            cache_send=True,
+            bot=bot,
+            relay_chat_id=relay_id,
+        )
+
+        self.assertEqual((count, used_fallback), (2, False))
+        self.assertEqual(acc.downloaded, [])
+        self.assertEqual(
+            bot.group_copies[0][0:3],
+            (relay_id, source_id, 150),
+        )
+        self.assertEqual(len(acc.hidden_forwards), 1)
+        self.assertEqual(list(acc.hidden_forwards[0].id), [6100, 6101])
+        self.assertIs(acc.hidden_forwards[0].drop_author, True)
+
+    def test_cache_restricted_single_media_uses_bot_relay(self):
+        source_id = -1001234567890
+        relay_id = -1005555555555
+        message = _Message(152, photo=_Photo("p52"), caption="受限图片")
+        acc = _RestrictedAcc(
+            copy_error=ChatForwardsRestricted(
+                400,
+                "CHAT_FORWARDS_RESTRICTED",
+            ),
+            hidden_forward_error=None,
+        )
+        bot = _RelayBot()
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            source_id,
+            -1009876543210,
+            [message],
+            "受限图片",
+            False,
+            False,
+            cache_send=True,
+            bot=bot,
+            relay_chat_id=relay_id,
+        )
+
+        self.assertEqual((count, used_fallback), (1, False))
+        self.assertEqual(acc.downloaded, [])
+        self.assertEqual(
+            bot.copied[0][0:3],
+            (relay_id, source_id, 152),
+        )
+        self.assertEqual(len(acc.hidden_forwards), 1)
+        self.assertEqual(list(acc.hidden_forwards[0].id), [6000])
+
+    def test_cache_bot_relay_failure_falls_back_to_reupload(self):
+        message = _Message(153, photo=_Photo("p53"), caption="受限图片")
+        acc = _RestrictedAcc(
+            copy_error=ChatForwardsRestricted(
+                400,
+                "CHAT_FORWARDS_RESTRICTED",
+            ),
+            hidden_forward_error=None,
+        )
+        bot = _RelayBot(copy_error=ValueError("bot cannot read source"))
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            -1001234567890,
+            -1009876543210,
+            [message],
+            "受限图片",
+            False,
+            False,
+            cache_send=True,
+            bot=bot,
+            relay_chat_id=-1005555555555,
+        )
+
+        self.assertEqual((count, used_fallback), (1, True))
+        self.assertEqual(
+            [os.path.basename(path) for path in acc.downloaded],
+            ["item_153.jpg"],
+        )
+        self.assertEqual(acc.hidden_forwards, [])
+
+    def test_cache_restricted_source_reuses_bot_relay_without_user_copy(self):
+        source_id = -1001234567890
+        relay_id = -1005555555555
+        first = _Message(154, photo=_Photo("p54"))
+        second = _Message(155, photo=_Photo("p55"))
+        acc = _RestrictedAcc(
+            copy_error=ChatForwardsRestricted(
+                400,
+                "CHAT_FORWARDS_RESTRICTED",
+            ),
+            hidden_forward_error=None,
+        )
+        bot = _RelayBot()
+        restricted_sources = set()
+
+        batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            source_id,
+            -1009876543210,
+            [first],
+            None,
+            False,
+            False,
+            restricted_source_ids=restricted_sources,
+            cache_send=True,
+            bot=bot,
+            relay_chat_id=relay_id,
+        )
+
+        acc.copied.clear()
+        bot.copied.clear()
+        acc.hidden_forwards.clear()
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            source_id,
+            -1009876543210,
+            [second],
+            None,
+            False,
+            False,
+            restricted_source_ids=restricted_sources,
+            cache_send=True,
+            bot=bot,
+            relay_chat_id=relay_id,
+        )
+
+        self.assertEqual((count, used_fallback), (1, False))
+        self.assertEqual(acc.copied, [])
+        self.assertEqual(bot.copied[0][0:3], (relay_id, source_id, 155))
+        self.assertEqual(len(acc.hidden_forwards), 1)
+
     def test_cache_media_group_uses_copy_media_group(self):
         first = _Message(141, "album", photo=_Photo("p41"), caption="原始说明")
         second = _Message(142, "album", photo=_Photo("p42"))
@@ -1109,8 +1304,8 @@ class BatchRestrictedForwardTests(unittest.TestCase):
         self.assertEqual(acc.copied[0][1]["caption"], "修改后的说明")
         self.assertEqual(acc.forwarded, [])
 
-    def test_batch_module_has_no_bot_instance_import(self):
-        self.assertFalse(hasattr(batch_forward, "get_bot_instance"))
+    def test_batch_module_has_bot_instance_access(self):
+        self.assertTrue(hasattr(batch_forward, "get_bot_instance"))
 
     def test_album_fallback_keeps_modified_caption_on_first_item_only(self):
         first = _Message(40, "album", photo=_Photo("p4"), caption="原始说明")

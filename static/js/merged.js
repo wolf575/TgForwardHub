@@ -769,6 +769,7 @@ async function loadHistory() {
       $("taskName").value = state.taskName || item.taskName || "";
       $("sourceId").value = state.sourceId || item.sourceId || "";
       $("targetId").value = state.targetId || item.targetId || "";
+      $("relayChat").value = state.relayChat || "";
       $("rangeType").value = state.rangeType || "id";
       $("startValue").value = state.startValue || "";
       $("endValue").value = state.endValue || "";
@@ -853,6 +854,7 @@ async function submitBatch(event) {
     task_name: $("taskName").value.trim(),
     source: $("sourceId").value.trim(),
     target: $("targetId").value.trim(),
+    relay_chat: $("relayChat").value.trim(),
     range_type: $("rangeType").value,
     start: $("startValue").value.trim(),
     end: $("endValue").value.trim(),
