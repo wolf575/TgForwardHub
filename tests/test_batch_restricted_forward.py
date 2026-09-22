@@ -772,6 +772,24 @@ class BatchRestrictedForwardTests(unittest.TestCase):
         self.assertEqual(len(acc.hidden_forwards), 1)
         self.assertEqual(list(acc.hidden_forwards[0].id), [6000])
 
+    def test_bot_relay_prefers_public_username_for_source(self):
+        source_id = -1001234567890
+        relay_id = -1005555555555
+        message = _Message(158, photo=_Photo("p58"), caption="公共受限图片")
+        message.chat.username = "public_source"
+        bot = _RelayBot()
+
+        batch_forward._copy_messages_to_relay(
+            bot,
+            relay_id,
+            source_id,
+            [message],
+            "公共受限图片",
+            False,
+        )
+
+        self.assertEqual(bot.copied[0][0:3], (relay_id, "public_source", 158))
+
     def test_cache_bot_relay_failure_falls_back_to_reupload(self):
         message = _Message(153, photo=_Photo("p53"), caption="受限图片")
         acc = _RestrictedAcc(

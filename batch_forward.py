@@ -537,6 +537,18 @@ def _relay_message_ids(result, fallback_message_id=None):
     return [int(message_id)]
 
 
+def _bot_source_ref(source_id, group_messages):
+    """Return the best Bot-readable source reference for a batch unit.
+
+    Pyrogram's Bot client can resolve a public username directly, while a
+    numeric chat ID may require an access hash that the Bot client has not
+    cached yet. Use the username from the fetched message when available.
+    """
+    chat = getattr(group_messages[0], "chat", None)
+    username = getattr(chat, "username", None)
+    return username or source_id
+
+
 def _copy_messages_to_relay(
     bot,
     relay_id,
@@ -546,12 +558,13 @@ def _copy_messages_to_relay(
     text_changed,
 ):
     """Copy one batch unit into the relay chat using the Bot identity."""
+    source_ref = _bot_source_ref(source_id, group_messages)
     if len(group_messages) > 1:
         anchor = group_messages[0]
         kwargs = {"captions": [cleaned_text]} if text_changed else {}
         result = bot.copy_media_group(
             relay_id,
-            source_id,
+            source_ref,
             anchor.id,
             **kwargs,
         )
@@ -562,11 +575,11 @@ def _copy_messages_to_relay(
         if text_changed:
             result = bot.send_message(relay_id, cleaned_text)
         else:
-            result = bot.copy_message(relay_id, source_id, message.id)
+            result = bot.copy_message(relay_id, source_ref, message.id)
         return _relay_message_ids(result)
 
     kwargs = {"caption": cleaned_text} if text_changed else {}
-    result = bot.copy_message(relay_id, source_id, message.id, **kwargs)
+    result = bot.copy_message(relay_id, source_ref, message.id, **kwargs)
     return _relay_message_ids(result)
 
 
@@ -584,8 +597,9 @@ def _forward_cache_via_bot_relay(
 ):
     """Relay a restricted cached-copy through Bot, then hidden-forward as user."""
     try:
+        source_ref = _bot_source_ref(source_id, group_messages)
         _emit_log(
-            f"Bot 中转受限消息: {source_id} -> 缓冲会话 {relay_id}，"
+            f"Bot 中转受限消息: {source_ref} -> 缓冲会话 {relay_id}，"
             "RPC=copy_message/copy_media_group",
             log,
         )
