@@ -317,6 +317,25 @@ def _resolve_chat(client, ref):
     raise ValueError(f"无法解析聊天: {ref}")
 
 
+def _resolve_source_username(client, ref, chat_id):
+    """Return a public source username when the client can resolve one."""
+    candidates = []
+    normalized = normalize_private_channel_ref(ref)
+    if not re.fullmatch(r"-?\d+", normalized):
+        candidates.append(normalized)
+    candidates.append(chat_id)
+
+    for candidate in candidates:
+        try:
+            chat = client.get_chat(candidate)
+        except Exception:
+            continue
+        username = getattr(chat, "username", None)
+        if username:
+            return str(username)
+    return None
+
+
 def _member_is_joined(client, chat_id):
     """Return True/False/None for a client's membership in ``chat_id``.
 
@@ -537,13 +556,15 @@ def _relay_message_ids(result, fallback_message_id=None):
     return [int(message_id)]
 
 
-def _bot_source_ref(source_id, group_messages):
+def _bot_source_ref(source_id, group_messages, source_username=None):
     """Return the best Bot-readable source reference for a batch unit.
 
     Pyrogram's Bot client can resolve a public username directly, while a
     numeric chat ID may require an access hash that the Bot client has not
     cached yet. Use the username from the fetched message when available.
     """
+    if source_username:
+        return source_username
     chat = getattr(group_messages[0], "chat", None)
     username = getattr(chat, "username", None)
     return username or source_id
@@ -556,9 +577,10 @@ def _copy_messages_to_relay(
     group_messages,
     cleaned_text,
     text_changed,
+    source_username=None,
 ):
     """Copy one batch unit into the relay chat using the Bot identity."""
-    source_ref = _bot_source_ref(source_id, group_messages)
+    source_ref = _bot_source_ref(source_id, group_messages, source_username)
     if len(group_messages) > 1:
         anchor = group_messages[0]
         kwargs = {"captions": [cleaned_text]} if text_changed else {}
@@ -594,10 +616,11 @@ def _forward_cache_via_bot_relay(
     cleaned_text,
     text_changed,
     log=None,
+    source_username=None,
 ):
     """Relay a restricted cached-copy through Bot, then hidden-forward as user."""
     try:
-        source_ref = _bot_source_ref(source_id, group_messages)
+        source_ref = _bot_source_ref(source_id, group_messages, source_username)
         _emit_log(
             f"Bot 中转受限消息: {source_ref} -> 缓冲会话 {relay_id}，"
             "RPC=copy_message/copy_media_group",
@@ -613,6 +636,7 @@ def _forward_cache_via_bot_relay(
                 group_messages,
                 cleaned_text,
                 text_changed,
+                source_username=source_username,
             ),
         )
         _emit_log(
@@ -966,6 +990,7 @@ def _forward_batch_media_group(
     cache_send=False,
     bot=None,
     relay_chat_id=None,
+    source_username=None,
 ):
     anchor = group_messages[0]
 
@@ -994,13 +1019,15 @@ def _forward_batch_media_group(
             )
             return len(group_messages), False
         except Exception as exc:
+            restricted = isinstance(exc, ChatForwardsRestricted)
             _emit_log(
-                f"媒体组 {anchor.id} 缓存复制失败: "
+                f"媒体组 {anchor.id} 缓存复制"
+                f"{'受限（准备 Bot 中转）' if restricted else '失败'}: "
                 f"{type(exc).__name__}: {exc}",
                 log,
-                "warning",
+                "info" if restricted else "warning",
             )
-            if isinstance(exc, ChatForwardsRestricted) and restricted_source_ids is not None:
+            if restricted and restricted_source_ids is not None:
                 restricted_source_ids.add(source_id)
                 _emit_log(
                     f"来源 {source_id} 已确认限制缓存复制",
@@ -1019,6 +1046,7 @@ def _forward_batch_media_group(
                     cleaned_text,
                     text_changed,
                     log,
+                    source_username=source_username,
                 ):
                     return len(group_messages), False
             reuploaded = _reupload_batch_media_group(
@@ -1195,6 +1223,7 @@ def _forward_batch_single_media(
     cache_send=False,
     bot=None,
     relay_chat_id=None,
+    source_username=None,
 ):
     if cache_send:
         try:
@@ -1221,13 +1250,15 @@ def _forward_batch_single_media(
             )
             return 1, False
         except Exception as exc:
+            restricted = isinstance(exc, ChatForwardsRestricted)
             _emit_log(
-                f"单条媒体 {message.id} 缓存复制失败: "
+                f"单条媒体 {message.id} 缓存复制"
+                f"{'受限（准备 Bot 中转）' if restricted else '失败'}: "
                 f"{type(exc).__name__}: {exc}",
                 log,
-                "warning",
+                "info" if restricted else "warning",
             )
-            if isinstance(exc, ChatForwardsRestricted) and restricted_source_ids is not None:
+            if restricted and restricted_source_ids is not None:
                 restricted_source_ids.add(source_id)
                 _emit_log(
                     f"来源 {source_id} 已确认限制缓存复制",
@@ -1246,6 +1277,7 @@ def _forward_batch_single_media(
                     cleaned_text,
                     text_changed,
                     log,
+                    source_username=source_username,
                 ):
                     return 1, False
             if get_message_type(message) not in DOWNLOADABLE_MEDIA_TYPES:
@@ -1372,6 +1404,7 @@ def _forward_batch_text(
     cache_send=False,
     bot=None,
     relay_chat_id=None,
+    source_username=None,
 ):
     if cache_send:
         try:
@@ -1389,13 +1422,15 @@ def _forward_batch_text(
                 )
             return 1, False
         except Exception as exc:
+            restricted = isinstance(exc, ChatForwardsRestricted)
             _emit_log(
-                f"文本消息 {message.id} 缓存复制失败: "
+                f"文本消息 {message.id} 缓存复制"
+                f"{'受限（准备 Bot 中转）' if restricted else '失败'}: "
                 f"{type(exc).__name__}: {exc}",
                 log,
-                "warning",
+                "info" if restricted else "warning",
             )
-            if isinstance(exc, ChatForwardsRestricted) and restricted_source_ids is not None:
+            if restricted and restricted_source_ids is not None:
                 restricted_source_ids.add(source_id)
             if bot is not None and relay_chat_id is not None:
                 if _forward_cache_via_bot_relay(
@@ -1409,6 +1444,7 @@ def _forward_batch_text(
                     cleaned_text,
                     text_changed,
                     log,
+                    source_username=source_username,
                 ):
                     return 1, False
             _worker_execute(
@@ -1514,6 +1550,7 @@ def _forward_batch_unit(
     cache_send=False,
     bot=None,
     relay_chat_id=None,
+    source_username=None,
 ):
     if restricted_source_ids is not None and source_id in restricted_source_ids:
         if cache_send and bot is not None and relay_chat_id is not None:
@@ -1533,6 +1570,7 @@ def _forward_batch_unit(
                 cleaned_text,
                 text_changed,
                 log,
+                source_username=source_username,
             ):
                 return len(group_messages), False
         _emit_log(
@@ -1565,6 +1603,7 @@ def _forward_batch_unit(
             cache_send=cache_send,
             bot=bot,
             relay_chat_id=relay_chat_id,
+            source_username=source_username,
         )
 
     message = group_messages[0]
@@ -1584,6 +1623,7 @@ def _forward_batch_unit(
             cache_send=cache_send,
             bot=bot,
             relay_chat_id=relay_chat_id,
+            source_username=source_username,
         )
     return _forward_batch_single_media(
         worker,
@@ -1599,6 +1639,7 @@ def _forward_batch_unit(
         cache_send=cache_send,
         bot=bot,
         relay_chat_id=relay_chat_id,
+        source_username=source_username,
     )
 
 
@@ -1692,7 +1733,9 @@ def _run_batch_task(job_id, spec):
             raise RuntimeError("用户客户端尚未初始化，请先完成 /setup 配置")
 
         worker = MessageWorker(None, acc, max_retries=3)
-        source_id = _resolve_chat(acc, spec.get("source"))
+        source_ref = spec.get("source")
+        source_id = _resolve_chat(acc, source_ref)
+        source_username = _resolve_source_username(acc, source_ref, source_id)
         dest_id = _resolve_chat(acc, spec.get("target"))
         cache_send = str(spec.get("forward_mode", "clone")).lower() == "cache"
         bot = get_bot_instance()
@@ -1805,6 +1848,7 @@ def _run_batch_task(job_id, spec):
                     cache_send=cache_send,
                     bot=bot,
                     relay_chat_id=relay_chat_id,
+                    source_username=source_username,
                 )
                 success += sent_count
                 processed += sent_count
