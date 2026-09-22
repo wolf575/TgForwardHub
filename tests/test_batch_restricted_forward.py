@@ -9,7 +9,7 @@ from unittest import mock
 from pyrogram import raw
 from pyrogram.enums import MessageMediaType
 from pyrogram.errors import ChatForwardsRestricted, Timeout as TelegramTimeout
-from pyrogram.types import InputMediaPhoto, MessageEntity
+from pyrogram.types import InputMediaPhoto
 
 import batch_forward
 from bot.utils.helpers import get_message_type
@@ -195,6 +195,9 @@ class _RestrictedAcc:
     def send_photo(self, chat_id, file_path, **kwargs):
         self.sent.append(("send_photo", file_path, kwargs))
 
+    def send_animation(self, chat_id, file_path, **kwargs):
+        self.sent.append(("send_animation", file_path, kwargs))
+
     def send_video_note(self, *args, **kwargs):
         self.sent.append(("send_video_note", args, kwargs))
 
@@ -317,7 +320,7 @@ class BatchRestrictedForwardTests(unittest.TestCase):
         self.assertEqual(len(acc.media_groups), 1)
         self.assertEqual(len(acc.media_groups[0]), 2)
 
-    def test_unsupported_media_group_uses_cached_item_copies_not_downloads(self):
+    def test_unsupported_media_group_reuploads_instead_of_item_copies(self):
         first = _Message(
             80,
             "album",
@@ -342,14 +345,16 @@ class BatchRestrictedForwardTests(unittest.TestCase):
             False,
         )
 
-        self.assertEqual((count, used_fallback), (2, False))
-        self.assertEqual(acc.downloaded, [])
+        self.assertEqual((count, used_fallback), (2, True))
         self.assertEqual(
-            [call[0][2] for call in acc.copied],
-            [80, 81],
+            [os.path.basename(path) for path in acc.downloaded],
+            ["item_80.jpg", "item_81.jpg"],
         )
-        self.assertNotIn("caption", acc.copied[0][1])
-        self.assertNotIn("caption", acc.copied[1][1])
+        self.assertEqual(acc.copied, [])
+        self.assertEqual(acc.forwarded, [])
+        self.assertEqual(len(acc.sent), 2)
+        self.assertEqual(acc.sent[0][0], "send_animation")
+        self.assertEqual(acc.sent[1][0], "send_photo")
 
     def test_clone_group_copy_failure_reuploads_without_forward(self):
         first = _Message(100, "album", photo=_Photo("p10"))
@@ -435,12 +440,12 @@ class BatchRestrictedForwardTests(unittest.TestCase):
         self.assertEqual((count, used_fallback), (2, True))
         self.assertEqual(
             [os.path.basename(path) for path in acc.downloaded],
-            ["item_103.jpg"],
+            ["item_103.jpg", "item_104.jpg"],
         )
-        self.assertEqual([call[0][2] for call in acc.copied], [103, 104])
+        self.assertEqual(acc.copied, [])
         self.assertEqual(acc.forwarded, [])
-        self.assertEqual(len(acc.sent), 1)
-        self.assertEqual(acc.sent[0][0], "send_photo")
+        self.assertEqual(len(acc.sent), 2)
+        self.assertEqual([item[0] for item in acc.sent], ["send_photo", "send_photo"])
 
     def test_direct_group_uses_native_forward_without_copies(self):
         first = _Message(111, "album", photo=_Photo("p19"))
@@ -467,7 +472,7 @@ class BatchRestrictedForwardTests(unittest.TestCase):
         self.assertEqual(len(acc.forwarded), 1)
         self.assertEqual(acc.forwarded[0][0][2], [111, 112])
 
-    def test_direct_group_forward_failure_uses_per_item_forwards(self):
+    def test_direct_group_forward_failure_reuploads_without_forward(self):
         first = _Message(113, "album", photo=_Photo("p21"))
         second = _Message(114, "album", photo=_Photo("p22"))
 
@@ -492,10 +497,13 @@ class BatchRestrictedForwardTests(unittest.TestCase):
             True,
         )
 
-        self.assertEqual((count, used_fallback), (2, False))
+        self.assertEqual((count, used_fallback), (2, True))
         self.assertEqual(acc.copied, [])
-        self.assertEqual(acc.downloaded, [])
-        self.assertEqual([call[0][2] for call in acc.forwarded], [[113, 114], 113, 114])
+        self.assertEqual(
+            [os.path.basename(path) for path in acc.downloaded],
+            ["item_113.jpg", "item_114.jpg"],
+        )
+        self.assertEqual([call[0][2] for call in acc.forwarded], [[113, 114]])
 
     def test_restricted_mixed_group_reuploads_only_uncopyable_item(self):
         first = _Message(109, "album", photo=_Photo("p17"), caption="受限图片")
@@ -526,12 +534,12 @@ class BatchRestrictedForwardTests(unittest.TestCase):
         self.assertEqual((count, used_fallback), (2, True))
         self.assertEqual(
             [os.path.basename(path) for path in acc.downloaded],
-            ["item_109.jpg"],
+            ["item_109.jpg", "item_110.jpg"],
         )
-        self.assertEqual([call[0][2] for call in acc.copied], [109, 110])
+        self.assertEqual(acc.copied, [])
         self.assertEqual(acc.forwarded, [])
-        self.assertEqual(len(acc.sent), 1)
-        self.assertEqual(acc.sent[0][0], "send_photo")
+        self.assertEqual(len(acc.sent), 2)
+        self.assertEqual([item[0] for item in acc.sent], ["send_photo", "send_photo"])
 
     def test_modified_caption_never_uses_forward_fallback(self):
         first = _Message(105, "album", photo=_Photo("p15"), caption="原始说明")
@@ -582,8 +590,11 @@ class BatchRestrictedForwardTests(unittest.TestCase):
                 False,
             )
 
-        self.assertIn("无法缓存复制且不可下载", str(raised.exception))
-        self.assertEqual(acc.downloaded, [])
+        self.assertIn("媒体组包含不支持的消息类型: Contact", str(raised.exception))
+        self.assertEqual(
+            [os.path.basename(path) for path in acc.downloaded],
+            ["item_107.jpg", "item_108.jpg"],
+        )
 
     def test_modified_caption_is_kept_when_group_copy_falls_back(self):
         first = _Message(
@@ -610,129 +621,131 @@ class BatchRestrictedForwardTests(unittest.TestCase):
             False,
         )
 
-        self.assertEqual((count, used_fallback), (2, False))
-        self.assertEqual(acc.copied[0][1]["caption"], "清理后的说明")
-        self.assertNotIn("caption", acc.copied[1][1])
-
-    def test_hidden_forward_failure_can_succeed_with_cached_send_media(self):
-        message = _Message(140, photo=_Photo("p40"), caption="缓存说明")
-        acc = _RestrictedAcc(
-            hidden_forward_error=ValueError("hidden forward rejected"),
-            cached_send_error=None,
-        )
-
-        with mock.patch.object(
-            batch_forward.utils,
-            "get_input_media_from_file_id",
-            return_value=object(),
-        ):
-            count, used_fallback = batch_forward._forward_batch_unit(
-                _Worker(),
-                acc,
-                -1001234567890,
-                -1009876543210,
-                [message],
-                "缓存说明",
-                False,
-                False,
-            )
-
-        self.assertEqual((count, used_fallback), (1, False))
-        self.assertEqual(acc.downloaded, [])
-        self.assertEqual(acc.copied, [])
+        self.assertEqual((count, used_fallback), (2, True))
         self.assertEqual(
-            [name for name, _query in acc.invoked_queries],
-            ["ForwardMessages", "SendMedia"],
+            [os.path.basename(path) for path in acc.downloaded],
+            ["item_90.jpg", "item_91.jpg"],
+        )
+        self.assertEqual(acc.copied, [])
+        self.assertEqual(len(acc.sent), 2)
+        self.assertEqual(acc.sent[0][0], "send_animation")
+        self.assertEqual(acc.sent[0][2]["caption"], "清理后的说明")
+        self.assertEqual(acc.sent[1][0], "send_photo")
+
+    def test_cache_copy_failure_downloads_and_records_restriction(self):
+        source_id = -1001234567890
+        message = _Message(140, photo=_Photo("p40"), caption="缓存说明")
+        acc = _RestrictedAcc(copy_error=ChatForwardsRestricted(
+            400,
+            "CHAT_FORWARDS_RESTRICTED",
+        ))
+        restricted_sources = set()
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            source_id,
+            -1009876543210,
+            [message],
+            "缓存说明",
+            False,
+            False,
+            restricted_source_ids=restricted_sources,
+            cache_send=True,
         )
 
-    def test_cached_send_media_group_preserves_order_and_caption(self):
+        self.assertEqual((count, used_fallback), (1, True))
+        self.assertEqual(restricted_sources, {source_id})
+        self.assertEqual(
+            [os.path.basename(path) for path in acc.downloaded],
+            ["item_140.jpg"],
+        )
+        self.assertEqual(len(acc.sent), 1)
+        self.assertEqual(acc.sent[0][0], "send_photo")
+
+    def test_cache_media_group_uses_copy_media_group(self):
         first = _Message(141, "album", photo=_Photo("p41"), caption="原始说明")
         second = _Message(142, "album", photo=_Photo("p42"))
         acc = _RestrictedAcc(
             media_group=[first, second],
-            hidden_forward_error=ValueError("hidden forward rejected"),
-            cached_send_error=None,
+            album_error=False,
+            copy_error=False,
         )
 
-        with mock.patch.object(
-            batch_forward.utils,
-            "get_input_media_from_file_id",
-            return_value=object(),
-        ):
-            count, used_fallback = batch_forward._forward_batch_unit(
-                _Worker(),
-                acc,
-                -1001234567890,
-                -1009876543210,
-                [first, second],
-                "原始说明",
-                False,
-                False,
-            )
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            -1001234567890,
+            -1009876543210,
+            [first, second],
+            "原始说明",
+            False,
+            False,
+            cache_send=True,
+        )
 
         self.assertEqual((count, used_fallback), (2, False))
         self.assertEqual(acc.downloaded, [])
         self.assertEqual(acc.copied, [])
-        self.assertEqual(len(acc.cached_media_groups), 1)
-        media_items = acc.cached_media_groups[0]
-        self.assertEqual(len(media_items), 2)
-        self.assertEqual(media_items[0].message, "原始说明")
-        self.assertEqual(media_items[1].message, "")
+        self.assertEqual(acc.forwarded, [])
+        self.assertEqual(len(acc.group_copies), 1)
+        self.assertEqual(
+            acc.group_copies[0][0],
+            (-1009876543210, -1001234567890, 141),
+        )
 
-    def test_cached_send_media_preserves_real_caption_entities(self):
+    def test_cache_single_media_uses_copy_message(self):
         message = _Message(
             145,
             photo=_Photo("p45"),
             caption="加粗文本和链接",
         )
-        message.caption_entities = [
-            MessageEntity(type="bold", offset=0, length=4),
-            MessageEntity(
-                type="text_link",
-                offset=5,
-                length=4,
-                url="https://example.com",
-            ),
-        ]
-        acc = _RestrictedAcc(
-            hidden_forward_error=ValueError("hidden forward rejected"),
-            cached_send_error=None,
-        )
+        acc = _RestrictedAcc(copy_error=False)
 
-        with mock.patch.object(
-            batch_forward.utils,
-            "get_input_media_from_file_id",
-            return_value=object(),
-        ):
-            count, used_fallback = batch_forward._forward_batch_unit(
-                _Worker(),
-                acc,
-                -1001234567890,
-                -1009876543210,
-                [message],
-                "加粗文本和链接",
-                False,
-                False,
-            )
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            -1001234567890,
+            -1009876543210,
+            [message],
+            "加粗文本和链接",
+            False,
+            False,
+            cache_send=True,
+        )
 
         self.assertEqual((count, used_fallback), (1, False))
-        send_media = [
-            query
-            for name, query in acc.invoked_queries
-            if name == "SendMedia"
-        ]
-        self.assertEqual(len(send_media), 1)
-        entities = send_media[0].entities
-        self.assertIsNotNone(entities)
+        self.assertEqual(acc.downloaded, [])
+        self.assertEqual(acc.forwarded, [])
+        self.assertEqual(acc.hidden_forwards, [])
+        self.assertEqual(acc.group_copies, [])
         self.assertEqual(
-            [type(entity).__name__ for entity in entities],
-            ["MessageEntityBold", "MessageEntityTextUrl"],
+            [call[0][2] for call in acc.copied],
+            [145],
         )
-        self.assertEqual(entities[0].offset, 0)
-        self.assertEqual(entities[0].length, 4)
-        self.assertEqual(entities[1].offset, 5)
-        self.assertEqual(entities[1].length, 4)
-        self.assertEqual(entities[1].url, "https://example.com")
+
+    def test_cache_text_uses_copy_message(self):
+        message = _Message(146, text="纯文本消息")
+        acc = _RestrictedAcc(copy_error=False)
+
+        count, used_fallback = batch_forward._forward_batch_unit(
+            _Worker(),
+            acc,
+            -1001234567890,
+            -1009876543210,
+            [message],
+            "纯文本消息",
+            False,
+            False,
+            cache_send=True,
+        )
+
+        self.assertEqual((count, used_fallback), (1, False))
+        self.assertEqual(acc.downloaded, [])
+        self.assertEqual(acc.forwarded, [])
+        self.assertEqual(acc.hidden_forwards, [])
+        self.assertEqual(acc.group_copies, [])
+        self.assertEqual([call[0][2] for call in acc.copied], [146])
 
     def test_only_cached_send_restriction_downloads_media(self):
         first = _Message(143, "album", photo=_Photo("p43"))
@@ -957,10 +970,13 @@ class BatchRestrictedForwardTests(unittest.TestCase):
             False,
         )
 
-        self.assertEqual((count, used_fallback), (1, False))
+        self.assertEqual((count, used_fallback), (1, True))
         self.assertEqual(len(acc.hidden_forwards), 1)
-        self.assertEqual([call[0][2] for call in acc.copied], [204])
-        self.assertEqual(acc.downloaded, [])
+        self.assertEqual(acc.copied, [])
+        self.assertEqual(
+            [os.path.basename(path) for path in acc.downloaded],
+            ["item_204.jpg"],
+        )
 
     def test_hidden_forward_and_user_copy_failure_reuploads_without_forward(self):
         message = _Message(205, photo=_Photo("p33"))
@@ -979,7 +995,7 @@ class BatchRestrictedForwardTests(unittest.TestCase):
 
         self.assertEqual((count, used_fallback), (1, True))
         self.assertEqual(len(acc.hidden_forwards), 1)
-        self.assertEqual(len(acc.copied), 1)
+        self.assertEqual(acc.copied, [])
         self.assertEqual(acc.forwarded, [])
         self.assertEqual(
             [os.path.basename(path) for path in acc.downloaded],
@@ -1015,7 +1031,7 @@ class BatchRestrictedForwardTests(unittest.TestCase):
         self.assertEqual((count, used_fallback), (2, True))
         self.assertEqual(restricted_sources, {source_id})
         self.assertEqual(len(acc.hidden_forwards), 1)
-        self.assertEqual(len(acc.group_copies), 1)
+        self.assertEqual(len(acc.group_copies), 0)
         self.assertEqual(acc.copied, [])
         self.assertEqual(
             [os.path.basename(path) for path in acc.downloaded],

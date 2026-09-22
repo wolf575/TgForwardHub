@@ -16,8 +16,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
-from pyrogram import raw, utils
-from pyrogram.enums import MessageEntityType
+from pyrogram import raw
 from pyrogram.errors import (
     ChatForwardsRestricted,
     FileReferenceExpired,
@@ -358,8 +357,8 @@ def _validate_task_spec(spec):
         raise ValueError("source 和 target 不能为空")
 
     forward_mode = str(spec.get("forward_mode") or "clone").lower()
-    if forward_mode not in ("clone", "direct"):
-        raise ValueError("forward_mode 只支持 clone 或 direct")
+    if forward_mode not in ("clone", "direct", "cache"):
+        raise ValueError("forward_mode 只支持 clone、direct 或 cache")
     spec["forward_mode"] = forward_mode
 
     _compile_regex_patterns(spec.get("exclude_regex"), "排除正则")
@@ -431,113 +430,6 @@ def _user_hidden_forward(acc, source_id, dest_id, message_ids, drop_author=True)
             id=list(message_ids),
             random_id=[acc.rnd_id() for _ in message_ids],
             drop_author=drop_author,
-        )
-    )
-
-
-def _media_file_id(message):
-    for attribute in (
-        "photo",
-        "video",
-        "document",
-        "audio",
-        "animation",
-        "sticker",
-        "voice",
-        "video_note",
-    ):
-        media = getattr(message, attribute, None)
-        if media is not None and getattr(media, "file_id", None):
-            return media.file_id
-    return None
-
-
-def _raw_message_entities(entities):
-    """Convert Pyrogram MessageEntity objects to raw input entities.
-
-    Text-mention entities need an InputUser peer and are intentionally skipped
-    rather than producing an invalid RPC. All ordinary caption formatting is
-    preserved by this helper.
-    """
-    if not entities:
-        return None
-    raw_entities = []
-    for entity in entities:
-        entity_type = getattr(entity, "type", None)
-        try:
-            raw_type = (
-                entity_type.value
-                if isinstance(entity_type, MessageEntityType)
-                else MessageEntityType[str(entity_type).upper()].value
-            )
-        except (AttributeError, KeyError, TypeError, ValueError):
-            continue
-        if raw_type is None or raw_type in (
-            raw.types.MessageEntityMentionName,
-            raw.types.InputMessageEntityMentionName,
-        ):
-            continue
-        kwargs = {
-            "offset": int(entity.offset),
-            "length": int(entity.length),
-        }
-        if raw_type is raw.types.MessageEntityTextUrl:
-            kwargs["url"] = entity.url or ""
-        elif raw_type is raw.types.MessageEntityPre:
-            kwargs["language"] = entity.language or ""
-        elif raw_type is raw.types.MessageEntityCustomEmoji:
-            kwargs["document_id"] = int(entity.custom_emoji_id or 0)
-        try:
-            raw_entities.append(raw_type(**kwargs))
-        except (TypeError, ValueError):
-            continue
-    return raw_entities or None
-
-
-def _raw_cached_send_media_group(acc, dest_id, group_messages, caption, text_changed):
-    multi_media = []
-    for index, message in enumerate(group_messages):
-        file_id = _media_file_id(message)
-        if not file_id:
-            raise ValueError(f"消息 {message.id} 没有可用的 Telegram file_id")
-        caption_text = ""
-        entities = None
-        if index == 0:
-            caption_text = caption if text_changed else message.caption or ""
-            entities = None if text_changed else _raw_message_entities(
-                getattr(message, "caption_entities", None)
-            )
-        multi_media.append(
-            raw.types.InputSingleMedia(
-                media=utils.get_input_media_from_file_id(file_id),
-                random_id=acc.rnd_id(),
-                message=caption_text,
-                entities=entities,
-            )
-        )
-    return acc.invoke(
-        raw.functions.messages.SendMultiMedia(
-            peer=acc.resolve_peer(dest_id),
-            multi_media=multi_media,
-        )
-    )
-
-
-def _raw_cached_send_media(acc, dest_id, message, caption, text_changed):
-    file_id = _media_file_id(message)
-    if not file_id:
-        raise ValueError(f"消息 {message.id} 没有可用的 Telegram file_id")
-    caption_text = caption if text_changed else getattr(message, "caption", "") or ""
-    entities = None if text_changed else _raw_message_entities(
-        getattr(message, "caption_entities", None)
-    )
-    return acc.invoke(
-        raw.functions.messages.SendMedia(
-            peer=acc.resolve_peer(dest_id),
-            media=utils.get_input_media_from_file_id(file_id),
-            message=caption_text,
-            random_id=acc.rnd_id(),
-            entities=entities,
         )
     )
 
@@ -802,57 +694,6 @@ def _download_batch_media_group_with_retry(
     raise last_error
 
 
-def _copy_batch_media_group_items(
-    worker,
-    acc,
-    source_id,
-    dest_id,
-    group_messages,
-    cleaned_text,
-    text_changed,
-    preserve_source,
-    log=None,
-):
-    """Send a media group item by item using the selected mode only."""
-    errors = []
-    for index, item in enumerate(group_messages):
-        caption = cleaned_text if text_changed and index == 0 else None
-        forward_name = f"逐条转发媒体组 {index + 1}/{len(group_messages)}"
-        copy_name = f"逐条复制媒体组 {index + 1}/{len(group_messages)}"
-
-        def forward_item(item=item):
-            return acc.forward_messages(dest_id, source_id, item.id)
-
-        def copy_item(item=item, caption=caption):
-            return _copy_single_private_media(
-                acc,
-                dest_id,
-                source_id,
-                item,
-                caption=caption,
-            )
-
-        if preserve_source and not text_changed:
-            operation_name = forward_name
-            operation = forward_item
-        else:
-            operation_name = copy_name
-            operation = copy_item
-
-        try:
-            _worker_execute(worker, operation_name, operation)
-            _emit_log(f"媒体组第 {index + 1} 项 {item.id} 发送成功", log)
-        except Exception as exc:
-            _emit_log(
-                f"媒体组第 {index + 1} 项 {item.id} 发送失败: "
-                f"{type(exc).__name__}: {exc}",
-                log,
-                "warning",
-            )
-            errors.append((item, exc))
-    return errors
-
-
 def _reupload_batch_media_group(
     worker,
     acc,
@@ -910,8 +751,60 @@ def _forward_batch_media_group(
     preserve_source,
     log=None,
     restricted_source_ids=None,
+    cache_send=False,
 ):
     anchor = group_messages[0]
+
+    if cache_send:
+        try:
+            _emit_log(
+                f"媒体组 {anchor.id} 使用用户客户端缓存复制: "
+                f"{source_id} -> {dest_id}，RPC=copy_media_group",
+                log,
+            )
+            copy_kwargs = {"captions": [cleaned_text]} if text_changed else {}
+            _worker_execute(
+                worker,
+                "复制媒体组（缓存发送）",
+                lambda: acc.copy_media_group(
+                    dest_id,
+                    source_id,
+                    anchor.id,
+                    **copy_kwargs,
+                ),
+            )
+            _emit_log(
+                f"媒体组 {anchor.id} 已通过缓存复制原样发送: "
+                f"{source_id} -> {dest_id}",
+                log,
+            )
+            return len(group_messages), False
+        except Exception as exc:
+            _emit_log(
+                f"媒体组 {anchor.id} 缓存复制失败: "
+                f"{type(exc).__name__}: {exc}",
+                log,
+                "warning",
+            )
+            if isinstance(exc, ChatForwardsRestricted) and restricted_source_ids is not None:
+                restricted_source_ids.add(source_id)
+                _emit_log(
+                    f"来源 {source_id} 已确认限制缓存复制，后续消息将直接下载重传",
+                    log,
+                    "warning",
+                )
+            reuploaded = _reupload_batch_media_group(
+                worker,
+                acc,
+                source_id,
+                dest_id,
+                group_messages,
+                cleaned_text,
+                text_changed,
+                log,
+            )
+            return len(group_messages), True
+
     if not preserve_source and not text_changed:
         try:
             _emit_log(
@@ -938,66 +831,29 @@ def _forward_batch_media_group(
             return len(group_messages), False
         except Exception as exc:
             _emit_log(
-                f"用户客户端原生隐藏转发媒体组 {anchor.id} 失败，尝试缓存复制: "
-                f"{source_id} -> {dest_id}，"
-                f"{type(exc).__name__}: {exc}；"
-                "RPC 回退=messages.SendMultiMedia",
+                f"用户客户端原生隐藏转发媒体组 {anchor.id} 失败: "
+                f"{source_id} -> {dest_id}，{type(exc).__name__}: {exc}",
                 log,
                 "warning",
             )
-
-    if not preserve_source:
-        try:
-            _emit_log(
-                f"媒体组 {anchor.id} 使用 Telegram 缓存 file_id 直接发送: "
-                f"{source_id} -> {dest_id}，"
-                "RPC=messages.SendMultiMedia",
-                log,
-            )
-            _worker_execute(
-                worker,
-                "用户客户端缓存 file_id 媒体组发送",
-                lambda: _raw_cached_send_media_group(
-                    acc,
-                    dest_id,
-                    group_messages,
-                    cleaned_text,
-                    text_changed,
-                ),
-            )
-            _emit_log(
-                f"媒体组 {anchor.id} 已通过缓存 file_id 原样发送，无需下载重传: "
-                f"{source_id} -> {dest_id}",
-                log,
-            )
-            return len(group_messages), False
-        except Exception as exc:
-            _emit_log(
-                f"媒体组 {anchor.id} 缓存 file_id 发送失败: "
-                f"{type(exc).__name__}: {exc}",
-                log,
-                "warning",
-            )
-            if isinstance(exc, ChatForwardsRestricted):
-                if restricted_source_ids is not None:
-                    restricted_source_ids.add(source_id)
+            if isinstance(exc, ChatForwardsRestricted) and restricted_source_ids is not None:
+                restricted_source_ids.add(source_id)
                 _emit_log(
-                    f"来源 {source_id} 已确认限制缓存媒体发送，"
-                    "后续消息将直接下载重传",
+                    f"来源 {source_id} 已确认限制缓存转发，后续消息将直接下载重传",
                     log,
                     "warning",
                 )
-                reuploaded = _reupload_batch_media_group(
-                    worker,
-                    acc,
-                    source_id,
-                    dest_id,
-                    group_messages,
-                    cleaned_text,
-                    text_changed,
-                    log,
-                )
-                return len(group_messages), True
+            reuploaded = _reupload_batch_media_group(
+                worker,
+                acc,
+                source_id,
+                dest_id,
+                group_messages,
+                cleaned_text,
+                text_changed,
+                log,
+            )
+            return len(group_messages), True
 
     try:
         if text_changed:
@@ -1011,7 +867,7 @@ def _forward_batch_media_group(
                     captions=[cleaned_text],
                 ),
             )
-        elif preserve_source:
+        else:
             _worker_execute(
                 worker,
                 "转发媒体组",
@@ -1021,44 +877,21 @@ def _forward_batch_media_group(
                     [item.id for item in group_messages],
                 ),
             )
-        else:
-            _worker_execute(
-                worker,
-                "复制媒体组",
-                lambda: acc.copy_media_group(dest_id, source_id, anchor.id),
-            )
         return len(group_messages), False
     except Exception as exc:
-        if (
-            restricted_source_ids is not None
-            and isinstance(exc, ChatForwardsRestricted)
-        ):
-            restricted_source_ids.add(source_id)
-            _emit_log(
-                f"媒体组缓存复制被 Telegram 限制: {type(exc).__name__}: {exc}；"
-                "同一来源后续媒体组将直接下载重传",
-                log,
-                "warning",
-            )
-            reuploaded = _reupload_batch_media_group(
-                worker,
-                acc,
-                source_id,
-                dest_id,
-                group_messages,
-                cleaned_text,
-                text_changed,
-                log,
-            )
-            return len(group_messages), True
-
         _emit_log(
-            "媒体组直接发送失败，准备逐条发送后回退下载重传: "
-            f"{type(exc).__name__}: {exc}",
+            f"媒体组直接发送失败，准备下载重传: {type(exc).__name__}: {exc}",
             log,
             "warning",
         )
-        errors = _copy_batch_media_group_items(
+        if isinstance(exc, ChatForwardsRestricted) and restricted_source_ids is not None:
+            restricted_source_ids.add(source_id)
+            _emit_log(
+                f"来源 {source_id} 已确认限制缓存转发，后续消息将直接下载重传",
+                log,
+                "warning",
+            )
+        reuploaded = _reupload_batch_media_group(
             worker,
             acc,
             source_id,
@@ -1066,70 +899,9 @@ def _forward_batch_media_group(
             group_messages,
             cleaned_text,
             text_changed,
-            preserve_source,
             log,
         )
-        if restricted_source_ids is not None:
-            for _item, error in errors:
-                if isinstance(error, ChatForwardsRestricted):
-                    restricted_source_ids.add(source_id)
-                    _emit_log(
-                        f"来源 {source_id} 的媒体组逐条缓存复制受限，"
-                        "已缓存来源限制状态",
-                        log,
-                        "warning",
-                    )
-                    break
-        if not errors:
-            return len(group_messages), False
-
-        failed_items = [
-            item
-            for item, _exc in errors
-            if get_message_type(item) in DOWNLOADABLE_MEDIA_TYPES
-        ]
-        non_downloadable_errors = [
-            f"{item.id}: {type(exc).__name__}: {exc}"
-            for item, exc in errors
-            if get_message_type(item) not in DOWNLOADABLE_MEDIA_TYPES
-        ]
-
-        reuploaded = 0
-        if failed_items:
-            failed_first = failed_items[0]
-            subset_text_changed = (
-                text_changed and failed_first.id == anchor.id
-            )
-            if len(failed_items) == 1:
-                reuploaded = _reupload_batch_single_media(
-                    worker,
-                    acc,
-                    dest_id,
-                    failed_first,
-                    cleaned_text,
-                    subset_text_changed,
-                    log,
-                )
-            else:
-                reuploaded = _reupload_batch_media_group(
-                    worker,
-                    acc,
-                    source_id,
-                    dest_id,
-                    failed_items,
-                    cleaned_text,
-                    subset_text_changed,
-                    log,
-                )
-
-        if non_downloadable_errors:
-            raise RuntimeError(
-                "媒体组包含无法缓存复制且不可下载的消息: "
-                + "; ".join(non_downloadable_errors)
-            )
-
-        sent = len(group_messages) - len(errors) + reuploaded
-        return sent, True
+        return len(group_messages), True
 
 
 def _reupload_batch_single_media(
@@ -1192,7 +964,59 @@ def _forward_batch_single_media(
     preserve_source,
     log=None,
     restricted_source_ids=None,
+    cache_send=False,
 ):
+    if cache_send:
+        try:
+            _emit_log(
+                f"单条媒体 {message.id} 使用用户客户端缓存复制: "
+                f"{source_id} -> {dest_id}，RPC=copy_message",
+                log,
+            )
+            _worker_execute(
+                worker,
+                "复制单条媒体（缓存发送）",
+                lambda: _copy_single_private_media(
+                    acc,
+                    dest_id,
+                    source_id,
+                    message,
+                    caption=cleaned_text if text_changed else None,
+                ),
+            )
+            _emit_log(
+                f"单条媒体 {message.id} 已通过缓存复制原样发送: "
+                f"{source_id} -> {dest_id}",
+                log,
+            )
+            return 1, False
+        except Exception as exc:
+            _emit_log(
+                f"单条媒体 {message.id} 缓存复制失败: "
+                f"{type(exc).__name__}: {exc}",
+                log,
+                "warning",
+            )
+            if isinstance(exc, ChatForwardsRestricted) and restricted_source_ids is not None:
+                restricted_source_ids.add(source_id)
+                _emit_log(
+                    f"来源 {source_id} 已确认限制缓存复制，后续消息将直接下载重传",
+                    log,
+                    "warning",
+                )
+            if get_message_type(message) not in DOWNLOADABLE_MEDIA_TYPES:
+                raise
+            count = _reupload_batch_single_media(
+                worker,
+                acc,
+                dest_id,
+                message,
+                cleaned_text,
+                text_changed,
+                log,
+            )
+            return count, True
+
     if not preserve_source and not text_changed:
         try:
             _emit_log(
@@ -1219,67 +1043,30 @@ def _forward_batch_single_media(
             return 1, False
         except Exception as exc:
             _emit_log(
-                f"用户客户端原生隐藏转发单条媒体 {message.id} 失败，尝试缓存复制: "
-                f"{source_id} -> {dest_id}，"
-                f"{type(exc).__name__}: {exc}；"
-                "RPC 回退=messages.SendMedia",
+                f"用户客户端原生隐藏转发单条媒体 {message.id} 失败: "
+                f"{source_id} -> {dest_id}，{type(exc).__name__}: {exc}",
                 log,
                 "warning",
             )
-
-    if not preserve_source:
-        try:
-            _emit_log(
-                f"单条媒体 {message.id} 使用 Telegram 缓存 file_id 直接发送: "
-                f"{source_id} -> {dest_id}，"
-                "RPC=messages.SendMedia",
-                log,
-            )
-            _worker_execute(
-                worker,
-                "用户客户端缓存 file_id 单条媒体发送",
-                lambda: _raw_cached_send_media(
-                    acc,
-                    dest_id,
-                    message,
-                    cleaned_text,
-                    text_changed,
-                ),
-            )
-            _emit_log(
-                f"单条媒体 {message.id} 已通过缓存 file_id 原样发送，无需下载重传: "
-                f"{source_id} -> {dest_id}",
-                log,
-            )
-            return 1, False
-        except Exception as exc:
-            _emit_log(
-                f"单条媒体 {message.id} 缓存 file_id 发送失败: "
-                f"{type(exc).__name__}: {exc}",
-                log,
-                "warning",
-            )
-            if isinstance(exc, ChatForwardsRestricted):
-                if restricted_source_ids is not None:
-                    restricted_source_ids.add(source_id)
+            if isinstance(exc, ChatForwardsRestricted) and restricted_source_ids is not None:
+                restricted_source_ids.add(source_id)
                 _emit_log(
-                    f"来源 {source_id} 已确认限制单条缓存媒体发送，"
-                    "后续消息将直接下载重传",
+                    f"来源 {source_id} 已确认限制缓存转发，后续消息将直接下载重传",
                     log,
                     "warning",
                 )
-                if get_message_type(message) not in DOWNLOADABLE_MEDIA_TYPES:
-                    raise
-                count = _reupload_batch_single_media(
-                    worker,
-                    acc,
-                    dest_id,
-                    message,
-                    cleaned_text,
-                    text_changed,
-                    log,
-                )
-                return count, True
+            if get_message_type(message) not in DOWNLOADABLE_MEDIA_TYPES:
+                raise
+            count = _reupload_batch_single_media(
+                worker,
+                acc,
+                dest_id,
+                message,
+                cleaned_text,
+                text_changed,
+                log,
+            )
+            return count, True
 
     try:
         if text_changed:
@@ -1293,26 +1080,11 @@ def _forward_batch_single_media(
                     caption=cleaned_text,
                 ),
             )
-        elif preserve_source:
-            _worker_execute(
-                worker,
-                "转发单条媒体",
-                lambda: acc.forward_messages(
-                    dest_id,
-                    source_id,
-                    message.id,
-                ),
-            )
         else:
             _worker_execute(
                 worker,
-                "复制单条媒体",
-                lambda: _copy_single_private_media(
-                    acc,
-                    dest_id,
-                    source_id,
-                    message,
-                ),
+                "转发单条媒体",
+                lambda: acc.forward_messages(dest_id, source_id, message.id),
             )
         return 1, False
     except Exception as exc:
@@ -1321,25 +1093,15 @@ def _forward_batch_single_media(
             log,
             "warning",
         )
-        if not isinstance(
-            exc,
-            (ChatForwardsRestricted, FileReferenceExpired, ValueError),
-        ):
-            raise
-        if (
-            restricted_source_ids is not None
-            and isinstance(exc, ChatForwardsRestricted)
-        ):
+        if isinstance(exc, ChatForwardsRestricted) and restricted_source_ids is not None:
             restricted_source_ids.add(source_id)
             _emit_log(
-                f"来源 {source_id} 的单条缓存复制受限，"
-                "后续消息将直接下载重传",
+                f"来源 {source_id} 的单条缓存复制受限，后续消息将直接下载重传",
                 log,
                 "warning",
             )
         if get_message_type(message) not in DOWNLOADABLE_MEDIA_TYPES:
             raise
-
         count = _reupload_batch_single_media(
             worker,
             acc,
@@ -1363,7 +1125,43 @@ def _forward_batch_text(
     preserve_source,
     log=None,
     restricted_source_ids=None,
+    cache_send=False,
 ):
+    if cache_send:
+        try:
+            if text_changed:
+                _worker_execute(
+                    worker,
+                    "发送修改后的文本",
+                    lambda: acc.send_message(dest_id, cleaned_text),
+                )
+            else:
+                _worker_execute(
+                    worker,
+                    "复制文本消息（缓存发送）",
+                    lambda: acc.copy_message(dest_id, source_id, message.id),
+                )
+            return 1, False
+        except Exception as exc:
+            _emit_log(
+                f"文本消息 {message.id} 缓存复制失败: "
+                f"{type(exc).__name__}: {exc}",
+                log,
+                "warning",
+            )
+            if isinstance(exc, ChatForwardsRestricted) and restricted_source_ids is not None:
+                restricted_source_ids.add(source_id)
+            _worker_execute(
+                worker,
+                "发送受限文本消息",
+                lambda: acc.send_message(
+                    dest_id,
+                    cleaned_text if text_changed else message.text or "",
+                    entities=None if text_changed else message.entities,
+                ),
+            )
+            return 1, True
+
     if not preserve_source and not text_changed:
         try:
             _emit_log(
@@ -1390,13 +1188,23 @@ def _forward_batch_text(
             return 1, False
         except Exception as exc:
             _emit_log(
-                f"用户客户端原生隐藏转发文本消息 {message.id} 失败，尝试缓存复制: "
-                f"{source_id} -> {dest_id}，"
-                f"{type(exc).__name__}: {exc}；"
-                "RPC 回退=messages.SendMessage",
+                f"用户客户端原生隐藏转发文本消息 {message.id} 失败: "
+                f"{source_id} -> {dest_id}，{type(exc).__name__}: {exc}",
                 log,
                 "warning",
             )
+            if isinstance(exc, ChatForwardsRestricted) and restricted_source_ids is not None:
+                restricted_source_ids.add(source_id)
+            _worker_execute(
+                worker,
+                "发送受限文本消息",
+                lambda: acc.send_message(
+                    dest_id,
+                    cleaned_text if text_changed else message.text or "",
+                    entities=None if text_changed else message.entities,
+                ),
+            )
+            return 1, True
 
     try:
         if text_changed:
@@ -1405,34 +1213,21 @@ def _forward_batch_text(
                 "发送修改后的文本",
                 lambda: acc.send_message(dest_id, cleaned_text),
             )
-        elif preserve_source:
+        else:
             _worker_execute(
                 worker,
                 "转发文本消息",
                 lambda: acc.forward_messages(dest_id, source_id, message.id),
             )
-        else:
-            _worker_execute(
-                worker,
-                "复制文本消息",
-                lambda: acc.copy_message(dest_id, source_id, message.id),
-            )
         return 1, False
     except Exception as exc:
-        if not isinstance(exc, (ChatForwardsRestricted, FileReferenceExpired)):
-            raise
-        if (
-            restricted_source_ids is not None
-            and isinstance(exc, ChatForwardsRestricted)
-        ):
+        if isinstance(exc, ChatForwardsRestricted) and restricted_source_ids is not None:
             restricted_source_ids.add(source_id)
             _emit_log(
-                f"来源 {source_id} 的文本缓存复制受限，"
-                "后续文本将直接重新发送",
+                f"来源 {source_id} 的文本缓存复制受限，后续文本将直接重新发送",
                 log,
                 "warning",
             )
-
         _worker_execute(
             worker,
             "发送受限文本消息",
@@ -1456,6 +1251,7 @@ def _forward_batch_unit(
     preserve_source,
     log=None,
     restricted_source_ids=None,
+    cache_send=False,
 ):
     if restricted_source_ids is not None and source_id in restricted_source_ids:
         _emit_log(
@@ -1485,6 +1281,7 @@ def _forward_batch_unit(
             preserve_source,
             log,
             restricted_source_ids,
+            cache_send=cache_send,
         )
 
     message = group_messages[0]
@@ -1501,6 +1298,7 @@ def _forward_batch_unit(
             preserve_source,
             log,
             restricted_source_ids,
+            cache_send=cache_send,
         )
     return _forward_batch_single_media(
         worker,
@@ -1513,6 +1311,7 @@ def _forward_batch_unit(
         preserve_source,
         log,
         restricted_source_ids,
+        cache_send=cache_send,
     )
 
 
@@ -1613,11 +1412,18 @@ def _run_batch_task(job_id, spec):
         exclude_patterns = rules["exclude_patterns"]
         remove_terms = rules["remove_terms"]
         remove_patterns = rules["remove_patterns"]
-        preserve_source = str(spec.get("forward_mode", "clone")).lower() != "clone"
-        mode = "保留来源" if preserve_source else "隐藏来源"
+        forward_mode = str(spec.get("forward_mode", "clone")).lower()
+        preserve_source = forward_mode == "direct"
+        cache_send = forward_mode == "cache"
+        mode = {
+            "clone": "隐藏来源",
+            "direct": "保留来源",
+            "cache": "缓存发送",
+        }.get(forward_mode, "隐藏来源")
         log(
             f"网页批量转发身份: 用户客户端；模式: {mode}；"
-            "隐藏来源优先使用 messages.ForwardMessages(drop_author=True)，"
+            "隐藏来源使用 messages.ForwardMessages(drop_author=True)，"
+            "缓存发送使用 copy_message/copy_media_group，"
             "不使用 Bot 身份"
         )
         processed = success = failed = skipped = 0
@@ -1682,6 +1488,7 @@ def _run_batch_task(job_id, spec):
                     preserve_source,
                     log,
                     restricted_source_ids,
+                    cache_send=cache_send,
                 )
                 success += sent_count
                 processed += sent_count
