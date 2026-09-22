@@ -320,6 +320,24 @@ def _resolve_chat(client, ref):
 def _resolve_source_username(client, ref, chat_id):
     """Return a public source username when the client can resolve one."""
     candidates = []
+    raw = str(ref or "").strip()
+
+    link_match = re.match(
+        r"^https?://(?:www\.)?t\.me/(?P<username>[A-Za-z0-9_]+)",
+        raw,
+        re.IGNORECASE,
+    )
+    if link_match and link_match.group("username").lower() not in (
+        "c",
+        "b",
+        "+",
+        "joinchat",
+    ):
+        candidates.append(link_match.group("username"))
+
+    if re.fullmatch(r"@?[A-Za-z0-9_]{5,32}", raw):
+        candidates.append(raw.lstrip("@"))
+
     normalized = normalize_private_channel_ref(ref)
     if not re.fullmatch(r"-?\d+", normalized):
         candidates.append(normalized)
@@ -620,7 +638,22 @@ def _forward_cache_via_bot_relay(
 ):
     """Relay a restricted cached-copy through Bot, then hidden-forward as user."""
     try:
-        source_ref = _bot_source_ref(source_id, group_messages, source_username)
+        resolved_username = source_username
+        if not resolved_username:
+            resolved_username = _resolve_source_username(
+                acc,
+                source_id,
+                source_id,
+            )
+        if not resolved_username and group_messages:
+            chat = getattr(group_messages[0], "chat", None)
+            resolved_username = getattr(chat, "username", None)
+
+        source_ref = _bot_source_ref(
+            source_id,
+            group_messages,
+            resolved_username,
+        )
         _emit_log(
             f"Bot 中转受限消息: {source_ref} -> 缓冲会话 {relay_id}，"
             "RPC=copy_message/copy_media_group",
@@ -636,7 +669,7 @@ def _forward_cache_via_bot_relay(
                 group_messages,
                 cleaned_text,
                 text_changed,
-                source_username=source_username,
+                source_username=resolved_username,
             ),
         )
         _emit_log(
