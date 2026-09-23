@@ -3,7 +3,7 @@ import re
 import json
 from flask import Flask, render_template, request, redirect, url_for, session, send_from_directory, flash, jsonify, Response
 from markupsafe import Markup, escape
-from database import init_database, get_notes, get_note_count, get_sources, verify_user, update_password, get_note_by_id, update_note, delete_note, DATA_DIR
+from database import init_database, get_notes, get_note_count, get_sources, verify_user, update_password, update_username, get_note_by_id, update_note, delete_note, DATA_DIR
 from config import load_webdav_config, load_viewer_config, save_viewer_config, load_watch_config, save_watch_config, reload_monitored_sources, get_monitored_sources
 from bot.storage.webdav_client import WebDAVClient, StorageManager
 from bot.handlers.instances import get_acc_instance, get_bot_instance
@@ -305,19 +305,50 @@ def api_admin_password():
         return jsonify({'error': '未登录'}), 401
 
     data = request.get_json(silent=True) or {}
+    current_username = str(data.get('current_username') or '').strip()
+    new_username = str(data.get('new_username') or '').strip()
     current_password = str(data.get('current_password') or '')
     new_password = str(data.get('new_password') or '')
     confirm_password = str(data.get('confirm_password') or '')
 
-    if not verify_user(session['username'], current_password):
+    if current_username != session['username']:
+        return jsonify({'error': '当前用户名不正确'}), 400
+    if not verify_user(current_username, current_password):
         return jsonify({'error': '当前密码不正确'}), 400
-    if len(new_password) < 6:
-        return jsonify({'error': '新密码长度至少为 6 个字符'}), 400
-    if new_password != confirm_password:
-        return jsonify({'error': '两次输入的新密码不一致'}), 400
 
-    update_password(session['username'], new_password)
-    return jsonify({'ok': True, 'message': '密码更新成功'})
+    username_changed = bool(new_username and new_username != current_username)
+    password_changed = bool(new_password)
+    if not username_changed and not password_changed:
+        return jsonify({'error': '请填写新用户名或新密码'}), 400
+
+    if username_changed:
+        if len(new_username) < 1 or len(new_username) > 32:
+            return jsonify({'error': '用户名长度需为 1 到 32 个字符'}), 400
+        if not re.fullmatch(r'[A-Za-z0-9_.-]+', new_username):
+            return jsonify({'error': '用户名只能包含字母、数字、下划线、点和连字符'}), 400
+        try:
+            update_username(current_username, new_username)
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
+
+    if password_changed:
+        if len(new_password) < 6:
+            return jsonify({'error': '新密码长度至少为 6 个字符'}), 400
+        if new_password != confirm_password:
+            return jsonify({'error': '两次输入的新密码不一致'}), 400
+        update_password(current_username, new_password)
+
+    if username_changed:
+        session['username'] = new_username
+
+    message = '账号信息更新成功'
+    if username_changed and password_changed:
+        message = '用户名和密码更新成功'
+    elif username_changed:
+        message = '用户名更新成功'
+    elif password_changed:
+        message = '密码更新成功'
+    return jsonify({'ok': True, 'message': message})
 
 
 @app.route('/api/admin/webdav', methods=['GET', 'POST'])

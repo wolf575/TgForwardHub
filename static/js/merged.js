@@ -505,23 +505,41 @@ async function submitSetupPassword() {
 }
 
 async function savePassword() {
+  const currentUsername = $("accountCurrentUsername").value.trim();
+  const newUsername = $("accountNewUsername").value.trim();
   const currentPassword = $("passwordCurrent").value;
   const newPassword = $("passwordNew").value;
   const confirmPassword = $("passwordConfirm").value;
-  if (!currentPassword || !newPassword || !confirmPassword) {
-    setMessage("passwordMessage", "请完整填写当前密码、新密码和确认密码");
+  if (!currentUsername || !currentPassword) {
+    setMessage("passwordMessage", "请填写当前用户名和当前密码");
+    return;
+  }
+  if (!newUsername && !newPassword) {
+    setMessage("passwordMessage", "请填写新用户名或新密码");
+    return;
+  }
+  if (newPassword && newPassword !== confirmPassword) {
+    setMessage("passwordMessage", "两次输入的新密码不一致");
     return;
   }
 
   try {
     const result = await apiFetch("/api/admin/password", {
       method: "POST",
-      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword, confirm_password: confirmPassword }),
+      body: JSON.stringify({
+        current_username: currentUsername,
+        new_username: newUsername,
+        current_password: currentPassword,
+        new_password: newPassword,
+        confirm_password: confirmPassword,
+      }),
     });
+    $("accountCurrentUsername").value = newUsername || currentUsername;
+    $("accountNewUsername").value = "";
     $("passwordCurrent").value = "";
     $("passwordNew").value = "";
     $("passwordConfirm").value = "";
-    setMessage("passwordMessage", result.message || "密码更新成功");
+    setMessage("passwordMessage", result.message || "账号更新成功");
   } catch (error) {
     setMessage("passwordMessage", error.message);
   }

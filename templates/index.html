@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>TG Forward Hub</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/merged.css') }}?v=20260906-timezone-refresh">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/merged.css') }}?v=20260923-account-mobile">
 </head>
 <body>
   <header class="topbar">
@@ -324,18 +324,24 @@
         </form>
 
         <form id="passwordForm" class="form-card">
-          <div class="panel-subhead"><h2>修改密码</h2></div>
+          <div class="panel-subhead"><h2>账号与密码</h2></div>
           <div id="passwordMessage" class="message" hidden></div>
+          <label>当前用户名
+            <input id="accountCurrentUsername" autocomplete="username">
+          </label>
+          <label>新用户名
+            <input id="accountNewUsername" autocomplete="off" placeholder="不修改请留空">
+          </label>
           <label>当前密码
             <input id="passwordCurrent" type="password" autocomplete="current-password">
           </label>
           <label>新密码
-            <input id="passwordNew" type="password" autocomplete="new-password">
+            <input id="passwordNew" type="password" autocomplete="new-password" placeholder="不修改请留空">
           </label>
           <label>确认新密码
-            <input id="passwordConfirm" type="password" autocomplete="new-password">
+            <input id="passwordConfirm" type="password" autocomplete="new-password" placeholder="不修改请留空">
           </label>
-          <button id="passwordSaveBtn" class="primary" type="button">更新密码</button>
+          <button id="passwordSaveBtn" class="primary" type="button">更新账号</button>
         </form>
 
         <form id="webdavForm" class="form-card">
@@ -403,6 +409,6 @@
     </section>
   </main>
 
-  <script src="{{ url_for('static', filename='js/merged.js') }}?v=20260914-notifications"></script>
+  <script src="{{ url_for('static', filename='js/merged.js') }}?v=20260923-account-mobile"></script>
 </body>
 </html>

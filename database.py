@@ -512,6 +512,21 @@ def update_password(username, new_password):
         cursor.execute('UPDATE users SET password_hash = ? WHERE username = ?', (password_hash, username))
 
 
+def update_username(current_username, new_username):
+    """更新用户名，并确保新用户名未被占用"""
+    if current_username == new_username:
+        return
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM users WHERE username = ?', (new_username,))
+        if cursor.fetchone()[0] > 0:
+            raise ValueError('用户名已被占用')
+        cursor.execute('UPDATE users SET username = ? WHERE username = ?', (new_username, current_username))
+        if cursor.rowcount != 1:
+            raise ValueError('当前用户名不存在')
+
+
 def get_note_by_id(note_id):
     """根据ID获取单条笔记"""
     with get_db_connection() as conn:

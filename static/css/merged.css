@@ -511,7 +511,21 @@ textarea {
 }
 
 @media (max-width: 800px) {
-  .topbar { flex-wrap: wrap; }
+  .topbar {
+    flex-wrap: wrap;
+    gap: 10px 12px;
+    padding: 10px 12px;
+  }
+  .brand { order: 1; }
+  .logout { order: 2; margin-left: auto; }
+  .theme-picker { order: 3; }
+  .tabs {
+    order: 4;
+    flex: 0 0 100%;
+    width: 100%;
+    overflow-x: auto;
+  }
+  .tab { padding: 8px 12px; }
   .grid,
   .watch-layout,
   .settings-layout,
