@@ -81,12 +81,34 @@
           <label>排除正则（每行一条）
             <textarea id="excludeRegex" rows="3" placeholder="(?i)\b(?:广告|推广)\b"></textarea>
           </label>
+          <div class="regex-library" data-for="excludeRegex">
+            <button type="button" class="regex-chip" data-target="excludeRegex"
+              data-regex="(?i)\b(?:广告|推广)\b"
+              title="排除文本中出现“广告”或“推广”的整条消息">广告/推广</button>
+            <button type="button" class="regex-chip" data-target="excludeRegex"
+              data-regex="(?s)Telegram必备的搜索引擎"
+              title="只要文本包含该字段就整条排除">必备搜索引擎</button>
+            <button type="button" class="regex-chip" data-target="excludeRegex"
+              data-regex="(?i)\b签到\b"
+              title="排除包含“签到”的整条消息">签到</button>
+          </div>
           <label>删除关键词（删除命中的关键词）
             <input id="removeKeywords" placeholder="赞助商, 来源：">
           </label>
           <label>删除正则（每行一条，删除匹配内容）
             <textarea id="removeRegex" rows="3" placeholder="(?s)#[\w\W]{0,20}$"></textarea>
           </label>
+          <div class="regex-library" data-for="removeRegex">
+            <button type="button" class="regex-chip" data-target="removeRegex"
+              data-regex="(?s)🔎.*\Z"
+              title="删除 🔎 及其之后的所有内容">删除 🔎 及之后</button>
+            <button type="button" class="regex-chip" data-target="removeRegex"
+              data-regex="(?s)Powered by.*\Z"
+              title="删除 Powered by 及其之后的所有内容">删除 Powered by 及之后</button>
+            <button type="button" class="regex-chip" data-target="removeRegex"
+              data-regex="(?s)#[\w\W]{0,20}$"
+              title="删除消息末尾的话题标签">删除末尾话题标签</button>
+          </div>
 
           <button class="primary" type="submit">生成并执行</button>
           <div id="batchMessage" class="message" hidden></div>

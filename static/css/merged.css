@@ -237,6 +237,30 @@ textarea {
   min-height: 76px;
 }
 
+.regex-library {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: -4px 0 13px;
+}
+
+.regex-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.regex-chip:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
 .field-row {
   display: grid;
   grid-template-columns: 1fr 1fr;

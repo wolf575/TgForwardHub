@@ -941,6 +941,21 @@ function fillFromTelegramLink(input) {
   $(id).addEventListener("change", () => fillFromTelegramLink($(id)));
 });
 
+function appendRegexToTarget(button) {
+  const target = $(button.dataset.target);
+  const pattern = button.dataset.regex || "";
+  if (!target || !pattern) return;
+
+  const lines = parseRegexList(target.value);
+  if (lines.includes(pattern)) return;
+  target.value = lines.concat(pattern).join("\n");
+}
+
+document.addEventListener("click", (event) => {
+  const chip = event.target.closest(".regex-chip");
+  if (chip) appendRegexToTarget(chip);
+});
+
 async function loadWatchConfig() {
   const config = await apiFetch("/api/watch-config");
   const list = $("watchList");

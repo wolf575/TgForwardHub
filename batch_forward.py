@@ -448,11 +448,12 @@ def _collect_message_ids(acc, source_id, spec):
 
         ids = []
         offset_date = datetime.fromtimestamp(end_ts, tz=timezone.utc)
-        for message in acc.iter_history(source_id, offset_date=offset_date, limit=1000):
+        for message in acc.get_chat_history(source_id, offset_date=offset_date):
             ts = message.date.timestamp()
             if ts < start_ts:
                 break
-            ids.append(message.id)
+            if ts <= end_ts:
+                ids.append(message.id)
         if reverse:
             ids.reverse()
         return ids
@@ -1766,6 +1767,14 @@ def _reupload_batch_unit(
 
 def _run_batch_task(job_id, spec):
     log_lines = []
+    last_persist = time.monotonic()
+
+    def persist(force=False):
+        nonlocal last_persist
+        now = time.monotonic()
+        if force or now - last_persist >= 1.0:
+            _persist_task_history(job_id)
+            last_persist = now
 
     def log(message, level="info"):
         line = f"[{_now_iso()}] {message}"
@@ -1776,7 +1785,7 @@ def _run_batch_task(job_id, spec):
             message,
         )
         _update_task(job_id, stdoutTail=_tail("\n".join(log_lines)))
-        _persist_task_history(job_id)
+        persist()
 
     def finish_cancelled():
         log("任务已取消")
@@ -1786,7 +1795,7 @@ def _run_batch_task(job_id, spec):
             exitCode=130,
             stderrTail=_tail("\n".join(log_lines)),
         )
-        _persist_task_history(job_id)
+        persist(force=True)
 
     try:
         acc = get_acc_instance()
@@ -1938,10 +1947,9 @@ def _run_batch_task(job_id, spec):
                     "skipped": skipped,
                 },
             )
-            _persist_task_history(job_id)
+            persist()
             if index % 10 == 0:
                 log(f"进度 {processed}/{total}，成功 {success}，失败 {failed}，跳过 {skipped}")
-            time.sleep(0.1)
 
         if get_task(job_id).get("cancelled"):
             finish_cancelled()
@@ -1954,7 +1962,7 @@ def _run_batch_task(job_id, spec):
             exitCode=0 if failed == 0 else 1,
             stderrTail=_tail("\n".join(log_lines)),
         )
-        _persist_task_history(job_id)
+        persist(force=True)
     except Exception as exc:
         if get_task(job_id).get("cancelled"):
             finish_cancelled()
@@ -1966,7 +1974,7 @@ def _run_batch_task(job_id, spec):
             exitCode=1,
             stderrTail=_tail("\n".join(log_lines)),
         )
-        _persist_task_history(job_id)
+        persist(force=True)
 
 
 def submit_batch_task(spec):
