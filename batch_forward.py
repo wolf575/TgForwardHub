@@ -454,7 +454,7 @@ def _collect_message_ids(acc, source_id, spec):
                 break
             if ts <= end_ts:
                 ids.append(message.id)
-        if reverse:
+        if not reverse:
             ids.reverse()
         return ids
 
