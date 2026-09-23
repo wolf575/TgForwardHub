@@ -333,10 +333,16 @@ def _resolve_source_username(client, ref, chat_id):
         "+",
         "joinchat",
     ):
-        candidates.append(link_match.group("username"))
+        explicit_username = link_match.group("username")
+        candidates.append(explicit_username)
+        # Collection-style usernames (for example @buzzav, @javslon) are real
+        # public usernames even when get_chat cannot return a username field.
+        return explicit_username
 
     if re.fullmatch(r"@?[A-Za-z0-9_]{5,32}", raw):
-        candidates.append(raw.lstrip("@"))
+        explicit_username = raw.lstrip("@")
+        candidates.append(explicit_username)
+        return explicit_username
 
     normalized = normalize_private_channel_ref(ref)
     if not re.fullmatch(r"-?\d+", normalized):
