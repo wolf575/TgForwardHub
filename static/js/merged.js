@@ -766,19 +766,32 @@ async function loadHistory() {
 
     card.addEventListener("click", () => {
       const state = item.state || {};
+      const rangeType = state.rangeType || "id";
       $("taskName").value = state.taskName || item.taskName || "";
       $("sourceId").value = state.sourceId || item.sourceId || "";
       $("targetId").value = state.targetId || item.targetId || "";
       $("relayChat").value = state.relayChat || "";
-      $("rangeType").value = state.rangeType || "id";
-      $("startValue").value = state.startValue || "";
-      $("endValue").value = state.endValue || "";
+      $("rangeType").value = rangeType;
+      if (rangeType === "time") {
+        $("startValue").value =
+          state.startValue && isUnixTimestampLike(state.startValue)
+            ? localDateStringFromTimestamp(state.startValue)
+            : state.startValue || todayLocalDateString();
+        $("endValue").value =
+          state.endValue && isUnixTimestampLike(state.endValue)
+            ? localDateStringFromTimestamp(state.endValue)
+            : state.endValue || todayLocalDateString();
+      } else {
+        $("startValue").value = state.startValue || "";
+        $("endValue").value = state.endValue || "";
+      }
       $("forwardMode").value = state.forwardMode || "clone";
       $("excludeKeywords").value = state.excludeKeywords || "";
       $("excludeRegex").value = state.excludeRegex || "";
       $("removeKeywords").value = state.removeKeywords || "";
       $("removeRegex").value = state.removeRegex || "";
       $("descFlag").checked = !!state.desc;
+      updateRangeUI({ preserveValues: true });
       setMessage("batchMessage", `已恢复任务: ${title.textContent}`);
     });
 
@@ -850,14 +863,22 @@ async function submitBatch(event) {
   setMessage("batchMessage", "");
   $("cancelBtn").hidden = true;
 
+  const rangeType = $("rangeType").value;
+  let start = $("startValue").value.trim();
+  let end = $("endValue").value.trim();
+  if (rangeType === "time") {
+    start = dateStringToMidnightTimestamp(start);
+    end = dateStringToMidnightTimestamp(end);
+  }
+
   const spec = {
     task_name: $("taskName").value.trim(),
     source: $("sourceId").value.trim(),
     target: $("targetId").value.trim(),
     relay_chat: $("relayChat").value.trim(),
-    range_type: $("rangeType").value,
-    start: $("startValue").value.trim(),
-    end: $("endValue").value.trim(),
+    range_type: rangeType,
+    start,
+    end,
     forward_mode: $("forwardMode").value,
     reverse: $("descFlag").checked,
     exclude_keywords: $("excludeKeywords").value,
@@ -920,6 +941,90 @@ function validateRegexList(value, label) {
   return patterns;
 }
 
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+function todayLocalDateString() {
+  const d = new Date();
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+function localDateStringFromTimestamp(ts) {
+  const n = Number(ts);
+  if (!Number.isFinite(n)) return "";
+  const d = new Date(n * 1000);
+  if (Number.isNaN(d.getTime())) return "";
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+function dateStringToMidnightTimestamp(dateStr) {
+  const m = String(dateStr || "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return "";
+  const dt = new Date(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    0,
+    0,
+    0,
+    0,
+  );
+  return String(Math.floor(dt.getTime() / 1000));
+}
+
+function isUnixTimestampLike(value) {
+  return /^\d{10}$/.test(String(value || "").trim());
+}
+
+function updateTimeRangeHint() {
+  const hint = $("timeRangeHint");
+  if ($("rangeType").value !== "time") {
+    hint.hidden = true;
+    return;
+  }
+  const start = dateStringToMidnightTimestamp($("startValue").value);
+  const end = dateStringToMidnightTimestamp($("endValue").value);
+  hint.textContent = `时间戳: ${start || "—"} → ${end || "—"}`;
+  hint.hidden = false;
+}
+
+function updateRangeUI(options = {}) {
+  const { preserveValues = false } = options;
+  const rangeType = $("rangeType").value || "id";
+  const prevType = updateRangeUI.prevType || "id";
+  const startInput = $("startValue");
+  const endInput = $("endValue");
+
+  if (rangeType === "time") {
+    startInput.type = "date";
+    endInput.type = "date";
+    startInput.placeholder = "选择日期";
+    endInput.placeholder = "选择日期";
+
+    if (startInput.value && isUnixTimestampLike(startInput.value)) {
+      startInput.value = localDateStringFromTimestamp(startInput.value);
+    }
+    if (endInput.value && isUnixTimestampLike(endInput.value)) {
+      endInput.value = localDateStringFromTimestamp(endInput.value);
+    }
+    if (!startInput.value) startInput.value = todayLocalDateString();
+    if (!endInput.value) endInput.value = todayLocalDateString();
+  } else {
+    startInput.type = "text";
+    endInput.type = "text";
+    startInput.placeholder = "第一个值，或粘贴消息链接";
+    endInput.placeholder = "第二个值，或粘贴消息链接";
+    if (prevType === "time" && !preserveValues) {
+      startInput.value = "";
+      endInput.value = "";
+    }
+  }
+
+  updateRangeUI.prevType = rangeType;
+  updateTimeRangeHint();
+}
+
 function fillFromTelegramLink(input) {
   const value = String(input.value || "").trim();
   const match = value.match(
@@ -938,7 +1043,10 @@ function fillFromTelegramLink(input) {
 }
 
 ["startValue", "endValue"].forEach((id) => {
-  $(id).addEventListener("change", () => fillFromTelegramLink($(id)));
+  $(id).addEventListener("change", () => {
+    fillFromTelegramLink($(id));
+    updateTimeRangeHint();
+  });
 });
 
 function appendRegexToTarget(button) {
@@ -1070,6 +1178,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   $("batchForm").addEventListener("submit", submitBatch);
+  $("rangeType").addEventListener("change", () => updateRangeUI());
   $("setupForm").addEventListener("submit", (event) => {
     event.preventDefault();
     if (setupState.busy) return;
@@ -1114,6 +1223,7 @@ document.addEventListener("DOMContentLoaded", () => {
   loadStatus();
   loadSetupState();
   loadAppSettings();
+  updateRangeUI();
   restoreBatchTask();
   loadWebdavConfig();
   loadCalibrationConfig();
