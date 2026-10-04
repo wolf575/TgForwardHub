@@ -39,6 +39,37 @@ from app_settings import batch_completion_notifications_enabled
 logger = get_logger(__name__)
 
 
+_MESSAGE_LINK_RE = re.compile(r'https://t\.me/((?:c/|b/)?)([^/?#\s]+)/(\d+)')
+
+
+def _parse_message_range(text):
+    """Parse a Telegram message link (or an ID range) into chat info and IDs.
+
+    Returns ``(kind, chat, from_id, to_id)`` where ``kind`` is ``""`` for a
+    public username, ``"c/"`` for a private channel, or ``"b/"`` for a bot.
+    Accepts both hyphen and whitespace separators, and tolerates a full second
+    link instead of just the trailing message ID.
+    """
+    cleaned = (text or "").replace("?single", "")
+    matches = list(_MESSAGE_LINK_RE.finditer(cleaned))
+    if not matches:
+        return None
+
+    first = matches[0]
+    kind = first.group(1)
+    chat = first.group(2)
+    from_id = int(first.group(3))
+
+    if len(matches) >= 2:
+        to_id = int(matches[1].group(3))
+    else:
+        tail = cleaned[first.end():]
+        tail_match = re.match(r'^[\s-]*(\d+)', tail)
+        to_id = int(tail_match.group(1)) if tail_match else from_id
+
+    return kind, chat, from_id, to_id
+
+
 def save(client: pyrogram.client.Client, message: pyrogram.types.messages_and_media.message.Message):
     """Handle user text input during multi-step interactions"""
     bot = get_bot_instance()
@@ -242,13 +273,11 @@ def save(client: pyrogram.client.Client, message: pyrogram.types.messages_and_me
     # getting message
     elif "https://t.me/" in message.text:
 
-        datas = message.text.split("/")
-        temp = datas[-1].replace("?single", "").split("-")
-        fromID = int(temp[0].strip())
-        try:
-            toID = int(temp[1].strip())
-        except:
-            toID = fromID
+        parsed = _parse_message_range(message.text)
+        if parsed is None:
+            bot.send_message(message.chat.id, "**❌ 无效链接**", reply_to_message_id=message.id)
+            return
+        link_kind, chat_ref, fromID, toID = parsed
 
         # 统计转发结果
         total_messages = toID - fromID + 1
@@ -263,8 +292,8 @@ def save(client: pyrogram.client.Client, message: pyrogram.types.messages_and_me
         for msgid in range(fromID, toID+1):
 
             # private
-            if "https://t.me/c/" in message.text:
-                chatid = int("-100" + datas[4])
+            if link_kind == "c/":
+                chatid = int("-100" + chat_ref)
 
                 if acc is None:
                     bot.send_message(message.chat.id, f"**❌ 未设置 String Session**", reply_to_message_id=message.id)
@@ -279,8 +308,8 @@ def save(client: pyrogram.client.Client, message: pyrogram.types.messages_and_me
                     logger.warning(f"⚠️ 消息 {msgid} 转发失败: {type(e).__name__}: {e}")
 
             # bot
-            elif "https://t.me/b/" in message.text:
-                username = datas[4]
+            elif link_kind == "b/":
+                username = chat_ref
 
                 if acc is None:
                     bot.send_message(message.chat.id, f"**❌ 未设置 String Session**", reply_to_message_id=message.id)
@@ -295,7 +324,7 @@ def save(client: pyrogram.client.Client, message: pyrogram.types.messages_and_me
 
             # public
             else:
-                username = datas[3]
+                username = chat_ref
 
                 if msgid in public_handled_ids or msgid in public_skipped_ids:
                     continue
@@ -666,24 +695,10 @@ def _should_forward_private_media_group(message):
     if "?single" in text:
         return True
 
-    datas = text.split("/")
-    if len(datas) < 2:
+    parsed = _parse_message_range(text)
+    if parsed is None:
         return False
-
-    parts = datas[-1].replace("?single", "").split("-")
-    try:
-        if len(parts) == 1:
-            from_id = to_id = int(parts[0].strip())
-        elif len(parts) == 2:
-            from_id, to_id = (
-                int(parts[0].strip()),
-                int(parts[1].strip()),
-            )
-        else:
-            return False
-    except (TypeError, ValueError):
-        return False
-    return from_id == to_id
+    return parsed[2] == parsed[3]
 
 
 def _get_private_media_payload(item):

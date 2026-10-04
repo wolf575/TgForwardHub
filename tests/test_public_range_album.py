@@ -95,5 +95,47 @@ class PublicRangeAlbumTests(unittest.TestCase):
         self.assertIn("跳过: 1", summary)
 
 
+class MessageRangeParserTests(unittest.TestCase):
+    def test_hyphenated_short_range(self):
+        self.assertEqual(
+            messages._parse_message_range("https://t.me/kukutui2/52744-52752"),
+            ("", "kukutui2", 52744, 52752),
+        )
+
+    def test_hyphenated_full_second_link(self):
+        self.assertEqual(
+            messages._parse_message_range(
+                "https://t.me/kukutui2/52744-https://t.me/kukutui2/52752"
+            ),
+            ("", "kukutui2", 52744, 52752),
+        )
+
+    def test_space_separated_full_links(self):
+        self.assertEqual(
+            messages._parse_message_range(
+                "https://t.me/kukutui2/52744 https://t.me/kukutui2/52752"
+            ),
+            ("", "kukutui2", 52744, 52752),
+        )
+
+    def test_space_separated_short_id(self):
+        self.assertEqual(
+            messages._parse_message_range("https://t.me/kukutui2/52744 52752"),
+            ("", "kukutui2", 52744, 52752),
+        )
+
+    def test_single_link(self):
+        self.assertEqual(
+            messages._parse_message_range("https://t.me/kukutui2/52744"),
+            ("", "kukutui2", 52744, 52744),
+        )
+
+    def test_private_channel_link(self):
+        self.assertEqual(
+            messages._parse_message_range("https://t.me/c/123456789/100-120"),
+            ("c/", "123456789", 100, 120),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -86,8 +86,11 @@ def callback_handler(client: pyrogram.client.Client, callback_query: CallbackQue
 私有频道/群组（需要先加入）：
 `https://t.me/c/123456789/123`
 
-批量下载（范围）：
+批量转发（范围，`-` 或空格连接均可）：
 `https://t.me/username/100-120`
+`https://t.me/username/100 120`
+`https://t.me/username/100-https://t.me/username/120`
+`https://t.me/username/100 https://t.me/username/120`
 
 机器人消息：
 `https://t.me/b/botusername/123`
