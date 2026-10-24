@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-25
+
+### Changed
+
+- GHCR 镜像已改为公开，可直接匿名拉取 `ghcr.io/wolf575/tg-forward-hub:latest`
+- README 改为以公开镜像作为推荐部署方式，移除私有包登录和 Token 步骤
+- 重写功能说明、快速开始、Docker 部署、初始配置、使用示例和更新维护文档
+- 补充三种批量转发模式、Bot 链接区间格式、监控/记录/WebDAV 能力和数据安全说明
+- 新增文档索引 `docs/README.md`
+
 ## 2026-09-02
 
 ### Added

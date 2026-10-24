@@ -1,22 +1,30 @@
 # 更新摘要
 
-## 网页批量转发强制使用用户客户端
+## 网页批量转发模式
 
-本次更新移除了网页端批量转发中的 Bot 身份分支。网页任务从获取消息、解析聊天、发送到失败回退全部只使用已登录的用户客户端。
+网页批量转发以用户客户端为主，支持三种模式：
 
-### 复制模式顺序
+- `clone`：隐藏来源，优先使用 `messages.ForwardMessages(drop_author=True)`，失败后回退到缓存复制和下载重传。
+- `direct`：保留来源，使用 `forward_messages`。
+- `cache`：缓存发送，使用 `copy_message` / `copy_media_group`；受限时可配置 Bot 中转缓冲会话。
 
-`隐藏来源` 模式按以下顺序执行：
+`cache` 模式的 Bot 中转流程为：
 
-1. 用户客户端原生 `messages.ForwardMessages`，`drop_author=True`
-2. 用户客户端 `copy_message` / `copy_media_group`
-3. 用户客户端下载并重新上传
+```text
+来源 → Bot 缓冲会话 → 用户客户端隐藏转发 → 目标
+```
 
-`保留来源` 模式继续使用用户客户端的 `forward_messages`，失败后按用户客户端路径回退。媒体组始终整组处理，避免只转发第一项。
+中转会话必须是 Bot 和用户客户端都能访问的频道或群组，并给 Bot 发送消息的权限。媒体组始终按整组处理。
 
 ## Docker 配置
 
-Docker 部署不再创建 `.env`，也不使用 `--env-file .env`。凭据通过 Web UI 写入持久化的 `data/config/config.json`。
+项目提供公开镜像：
+
+```text
+ghcr.io/wolf575/tg-forward-hub:latest
+```
+
+镜像可以匿名拉取，不需要 GitHub Token。Docker 部署不再创建 `.env`，也不使用 `--env-file .env`。凭据通过 Web UI 写入持久化的 `data/config/config.json`。
 
 ```bash
 docker run -d \
@@ -28,5 +36,4 @@ docker run -d \
   ghcr.io/wolf575/tg-forward-hub:latest
 ```
 
-`DATA_DIR`、`PORT` 和 `TZ` 均使用容器内置默认值，默认时区为
-`Asia/Shanghai`，可在设置页修改。
+`DATA_DIR`、`PORT` 和 `TZ` 使用容器内置默认值，默认时区为 `Asia/Shanghai`，可在设置页修改。

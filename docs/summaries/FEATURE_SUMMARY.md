@@ -122,7 +122,7 @@
    - 添加 `watch_config.json` 到忽略列表
    - 添加 `.venv/` 到忽略列表
 
-3. **README.zh-CN.md**
+3. **README.md**
    - 添加监控功能使用说明
    - 添加命令列表
    - 更新功能介绍

@@ -1,345 +1,315 @@
-# 使用示例 | Usage Examples
+# 使用示例
 
-[中文](#中文示例) | [English](#english-examples)
+## 网页批量转发
 
----
+### 按消息 ID 转发
 
-## 中文示例
+场景：把来源频道第 `100` 到 `200` 条消息转发到目标频道。
 
-### 🎯 场景 1：转发公开频道内容
+1. 打开「批量转发」。
+2. 来源填写 `@source_channel` 或 `-100...`。
+3. 目标填写 `@target_channel`、`-100...` 或 `me`。
+4. 范围类型选择「消息 ID」。
+5. 开始填写 `100`，结束填写 `200`。
+6. 转发方式选择 `clone（隐藏来源）`。
+7. 点击「生成并执行」。
 
-假设你想转发一个公开频道的消息：
+### 按日期转发
 
-1. **复制消息链接**：在 Telegram 中打开消息，点击右上角菜单 → "复制链接"
-   ```
-   https://t.me/example_channel/123
-   ```
+场景：转发 `2026-09-01` 到 `2026-09-30` 的消息。
 
-2. **发送给机器人**：直接把链接发送给你的机器人
+1. 范围类型选择「时间」。
+2. 开始和结束使用日期选择器。
+3. 按需勾选「逆序转发」。
+4. 点击「生成并执行」。
 
-3. **接收内容**：机器人会自动转发该消息给你
+日期范围会转换为当天零点时间戳。执行前请查看网页显示的实际起止时间戳，确认边界符合预期。
 
-> 💡 **提示**：公开频道不需要 Session String
+### 排除广告消息
 
----
+如果消息文本包含 `广告`、`推广` 或 `#ad`，整条消息跳过：
 
-### 🔒 场景 2：转发私有频道内容
-
-对于私有频道，需要先加入频道：
-
-#### 方法 A：如果你的 Session String 账号已经加入了该频道
-
-直接发送消息链接即可：
+```text
+排除关键词：广告, 推广, #ad
 ```
+
+也可以使用正则：
+
+```text
+(?i)\b(?:广告|推广|spam)\b
+```
+
+每行填写一条正则。
+
+### 删除尾部署名
+
+只删除文本内容，不跳过整条消息：
+
+```text
+删除关键词：来源：
+删除正则：(?s)Powered by.*\Z
+```
+
+如果删除后只剩空文本且没有媒体，该消息会跳过。
+
+### 隐藏来源
+
+选择：
+
+```text
+clone（隐藏来源）
+```
+
+项目会优先尝试用户客户端原生隐藏转发，失败后回退到缓存复制或下载重传。目标频道不会显示原始来源。
+
+### 保留来源
+
+选择：
+
+```text
+direct（保留来源）
+```
+
+目标消息会显示 Telegram 的原始转发来源。
+
+### 受限来源使用缓存发送
+
+1. 转发方式选择 `cache（缓存发送）`。
+2. 准备一个 Bot 和用户客户端都能访问的频道或群组。
+3. 在「中转缓冲会话」填写该频道 ID 或邀请链接。
+4. 确认 Bot 有发送消息权限。
+
+处理流程：
+
+```text
+来源 → Bot 缓冲会话 → 用户客户端隐藏转发 → 目标
+```
+
+如果 Telegram 仍然拒绝缓存发送，项目会回退到下载后重新上传。
+
+### 媒体组
+
+链接或消息 ID 指向相册中的任意一项时，项目会识别整个媒体组并尽量整组转发。区间中后续属于同一媒体组的 ID 会被自动跳过，避免重复发送。
+
+## Bot 私聊链接
+
+### 公开频道单条消息
+
+```text
+https://t.me/example_channel/123
+```
+
+直接发送给 Bot，Bot 会取回该消息内容。
+
+### 私有频道单条消息
+
+```text
 https://t.me/c/1234567890/456
 ```
 
-#### 方法 B：如果还未加入
+要求用户客户端账号已经加入该频道。
 
-1. **先发送邀请链接**：
-   ```
-   https://t.me/+AbCdEfGhIjKlMn
-   ```
-   机器人会自动加入频道
+### Bot 聊天消息
 
-2. **然后发送消息链接**：
-   ```
-   https://t.me/c/1234567890/456
-   ```
-
-> ⚠️ **注意**：私有频道必须配置 Session String
-
----
-
-### 📦 场景 3：批量下载多条消息
-
-使用 "起始-结束" 格式批量下载：
-
-#### 公开频道批量下载
-```
-https://t.me/example_channel/100-110
-```
-这会下载从第100条到第110条的所有消息（共11条）
-
-#### 私有频道批量下载
-```
-https://t.me/c/1234567890/50-60
-```
-
-#### 支持空格
-```
-https://t.me/example_channel/100 - 110
-```
-中间的空格可有可无，两种格式都支持
-
----
-
-### 🤖 场景 4：转发机器人聊天内容
-
-某些机器人的消息需要使用特殊格式：
-
-```
+```text
 https://t.me/b/example_bot/789
 ```
 
-> 💡 **提示**：需要使用非官方客户端才能获取机器人消息的 ID
+需要 Session String。部分 Bot 聊天消息可能需要非官方客户端才能获取消息 ID。
 
----
+### 连续消息区间
 
-### 📸 场景 5：下载媒体组（相册）
+以下四种写法都支持：
 
-如果消息包含多张图片或视频（媒体组），使用 `?single` 参数：
-
-```
-https://t.me/example_channel/123?single
-```
-
-机器人会下载该消息中的所有媒体文件
-
----
-
-## 实际操作演示
-
-### 示例 1：转发单条公开频道消息
-
-```
-你: https://t.me/telegram/123
-
-机器人: [自动转发该消息的内容]
+```text
+https://t.me/example_channel/100-120
+https://t.me/example_channel/100 120
+https://t.me/example_channel/100-https://t.me/example_channel/120
+https://t.me/example_channel/100 https://t.me/example_channel/120
 ```
 
----
+私有频道区间示例：
 
-### 示例 2：加入私有频道并转发
-
-```
-你: https://t.me/+AbCdEfGhIjKlMn
-
-机器人: **Chat Joined**
-
-你: https://t.me/c/1234567890/100
-
-机器人: __Downloading__ : 45.2%
-机器人: __Uploaded__ : 78.9%
-机器人: [转发的内容]
+```text
+https://t.me/c/1234567890/100-120
 ```
 
----
+### 加入私有频道
 
-### 示例 3：批量下载10条消息
+如果用户客户端尚未加入私有频道，先发送邀请链接：
 
-```
-你: https://t.me/example_channel/1001-1010
-
-机器人: [自动依次转发10条消息]
-      消息ID 1001
-      消息ID 1002
-      ...
-      消息ID 1010
+```text
+https://t.me/+AbCdEfGhIjKlMn
 ```
 
----
+Bot 会尝试使用用户客户端加入。成功后，再发送私有消息链接。
 
-## English Examples
+## 实时监控
 
-### 🎯 Scenario 1: Forward Public Channel Content
+### 监控频道并转发到收藏夹
 
-To forward a message from a public channel:
+1. 在 Bot 中发送 `/watch`。
+2. 点击「添加监控」。
+3. 来源填写 `@source_channel`。
+4. 选择「转发模式」。
+5. 目标填写 `me`。
+6. 过滤规则选择「不设置」。
+7. 选择完整转发，按需保留来源。
+8. 保存任务。
 
-1. **Copy message link**: Open message in Telegram, tap menu → "Copy Link"
-   ```
-   https://t.me/example_channel/123
-   ```
+之后该频道的新消息会自动进入用户客户端收藏夹。
 
-2. **Send to bot**: Simply send the link to your bot
+### 监控个人收藏夹
 
-3. **Receive content**: Bot will automatically forward the message to you
+来源填写：
 
-> 💡 **Tip**: No Session String needed for public channels
-
----
-
-### 🔒 Scenario 2: Forward Private Channel Content
-
-For private channels, you need to join first:
-
-#### Method A: If your Session String account already joined
-
-Simply send the message link:
-```
-https://t.me/c/1234567890/456
+```text
+me
 ```
 
-#### Method B: If not yet joined
+可以把收藏夹中的新消息转发到目标频道，或进入记录模式。
 
-1. **First send invite link**:
-   ```
-   https://t.me/+AbCdEfGhIjKlMn
-   ```
-   Bot will automatically join the channel
+### 只转发重要消息
 
-2. **Then send message link**:
-   ```
-   https://t.me/c/1234567890/456
-   ```
+关键词白名单：
 
-> ⚠️ **Note**: Private channels require Session String configuration
-
----
-
-### 📦 Scenario 3: Batch Download Multiple Messages
-
-Use "start-end" format for batch download:
-
-#### Public channel batch
-```
-https://t.me/example_channel/100-110
-```
-This downloads messages from 100 to 110 (11 messages total)
-
-#### Private channel batch
-```
-https://t.me/c/1234567890/50-60
+```text
+重要, 紧急, 通知
 ```
 
-#### Spaces are allowed
-```
-https://t.me/example_channel/100 - 110
-```
-Spaces in between are optional, both formats work
+关键词黑名单：
 
----
-
-### 🤖 Scenario 4: Forward Bot Chat Content
-
-Some bot messages require special format:
-
-```
-https://t.me/b/example_bot/789
+```text
+测试, 广告
 ```
 
-> 💡 **Tip**: Requires unofficial client to get bot message IDs
+只有包含白名单关键词且不包含黑名单关键词的消息会被处理。
 
----
+### 提取消息中的链接
 
-### 📸 Scenario 5: Download Media Groups (Albums)
+转发模式选择「提取模式」，提取正则填写：
 
-If message contains multiple photos/videos (media group), use `?single` parameter:
-
-```
-https://t.me/example_channel/123?single
+```text
+https?://[^\s]+
 ```
 
-Bot will download all media files in that message
+如果一条消息包含多个链接，提取结果会去重后发送。
 
----
+### 提取验证码
 
-## Live Demo
+过滤关键词：
 
-### Example 1: Forward Single Public Channel Message
-
-```
-You: https://t.me/telegram/123
-
-Bot: [Automatically forwards the message content]
+```text
+验证码, code
 ```
 
----
+提取正则：
 
-### Example 2: Join Private Channel and Forward
-
-```
-You: https://t.me/+AbCdEfGhIjKlMn
-
-Bot: **Chat Joined**
-
-You: https://t.me/c/1234567890/100
-
-Bot: __Downloading__ : 45.2%
-Bot: __Uploaded__ : 78.9%
-Bot: [Forwarded content]
+```text
+\d{4,6}
 ```
 
----
+只有匹配过滤规则的消息会进入提取流程。
 
-### Example 3: Batch Download 10 Messages
+### 自动补全磁力链接
 
+在监控任务设置中启用「DN 补全」。项目会为缺少 `dn` 参数的磁力链接补全文件名，方便下载工具识别。
+
+## 记录模式
+
+### 保存频道内容到网页笔记
+
+1. 打开 `/watch`。
+2. 添加监控。
+3. 输入来源频道。
+4. 选择「记录模式」。
+5. 设置过滤规则。
+6. 保存。
+
+之后消息会出现在网页「笔记」页，不会发送到目标聊天。
+
+### 搜索和筛选笔记
+
+在笔记页支持：
+
+- 按文本或来源搜索
+- 按开始日期和结束日期筛选
+- 按来源筛选
+- 只看收藏
+- 分页浏览
+
+搜索结果中的关键词会高亮显示。
+
+### 启用 WebDAV
+
+在「设置 → WebDAV 存储」中填写：
+
+```text
+WebDAV URL
+用户名
+密码
+基础路径
 ```
-You: https://t.me/example_channel/1001-1010
 
-Bot: [Automatically forwards 10 messages in sequence]
-      Message ID 1001
-      Message ID 1002
-      ...
-      Message ID 1010
+可以选择是否保留本地副本。保存后，记录模式的媒体会使用 WebDAV 存储。
+
+## 观看网站
+
+在「设置 → 观看网站」中填写带查询参数的基础 URL，例如：
+
+```text
+https://example.com/watch?dn=
 ```
 
----
+笔记中有磁力链接时，页面可以提供跳转到观看站的入口。
 
-## 注意事项 | Important Notes
+## 批量任务历史
 
-### ⚠️ 限制 | Limitations
+「批量转发」页下方的命令历史会保存：
 
-1. **速率限制**：批量下载时，每条消息间隔3秒，避免触发 Telegram 限制
-2. **文件大小**：受 Telegram API 限制，超大文件可能下载失败
-3. **私有内容**：需要确保 Session String 对应的账号有权限访问
+- 任务名
+- 来源和目标
+- 范围
+- 转发模式
+- 过滤规则
+- 任务状态
+- 最近日志
 
-### 🔒 隐私与安全 | Privacy & Security
+点击历史任务可以恢复表单参数，便于重复执行或调整后再次运行。
 
-1. **Session String 相当于账号密码**，请妥善保管
-2. **建议使用小号**生成 Session String
-3. **不要分享配置文件**（`data/config/config.json`、Session String）
-4. **定期检查登录设备**，及时删除异常会话
+## 常见错误
 
-### 💡 最佳实践 | Best Practices
+### 用户客户端未初始化
 
-1. **测试链接**：先用单条消息测试，确认可用后再批量下载
-2. **合理使用**：避免频繁大量下载，遵守 Telegram 服务条款
-3. **备份配置**：保存好 Session String，避免重复生成
-4. **及时更新**：关注项目更新，获取新功能和修复
+完成 Web UI 中的 Telegram 用户账号授权。网页批量转发和监控不能只依赖 Bot Token。
 
----
+### 私有频道无法访问
 
-## 故障排除 | Troubleshooting
+确认用户客户端账号已经加入该频道，或先发送邀请链接让账号加入。
 
-### ❌ "String Session is not Set"
+### 缓存发送失败
 
-**原因**：未配置 Session String 或配置错误
+Telegram 是否允许缓存复制由服务端决定。可以尝试：
 
-**解决**：
-1. 运行 `python setup.py` 重新配置
-2. 在 Web UI 设置页确认用户客户端已连接；如需检查持久化配置，可查看
-   `data/config/config.json`，但不要手工公开或分享其中的 Session String
-3. 如果只转发公开内容，可忽略此错误
+- 使用 `clone` 模式
+- 配置 Bot 中转缓冲会话
+- 使用下载后重传
 
----
+### FloodWait
 
-### ❌ "The username is not occupied by anyone"
+项目会自动等待 Telegram 返回的限流时间。不要同时运行多个使用同一 Bot Token 的实例。
 
-**原因**：频道用户名不存在或拼写错误
+### 消息重复
 
-**解决**：
-1. 检查链接是否正确
-2. 确认频道是否存在
-3. 尝试在 Telegram 中打开该链接验证
+确认只有一个容器或进程使用该 Bot Token，并检查是否有旧容器仍在运行：
 
----
+```bash
+docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+```
 
-### ❌ "Error : ..."
-
-**原因**：各种可能的错误（权限、网络等）
-
-**解决**：
-1. 查看详细错误信息
-2. 确认 Session String 账号有访问权限
-3. 检查网络连接
-4. 查看 Docker 日志：`docker-compose logs -f`
-
----
-
-## 更多帮助 | More Help
+## 相关文档
 
 - [快速开始](QUICKSTART.md)
-- [详细设置指南](SETUP_GUIDE.md)
-- [完整文档](README.md)
-- [提交问题](https://github.com/bipinkrish/Save-Restricted-Bot/issues)
+- [Docker 部署](DOCKER_SETUP.md)
+- [初始配置](SETUP_GUIDE.md)
+- [功能说明](../../FEATURES.md)

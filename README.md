@@ -1,97 +1,178 @@
 # TG Forward Hub
 
-TG Forward Hub 是一个把「网页端批量转发」和「Telegram 自动监控/记录」合并在一起的 Pyrogram 转发中心。项目不再调用外部 `tdl` CLI，而是直接使用 Pyrogram 完成 Telegram 消息获取、转发和复制；同时保留命令构建器的网页表单、任务范围和命令历史，以及 Save-Restricted-Bot 的实时监控、记录模式、WebDAV 存储和校准能力。
+[![Public GHCR image](https://img.shields.io/badge/GHCR-public-2496ED?logo=docker&logoColor=white)](https://github.com/wolf575/TgForwardHub/pkgs/container/tg-forward-hub)
+[![GitHub](https://img.shields.io/badge/GitHub-wolf575%2FTgForwardHub-181717?logo=github)](https://github.com/wolf575/TgForwardHub)
+
+TG Forward Hub 是一个把 **网页端批量转发** 和 **Telegram 自动监控/记录** 合并在一起的 Pyrogram 转发中心。
+
+项目直接使用 Pyrogram 完成消息读取、缓存复制、隐藏来源转发和受限媒体下载重传，同时提供 Flask Web 管理页、Bot 私聊链接转发、监控任务、记录笔记、WebDAV 存储和磁力链接校准能力。
+
+> 公共镜像：`ghcr.io/wolf575/tg-forward-hub:latest`
+>
+> 无需 GitHub 登录，无需 `read:packages` Token。
+
+## 快速开始
+
+推荐使用已经发布的公开 Docker 镜像。服务器需要安装 Docker，并能够访问 Telegram API。
+
+```bash
+mkdir -p /docker-data/tfh/data /docker-data/tfh/downloads
+
+docker pull ghcr.io/wolf575/tg-forward-hub:latest
+
+docker rm -f tg-forward-hub 2>/dev/null || true
+
+docker run -d \
+  --name tg-forward-hub \
+  --restart unless-stopped \
+  -p 10001:10000 \
+  -v /docker-data/tfh/data:/app/data \
+  -v /docker-data/tfh/downloads:/app/downloads \
+  ghcr.io/wolf575/tg-forward-hub:latest
+```
+
+打开 `http://服务器IP:10001`，使用默认账号 `admin` / `admin` 登录，然后：
+
+1. 立即在「设置 → 账号与密码」修改管理员密码。
+2. 填写 Bot Token、API ID 和 API Hash。
+3. 填写 Telegram 手机号，完成验证码和两步验证，生成 Session String。
+4. 等待「Telegram Bot」和「用户客户端」状态变为已连接。
+
+配置保存在宿主机的 `/docker-data/tfh/data`，重建容器不会丢失。项目不需要 `.env`，也不要添加 `--env-file .env`。
+
+更完整的部署说明见 [Docker 部署指南](docs/guides/DOCKER_SETUP.md)。
 
 ## 功能特性
 
-### 批量转发
+### 网页端批量转发
 
-- 支持来源聊天和目标聊天，可使用数字 ID 或可解析的 `@username` / 邀请链接。
-- 支持按消息 ID 范围转发，也支持按开始日期、结束日期转发。
-- 支持正序和倒序处理，适合把旧频道内容镜像到新频道。
-- 支持关键词和正则排除：命中规则的消息直接跳过，正则按每行一条填写。
-- 支持关键词和正则删除：在转发前删除命中的文本，适用于去掉广告、赞助或尾部署名。
-- 批量转发只使用用户客户端；受限私聊无法缓存复制时，自动整组下载后重传，避免媒体组只发送第一项。
-- 支持两种转发方式：
-  - `保留来源`：使用 `forward_messages` 保留原消息的来源签名。
-  - `隐藏来源`：优先使用用户客户端原生的 `messages.ForwardMessages`
-    `drop_author=True` 路径保留 Telegram 缓存媒体并隐藏原来源；失败后再回退到缓存复制和下载重传，全程不使用 Bot 身份。
-- 任务实时展示进度、成功、失败和跳过数量，可取消任务。
-- 命令历史持久化到 `data/history.db`，刷新页面后仍可查看历史任务。
+- 支持数字 ID、`@username` 和可解析的频道/群组引用。
+- 支持按消息 ID 范围或日期范围选择消息。
+- 支持正序和逆序处理。
+- 支持排除关键词、排除正则、删除关键词和删除正则。
+- 支持媒体组整组处理，避免相册只发出第一项。
+- 支持实时进度、成功/失败/跳过统计、任务取消和命令历史。
+- 历史任务保存在 `data/history.db`，刷新页面或重启服务后仍可查看。
+
+### 三种批量转发模式
+
+| 模式 | 行为 | 适用场景 |
+| --- | --- | --- |
+| `clone` | 隐藏来源。优先使用 `messages.ForwardMessages(drop_author=True)`，失败后尝试缓存复制和下载重传 | 默认模式，希望目标频道看不到原来源 |
+| `direct` | 保留来源。使用 `forward_messages` | 需要显示“Forwarded from” |
+| `cache` | 缓存发送。使用 `copy_message` / `copy_media_group`，受限时可配置 Bot 中转缓冲会话 | 希望复用 Telegram 缓存，减少下载和上传 |
+
+网页批量转发以用户客户端为主。只有 `cache` 模式且填写了「中转缓冲会话」时，受限来源才可能使用 Bot 中转：`来源 → 缓冲会话 → 目标`。
+
+### Bot 私聊链接转发
+
+直接给 Bot 发送 Telegram 消息链接即可取回内容。
+
+```text
+https://t.me/channel_name/123
+https://t.me/c/1234567890/456
+https://t.me/b/example_bot/789
+```
+
+支持以下区间写法：
+
+```text
+https://t.me/channel_name/100-120
+https://t.me/channel_name/100 120
+https://t.me/channel_name/100-https://t.me/channel_name/120
+https://t.me/channel_name/100 https://t.me/channel_name/120
+```
+
+公开内容通常可以由 Bot 直接处理。私有频道、Bot 聊天或受限内容的回退路径需要先配置 Session String。
 
 ### 实时监控与自动转发
 
-- 为多个 Telegram 用户账号分别配置监控源和目标聊天。
-- 支持关键词白名单、黑名单、正则白名单、正则黑名单。
-- 支持完整转发、内容提取、记录模式等处理方式。
-- 媒体组去重、FloodWait 自动等待与重试、无效 Peer 自动跳过。
-- 支持监控配置的 Web API 与页面管理。
+- 监控频道、群组、私聊和 `me`（个人收藏夹）。
+- 一个来源可以配置多个目标。
+- 支持完整转发和内容提取。
+- 支持关键词白名单/黑名单、正则白名单/黑名单。
+- 支持保留来源、自动补全磁力链接 `dn` 参数。
+- 支持记录模式，把消息保存到网页笔记。
+- 支持媒体组去重、FloodWait 自动等待、无效 Peer 跳过和失败重试。
 
-### 记录与媒体管理
+### 记录、媒体与校准
 
-- 笔记记录模式，可收藏、编辑、删除和管理 Telegram 消息内容。
-- 支持磁力链接提取、文件名校准和观看站跳转。
+- 笔记支持搜索、日期筛选、来源筛选、收藏、编辑和删除。
 - 支持本地媒体存储和 WebDAV 远程存储。
-- 支持自动校准任务队列和后台调度。
+- 支持磁力链接提取、文件名校准和观看站跳转。
+- 支持自动校准队列、重试策略、并发数和后台调度。
 
-### 网页端
+### Web 管理与运行设置
 
-- 统一 Flask 页面：批量转发、实时监控、记录笔记、系统设置。
-- Telegram 初始配置、修改密码、WebDAV、自动校准和观看网站配置全部嵌入统一设置页，不再跳转到旧项目页面。
-- 设置页会显示网页端、Bot 和用户客户端状态；网页与 Bot 共享配置和数据库，可同时操作。
-- 内置深色、浅色、青蓝、暖金四种主题，选择会保存在浏览器本地。
-- 默认管理员账号：`admin` / `admin`，首次登录后建议在管理页面修改密码。
-- 内置 Telegram 配置向导，可填写 Bot Token、API ID、API Hash，并通过手机号验证码和两步验证生成 String Session。
+- 统一管理批量转发、实时监控、记录笔记和系统设置。
+- 内置 Bot Token、API ID、API Hash 和 Session String 配置向导。
+- 显示网页端、Bot、用户客户端和监控源状态。
+- 支持深色、浅色、青蓝、暖金四种主题。
+- 支持修改时区、管理员账号、密码和批量转发完成通知。
 
-## 技术栈
+## 首次配置
 
-- Python 3.9+
-- Flask + Flask-Login
-- Pyrogram + TgCrypto
-- SQLite
-- Docker / Docker Compose
+### 获取 Telegram 凭据
 
-## 目录结构
+1. 在 Telegram 联系 `@BotFather`，使用 `/newbot` 创建 Bot，取得 Bot Token。
+2. 登录 [my.telegram.org](https://my.telegram.org)，创建应用，取得 API ID 和 API Hash。
+3. 准备用于用户客户端的 Telegram 手机号。
 
-```text
-TgForwardHub/
-├── app.py                 # Flask Web 与统一 API
-├── batch_forward.py       # 批量转发任务服务
-├── main.py                # Pyrogram Bot/User 客户端启动入口
-├── config.py              # 配置读写
-├── database.py            # SQLite 数据库
-├── web_setup.py           # Telegram Session 网页配置向导
-├── bot/                   # 自动转发、记录、校准、WebDAV
-├── static/                # 合并后的前端资源
-├── templates/             # 网页模板
-├── Dockerfile
-├── docker-compose.yml
-├── docker-run.ps1         # Windows 一键 docker run
-├── docker-run.sh          # Linux/macOS 一键 docker run
-└── config.json.example    # Web UI 配置格式参考
-```
+### 在网页中完成授权
 
-## 准备 Telegram 凭据
+1. 打开 Web 页面并使用 `admin` / `admin` 登录。
+2. 进入「设置 → 初始配置 / Session String」。
+3. 填写 Bot Token、API ID、API Hash。
+4. 填写手机号，点击「发送验证码并生成 Session String」。
+5. 输入 Telegram 验证码；如开启两步验证，再输入两步验证密码。
+6. 保存后等待 Bot 和用户客户端自动启动。
 
-运行项目前需要准备以下信息：
+Session String 等同于 Telegram 账号登录凭据。不要把 `data/config/config.json`、Session 文件或 WebDAV 密码提交到 Git、发给他人或放进公开 Issue。
 
-| 变量 | 说明 | 必填 |
-| --- | --- | --- |
-| `TOKEN` | Bot Token，从 `@BotFather` 获取 | 是 |
-| `ID` | Telegram API ID | 是 |
-| `HASH` | Telegram API Hash | 是 |
-| `STRING` | 用户账号 Session String | 自动转发、批量转发的用户客户端需要 |
-| `FLASK_SECRET_KEY` | Flask Session 加密密钥，生产环境必须修改 | 建议 |
+## 使用教程
 
-> 也可以通过网页端「设置」页生成 Session String，不必手动复制长字符串。
-> Docker 内置 `DATA_DIR=/app/data`、`PORT=10000`、`TZ=Asia/Shanghai`
-> 默认值，日常运行不需要重复传入。时区可以在网页端「设置」页修改。
+### 网页批量转发
 
-## 本地运行
+1. 打开「批量转发」标签。
+2. 填写来源 ID 和目标 ID。
+3. 选择消息 ID 范围或日期范围。
+4. 选择 `clone`、`direct` 或 `cache`。
+5. 按需填写中转缓冲会话、排除规则和删除规则。
+6. 点击「生成并执行」，在右侧查看进度和日志。
+
+日期范围按本地日期选择，后端会转换为时间戳查询。逆序转发适合把旧内容按从新到旧的顺序镜像到新频道。
+
+### 添加监控任务
+
+1. 在 Bot 中发送 `/watch`，或点击「监控管理」。
+2. 选择「添加监控」。
+3. 输入来源：频道 ID、`@username`、转发消息，或输入 `me` 监控个人收藏夹。
+4. 选择记录模式或转发模式。
+5. 填写目标、过滤规则、提取规则和来源保留选项。
+6. 保存后，新消息会进入后台队列处理。
+
+### 查看记录笔记
+
+在 Web 页面打开「笔记」，可以按内容、来源、日期和收藏状态筛选。记录模式保存的媒体会进入本地 `data/media`，启用 WebDAV 后可同步到远程存储。
+
+更多示例见 [使用示例](docs/guides/USAGE_EXAMPLES.md)。
+
+## 其他部署方式
+
+### Docker Compose 从源码构建
 
 ```bash
+git clone https://github.com/wolf575/TgForwardHub.git
 cd TgForwardHub
+docker compose up -d --build
+docker compose logs -f
+```
 
+默认访问地址为 `http://服务器IP:10000`。Compose 只声明端口、数据目录和基础环境，不读取 Bot 凭据，也不需要 `.env`。
+
+### 本地 Python 运行
+
+```bash
 python -m venv .venv
 
 # Windows PowerShell
@@ -104,52 +185,31 @@ pip install -r requirements.txt
 python run.py
 ```
 
-浏览器打开 `http://127.0.0.1:10000`。
+打开 `http://127.0.0.1:10000`，在 Web 设置页完成 Telegram 配置。
 
-本地运行时可以先登录 Web UI，再进入「设置 → 初始配置」保存 Bot 凭据并生成 Session String。后台 Bot 线程会每 10 秒检查一次配置，配置完成后自动启动。
+## 数据目录
 
-## Docker Compose 部署
+| 路径 | 内容 |
+| --- | --- |
+| `data/config/config.json` | Bot Token、API ID、API Hash、Session String |
+| `data/config/watch_config.json` | 监控任务 |
+| `data/config/app_settings.json` | 时区、通知等运行设置 |
+| `data/config/webdav_config.json` | WebDAV 配置 |
+| `data/notes.db` | 记录笔记和校准任务 |
+| `data/history.db` | 批量转发历史 |
+| `data/media/` | 记录模式媒体 |
+| `downloads/` | 受限媒体下载重传时的临时文件 |
 
-```bash
-cd TgForwardHub
+公开镜像只包含程序，不包含用户配置、Session、数据库或媒体。升级前建议备份 `data/` 和 `downloads/`。
 
-docker compose up -d --build
-docker compose logs -f
-```
+## 更新与回滚
 
-打开 `http://服务器IP:10000`。
-
-默认账号为 `admin` / `admin`。
-
-## Docker Run 部署
-
-项目已经准备好了“零配置启动”：
-
-1. 先用 `docker run` 把容器跑起来。
-2. 打开 Web 页面，登录 `admin` / `admin`。
-3. 进入「设置」页，在统一表单中填写 Bot Token、API ID、API Hash，并生成 Session String。
-4. 配置会持久化到 `/app/data/config/config.json`，重启容器不会丢失。
-
-你不需要提前创建 `.env` 文件，也不需要把 `TOKEN`、`ID`、`HASH`、`STRING`
-写在 Docker 环境变量或 Compose 配置里。
-
-> `docker run` 命令中不要添加 `--env-file .env`。云端容器通过 Web UI 初始化
-> 凭据，不使用宿主机 `.env`；添加该参数会因为没有这个文件而直接报错：
-> `docker: --env-file: open .env: no such file or directory`。
-
-### 使用云端镜像
-
-如果你不想在服务器上重新构建，可以直接使用 GitHub Container Registry 上的镜像：
+使用公开镜像更新时，保留原来的挂载目录即可：
 
 ```bash
 docker pull ghcr.io/wolf575/tg-forward-hub:latest
-```
+docker rm -f tg-forward-hub
 
-> GHCR 包默认是私有的。如果不想在服务器上登录，可以在 GitHub Packages 页面把 `tg-forward-hub` 的可见性改为 Public；否则先执行 `docker login ghcr.io -u wolf575`，再粘贴一个具有 `read:packages` 权限的 token。
-
-在服务器上运行，并把宿主机端口改成 `10001`：
-
-```bash
 docker run -d \
   --name tg-forward-hub \
   --restart unless-stopped \
@@ -159,59 +219,19 @@ docker run -d \
   ghcr.io/wolf575/tg-forward-hub:latest
 ```
 
-容器内 Web 服务继续监听 `10000`，宿主机通过 `10001` 访问。打开 `http://服务器IP:10001` 即可。
+工作流同时发布 `sha-<commit>` 标签，需要固定版本时可以使用对应的 SHA 标签。完整说明见 [更新与维护指南](docs/UPDATE_GUIDE.md)。
 
-### Windows PowerShell
+## 文档
 
-```powershell
-cd TgForwardHub
-
-.\docker-run.ps1
-```
-
-### Linux / macOS
-
-```bash
-cd TgForwardHub
-
-chmod +x docker-run.sh
-./docker-run.sh
-```
-
-### 手动执行 docker run
-
-```bash
-docker build -t tg-forward-hub .
-
-docker run -d \
-  --name tg-forward-hub \
-  --restart unless-stopped \
-  -p 10000:10000 \
-  -v "$(pwd)/data:/app/data" \
-  -v "$(pwd)/downloads:/app/downloads" \
-  tg-forward-hub
-```
-
-Windows PowerShell 手动执行时，将 `$(pwd)` 替换为实际绝对路径：
-
-```powershell
-docker run -d `
-  --name tg-forward-hub `
-  --restart unless-stopped `
-  -p 10000:10000 `
-  -v "C:\path\to\TgForwardHub\data:/app/data" `
-  -v "C:\path\to\TgForwardHub\downloads:/app/downloads" `
-  tg-forward-hub
-```
-
-## 初始配置
-
-1. 打开 `http://服务器IP:10000`。
-2. 使用 `admin` / `admin` 登录。
-3. 进入「设置」标签，在设置页填写 Bot Token、API ID、API Hash。
-4. 点击「发送验证码并生成 Session String」，输入 Telegram 手机号。
-5. 输入 Telegram 收到的验证码；如账号开启两步验证，再输入两步验证密码。
-6. 配置完成后，后台 Bot 和用户客户端会自动启动。
+| 文档 | 内容 |
+| --- | --- |
+| [文档索引](docs/README.md) | 全部文档导航 |
+| [快速开始](docs/guides/QUICKSTART.md) | 最短部署和首次配置流程 |
+| [Docker 部署](docs/guides/DOCKER_SETUP.md) | 公共镜像、Compose、端口、持久化和更新 |
+| [初始配置](docs/guides/SETUP_GUIDE.md) | Bot Token、API ID、Session String 和安全说明 |
+| [使用示例](docs/guides/USAGE_EXAMPLES.md) | 批量转发、监控、记录和链接格式示例 |
+| [功能说明](FEATURES.md) | 当前功能、配置字段和限制 |
+| [更新与维护](docs/UPDATE_GUIDE.md) | 备份、升级、迁移和回滚 |
 
 ## 主要接口
 
@@ -221,23 +241,67 @@ docker run -d `
 | `GET` | `/api/batch-forward/<job_id>` | 查询任务进度 |
 | `POST` | `/api/batch-forward/<job_id>/cancel` | 取消任务 |
 | `GET/POST/DELETE` | `/api/history` | 查看、保存或清空命令历史 |
-| `GET/POST` | `/api/watch-config` | 查看或保存实时监控规则 |
+| `GET/POST` | `/api/watch-config` | 查看或保存监控规则 |
 | `PUT/DELETE` | `/api/watch-config/<path>` | 更新或删除单条监控规则 |
 | `GET` | `/api/notes` | 获取记录笔记 |
 | `GET` | `/api/status` | 获取运行状态 |
 | `GET` | `/api/sources` | 获取可用来源信息 |
 
-## 数据与安全
+## 技术栈与目录
 
-- Docker 部署不依赖 `.env`；`config.json` 和 Session 文件已加入 `.gitignore` 与 `.dockerignore`，不会提交到 Git，也不会进入 Docker 镜像。
-- 持久化数据保存在宿主机 `data` 目录，下载媒体保存在 `downloads` 目录。
-- 公网部署时务必修改 `FLASK_SECRET_KEY` 和管理员密码。
-- Telegram 登录凭据和 Session String 具有账号控制权限，请勿泄露。
+- Python 3.9+
+- Flask + Flask-Login
+- Pyrogram + TgCrypto
+- SQLite
+- Docker / Docker Compose
+
+```text
+TgForwardHub/
+├── app.py                 # Flask Web 与统一 API
+├── batch_forward.py       # 批量转发任务服务
+├── main.py                # Pyrogram Bot/User 客户端启动入口
+├── config.py              # 配置读写
+├── database.py            # SQLite 数据库
+├── web_setup.py           # Telegram Session 网页配置向导
+├── bot/                   # 自动转发、记录、校准、WebDAV
+├── static/                # 前端资源
+├── templates/             # 网页模板
+├── docs/                  # 部署、配置和使用文档
+├── Dockerfile
+├── docker-compose.yml
+├── docker-run.ps1         # Windows 一键 docker run
+└── docker-run.sh          # Linux/macOS 一键 docker run
+```
 
 ## 常见问题
 
-- **页面能打开，但批量转发提示用户客户端未初始化**：先在「设置」中完成 Telegram 用户账号授权并生成 String Session，然后重启容器或服务。
-- **实时监控没有触发**：检查监控源是否已经加入配置、目标账号是否有权访问源聊天，以及黑白名单是否把消息过滤掉了。
-- **Docker 镜像构建慢**：首次构建需要安装依赖；第二次构建会使用缓存。
-- **提示 FloodWait**：项目会自动等待 Telegram 限流时间并重试，不必手动处理。
-- **`docker run` 报 `--env-file: open .env: no such file or directory`**：删除命令中的 `--env-file .env`，不需要提前创建 `.env`。
+**`docker pull` 提示 `unauthorized` 或仍要求登录**
+
+先确认镜像名是 `ghcr.io/wolf575/tg-forward-hub:latest`。旧的 GHCR 登录凭据可能仍保存在本机，可以执行 `docker logout ghcr.io` 后再匿名拉取。
+
+**页面能打开，但批量转发提示用户客户端未初始化**
+
+在「设置」中完成 Telegram 用户账号授权并生成 Session String，然后重启容器或服务。
+
+**实时监控没有触发**
+
+检查监控源是否存在、用户账号是否已加入来源聊天、目标是否有发送权限，以及黑白名单是否把消息过滤掉。
+
+**提示 FloodWait**
+
+项目会自动等待 Telegram 限流时间并重试。不要同时启动多个使用同一个 Bot Token 的实例，否则可能出现重复处理。
+
+**Apple Silicon 或其他 ARM 设备无法直接运行镜像**
+
+当前公开镜像发布为 `linux/amd64`。ARM 设备可以在仓库目录执行 `docker build -t tg-forward-hub .` 本地构建。
+
+**如何重置配置**
+
+优先在 Web UI 中重新填写。如果必须彻底重置，停止容器后删除持久化目录中的 `data/config/config.json`，再启动容器重新初始化。
+
+## 反馈
+
+- Issues: [wolf575/TgForwardHub Issues](https://github.com/wolf575/TgForwardHub/issues)
+- 仓库: [wolf575/TgForwardHub](https://github.com/wolf575/TgForwardHub)
+
+使用本项目时请遵守 Telegram 服务条款和所在地区的法律法规，只处理你有权访问和转发的内容。
