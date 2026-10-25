@@ -59,9 +59,9 @@ cloudflare-worker/
 
 单条链接和区间链接都交给 Container 处理，因此可以识别并完整复制相册。Worker 只负责 Webhook、白名单、链接解析和把完整任务提交给 Container，不再拆分区间、维护转发队列或发送完成汇总。
 
-Worker 始终通过固定的 `CONTAINER_INSTANCE_ID` 访问同一个逻辑 Container，避免多个 Telegram Bot 客户端并行运行。当前值是 `singleton-v7`。如果更新了 Container 镜像，需要把这个值递增为 `singleton-v8`、`singleton-v9`，强制 Durable Object 启动新镜像。
+Worker 始终通过固定的 `CONTAINER_INSTANCE_ID` 访问同一个逻辑 Container，避免多个 Telegram Bot 客户端并行运行。当前值是 `singleton-v8`。如果更新了 Container 镜像或实例规格，需要把这个值递增为 `singleton-v9`、`singleton-v10`，强制 Durable Object 启动新实例。
 
-Container 实例类型为 `standard-1`（约 0.5 vCPU、4 GiB 内存），并使用 1 小时空闲保活。
+Container 实例类型为 `standard-4`（4 vCPU、12 GiB 内存、20 GB 磁盘），并使用 1 小时空闲保活。
 
 ### 为什么单相册链接需要 Container
 
@@ -123,7 +123,7 @@ const CODE_CONFIG = Object.freeze({
   MAX_RANGE_MESSAGES: 10000,
   CONTAINER_PORT: 8080,
   CONTAINER_INACTIVITY_MS: 60 * 60 * 1000,
-  CONTAINER_INSTANCE_ID: "singleton-v7",
+  CONTAINER_INSTANCE_ID: "singleton-v8",
 });
 ```
 

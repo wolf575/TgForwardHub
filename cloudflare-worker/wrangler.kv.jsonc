@@ -64,6 +64,6 @@
     "STORAGE_BACKEND": "auto",
     "MAX_RANGE_MESSAGES": "10000",
     "CONTAINER_INACTIVITY_MS": "3600000",
-    "CONTAINER_INSTANCE_ID": "singleton-v7"
+    "CONTAINER_INSTANCE_ID": "singleton-v8"
   }
 }

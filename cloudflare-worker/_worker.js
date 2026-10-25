@@ -17,7 +17,7 @@ const CODE_CONFIG = Object.freeze({
   MAX_RANGE_MESSAGES: 10000,
   CONTAINER_PORT: 8080,
   CONTAINER_INACTIVITY_MS: 60 * 60 * 1000,
-  CONTAINER_INSTANCE_ID: "singleton-v7",
+  CONTAINER_INSTANCE_ID: "singleton-v8",
 });
 
 const TELEGRAM_API_BASE = "https://api.telegram.org";
@@ -852,7 +852,7 @@ function resolveConfig(env = {}) {
       Number.isFinite(containerInactivityMs) && containerInactivityMs > 0
         ? containerInactivityMs
         : 60 * 60 * 1000,
-    containerInstanceId: pick("CONTAINER_INSTANCE_ID") || "singleton-v7",
+    containerInstanceId: pick("CONTAINER_INSTANCE_ID") || "singleton-v8",
   };
 }
 
@@ -2312,7 +2312,7 @@ export class BotContainer extends DurableObject {
     if (!container.running) {
       container.start({
         image: container.images.base,
-        instance: "standard-1",
+        instance: "standard-4",
         enableInternet: true,
         env: {
           BOT_TOKEN: config.botToken,
