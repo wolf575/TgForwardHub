@@ -690,10 +690,8 @@ def _download_private_media_group(
 
 
 def _should_forward_private_media_group(message):
-    """Mirror the public-link rule for deciding whether to use the album."""
+    """Use the album when the link points to one message, not a range."""
     text = getattr(message, "text", "") or ""
-    if "?single" in text:
-        return True
 
     parsed = _parse_message_range(text)
     if parsed is None:

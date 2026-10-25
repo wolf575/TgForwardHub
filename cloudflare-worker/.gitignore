@@ -1,0 +1,8 @@
+.wrangler/
+.wrangler-dry-run/
+.wrangler-kv-dry-run/
+.wrangler-*.d.ts
+.dev.vars
+node_modules/
+__pycache__/
+*.pyc

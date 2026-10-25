@@ -1,0 +1,71 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "tg-forward-hub-worker",
+  "main": "_worker.js",
+  "compatibility_date": "2026-10-25",
+  "workers_dev": true,
+  "preview_urls": true,
+  "observability": {
+    "enabled": true
+  },
+  "limits": {
+    "cpu_ms": 300000
+  },
+  "routes": [
+    {
+      "pattern": "tgzf.cite.us.ci",
+      "zone_name": "cite.us.ci",
+      "custom_domain": true,
+      "enabled": true,
+      "previews_enabled": false
+    }
+  ],
+  "triggers": {
+    "crons": []
+  },
+
+  // Single Container instance: Telegram bot sessions must not run in parallel.
+  "containers": [
+    {
+      "class_name": "BotContainer",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "base": {
+          "dockerfile": "./container/Dockerfile"
+        }
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "BOT_CONTAINER",
+        "class_name": "BotContainer"
+      }
+    ]
+  },
+  "exports": {
+    "BotContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+
+  // D1 mode. Replace database_id with the ID from `wrangler d1 create`.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "tg-forward-hub-worker",
+      "database_id": "a6a51b89-c08d-49e8-8779-07dc55b912b6"
+    }
+  ],
+
+  "vars": {
+    "ADMIN_ID": "6297561544",
+    "WEB_ADMIN_USER": "admin",
+    "STORAGE_BACKEND": "auto",
+    "MAX_RANGE_MESSAGES": "10000",
+    "CONTAINER_INACTIVITY_MS": "3600000",
+    "CONTAINER_INSTANCE_ID": "singleton-v7"
+  }
+}

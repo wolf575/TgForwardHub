@@ -46,6 +46,34 @@ class _PublicBot:
 
 
 class PublicRangeAlbumTests(unittest.TestCase):
+    def test_single_query_link_still_copies_the_complete_album(self):
+        album = [
+            _PublicMessage(message_id, "single-query-album")
+            for message_id in range(55260, 55263)
+        ]
+        bot = _PublicBot({message.id: message for message in album})
+        command = type(
+            "_Command",
+            (),
+            {
+                "id": 999,
+                "text": "https://t.me/kukutui2/55260?single",
+                "chat": type("_Destination", (), {"id": -1004348673782})(),
+                "from_user": type("_User", (), {"id": 1})(),
+            },
+        )()
+
+        with mock.patch.object(messages, "get_bot_instance", return_value=bot), mock.patch.object(
+            messages,
+            "get_acc_instance",
+            return_value=None,
+        ), mock.patch.object(messages.time, "sleep"):
+            messages.save(None, command)
+
+        self.assertEqual(len(bot.group_copies), 1)
+        self.assertEqual(bot.group_copies[0][0][2], 55260)
+        self.assertEqual(bot.message_copies, [])
+
     def test_bot_range_link_copies_each_album_once_and_skips_empty(self):
         first_album = [
             _PublicMessage(message_id, "album-1")
@@ -128,6 +156,14 @@ class MessageRangeParserTests(unittest.TestCase):
         self.assertEqual(
             messages._parse_message_range("https://t.me/kukutui2/52744"),
             ("", "kukutui2", 52744, 52744),
+        )
+
+    def test_single_query_preserves_the_range_end(self):
+        self.assertEqual(
+            messages._parse_message_range(
+                "https://t.me/kukutui2/55260?single https://t.me/kukutui2/55268"
+            ),
+            ("", "kukutui2", 55260, 55268),
         )
 
     def test_private_channel_link(self):
