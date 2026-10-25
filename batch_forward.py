@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from pyrogram import raw
@@ -70,8 +71,18 @@ def _connect():
     return conn
 
 
+@contextmanager
+def _history_conn():
+    conn = _connect()
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
+
+
 def init_history_db():
-    with _connect() as conn:
+    with _history_conn() as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS history (
@@ -99,10 +110,39 @@ def init_history_db():
             WHERE status = 'running'
             """
         )
+        conn.execute(
+            """
+            DELETE FROM history
+            WHERE id IN (
+                SELECT id FROM (
+                    SELECT
+                        id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY TRIM(taskName) COLLATE NOCASE
+                            ORDER BY createdAt DESC, rowid DESC
+                        ) AS row_num
+                    FROM history
+                    WHERE TRIM(COALESCE(taskName, '')) <> ''
+                )
+                WHERE row_num > 1
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_history_unique_task_name
+            ON history (TRIM(taskName) COLLATE NOCASE)
+            WHERE TRIM(COALESCE(taskName, '')) <> ''
+            """
+        )
 
 
 def _now_iso():
     return datetime.now(get_app_timezone()).isoformat(timespec="seconds")
+
+
+def _task_name(value):
+    return str(value or "").strip()
 
 
 def _record_to_dict(row):
@@ -118,7 +158,18 @@ def _record_to_dict(row):
 
 
 def save_history(record):
-    with _connect() as conn:
+    task_name = _task_name(record.get("taskName"))
+    record_id = record.get("id")
+    with _history_conn() as conn:
+        if task_name:
+            conn.execute(
+                """
+                DELETE FROM history
+                WHERE TRIM(taskName) COLLATE NOCASE = ?
+                  AND id <> ?
+                """,
+                (task_name, record_id or ""),
+            )
         conn.execute(
             """
             INSERT INTO history (
@@ -143,8 +194,8 @@ def save_history(record):
                 stderrTail=excluded.stderrTail
             """,
             (
-                record.get("id"),
-                record.get("taskName") or "",
+                record_id,
+                task_name,
                 record.get("targetId") or "",
                 record.get("sourceId") or "",
                 record.get("outputPath") or "",
@@ -162,18 +213,20 @@ def save_history(record):
 
 
 def list_history():
-    with _connect() as conn:
-        rows = conn.execute("SELECT * FROM history ORDER BY createdAt DESC").fetchall()
+    with _history_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM history ORDER BY createdAt DESC, rowid DESC"
+        ).fetchall()
         return [_record_to_dict(row) for row in rows]
 
 
 def get_history_record(job_id):
-    with _connect() as conn:
+    with _history_conn() as conn:
         row = conn.execute(
             """
             SELECT * FROM history
             WHERE id = ? OR jobId = ?
-            ORDER BY createdAt DESC
+            ORDER BY createdAt DESC, rowid DESC
             LIMIT 1
             """,
             (job_id, job_id),
@@ -182,7 +235,7 @@ def get_history_record(job_id):
 
 
 def clear_history():
-    with _connect() as conn:
+    with _history_conn() as conn:
         conn.execute("DELETE FROM history")
 
 
@@ -290,7 +343,7 @@ def _remove_matches(text, terms, patterns):
     return text
 
 
-def _parse_timestamp(value):
+def _parse_timestamp(value, end_of_day=False):
     value = str(value or "").strip()
     if not value:
         return None
@@ -298,6 +351,8 @@ def _parse_timestamp(value):
         return int(value)
     try:
         dt = datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=get_app_timezone())
+        if end_of_day:
+            dt = dt.replace(hour=23, minute=59, second=59)
         return int(dt.timestamp())
     except ValueError:
         return None
@@ -440,7 +495,7 @@ def _collect_message_ids(acc, source_id, spec):
 
     if range_type == "time":
         start_ts = _parse_timestamp(start)
-        end_ts = _parse_timestamp(end)
+        end_ts = _parse_timestamp(end, end_of_day=True)
         if start_ts is None or end_ts is None:
             raise ValueError("时间范围格式不正确")
         if start_ts > end_ts:
@@ -472,6 +527,8 @@ def _validate_task_spec(spec):
     if not spec.get("source") or not spec.get("target"):
         raise ValueError("source 和 target 不能为空")
 
+    spec["task_name"] = _task_name(spec.get("task_name"))
+
     forward_mode = str(spec.get("forward_mode") or "clone").lower()
     if forward_mode not in ("clone", "direct", "cache"):
         raise ValueError("forward_mode 只支持 clone、direct 或 cache")
@@ -490,7 +547,7 @@ def _validate_task_spec(spec):
     if range_type == "time":
         if _parse_timestamp(spec.get("start")) is None:
             raise ValueError("开始时间格式不正确")
-        if _parse_timestamp(spec.get("end")) is None:
+        if _parse_timestamp(spec.get("end"), end_of_day=True) is None:
             raise ValueError("结束时间格式不正确")
     else:
         try:
@@ -1975,6 +2032,8 @@ def _run_batch_task(job_id, spec):
             stderrTail=_tail("\n".join(log_lines)),
         )
         persist(force=True)
+    finally:
+        _update_task(job_id, active=False)
 
 
 def submit_batch_task(spec):
@@ -1999,6 +2058,7 @@ def submit_batch_task(spec):
     task = {
         "id": job_id,
         "status": "running",
+        "active": True,
         "exitCode": None,
         "cancelled": False,
         "progress": {},
@@ -2012,26 +2072,46 @@ def submit_batch_task(spec):
         "state": state,
     }
     with TASKS_LOCK:
+        task_name_key = _task_name(task.get("taskName")).casefold()
+        if task_name_key:
+            for existing in TASKS.values():
+                existing_active = existing.get(
+                    "active",
+                    existing.get("status") == "running",
+                )
+                if (
+                    existing_active
+                    and _task_name(existing.get("taskName")).casefold()
+                    == task_name_key
+                ):
+                    raise ValueError(
+                        f"同名任务正在运行: {task.get('taskName')}"
+                    )
         TASKS[job_id] = task
 
-    save_history(
-        {
-            "id": job_id,
-            "taskName": spec.get("task_name") or "",
-            "targetId": str(spec.get("target") or ""),
-            "sourceId": str(spec.get("source") or ""),
-            "outputPath": "",
-            "task_spec": spec,
-            "createdAt": _now_iso(),
-            "state": state,
-            "jobId": job_id,
-            "status": "running",
-            "exitCode": None,
-            "progress": {},
-            "stdoutTail": "",
-            "stderrTail": "",
-        }
-    )
+    try:
+        save_history(
+            {
+                "id": job_id,
+                "taskName": spec.get("task_name") or "",
+                "targetId": str(spec.get("target") or ""),
+                "sourceId": str(spec.get("source") or ""),
+                "outputPath": "",
+                "task_spec": spec,
+                "createdAt": _now_iso(),
+                "state": state,
+                "jobId": job_id,
+                "status": "running",
+                "exitCode": None,
+                "progress": {},
+                "stdoutTail": "",
+                "stderrTail": "",
+            }
+        )
+    except Exception:
+        with TASKS_LOCK:
+            TASKS.pop(job_id, None)
+        raise
 
     threading.Thread(target=_run_batch_task, args=(job_id, spec), daemon=True).start()
     return job_id
@@ -2041,6 +2121,9 @@ def cancel_batch_task(job_id):
     with TASKS_LOCK:
         task = TASKS.get(job_id)
         if not task:
+            return False
+        active = task.get("active", task.get("status") == "running")
+        if not active or task.get("status") not in ("running", "cancelled"):
             return False
         task["cancelled"] = True
         task["status"] = "cancelled"

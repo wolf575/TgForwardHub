@@ -784,33 +784,46 @@ async function loadHistory() {
 
     card.addEventListener("click", () => {
       const state = item.state || {};
-      const rangeType = state.rangeType || "id";
-      $("taskName").value = state.taskName || item.taskName || "";
-      $("sourceId").value = state.sourceId || item.sourceId || "";
-      $("targetId").value = state.targetId || item.targetId || "";
-      $("relayChat").value = state.relayChat || "";
+      const spec = item.task_spec || {};
+      const rangeType = state.rangeType || spec.range_type || "id";
+      const startValue = state.startValue || spec.start || "";
+      const endValue = state.endValue || spec.end || "";
+      $("taskName").value =
+        state.taskName || item.taskName || spec.task_name || "";
+      $("sourceId").value =
+        state.sourceId || item.sourceId || spec.source || "";
+      $("targetId").value =
+        state.targetId || item.targetId || spec.target || "";
+      $("relayChat").value = state.relayChat || spec.relay_chat || "";
       $("rangeType").value = rangeType;
       if (rangeType === "time") {
-        $("startValue").value =
-          state.startValue && isUnixTimestampLike(state.startValue)
-            ? localDateStringFromTimestamp(state.startValue)
-            : state.startValue || todayLocalDateString();
-        $("endValue").value =
-          state.endValue && isUnixTimestampLike(state.endValue)
-            ? localDateStringFromTimestamp(state.endValue)
-            : state.endValue || todayLocalDateString();
+        const renewed = renewedTimeRange({
+          startValue,
+          endValue,
+        });
+        $("startValue").value = renewed.start;
+        $("endValue").value = renewed.end;
       } else {
-        $("startValue").value = state.startValue || "";
-        $("endValue").value = state.endValue || "";
+        $("startValue").value = startValue;
+        $("endValue").value = endValue;
       }
-      $("forwardMode").value = state.forwardMode || "clone";
-      $("excludeKeywords").value = state.excludeKeywords || "";
-      $("excludeRegex").value = state.excludeRegex || "";
-      $("removeKeywords").value = state.removeKeywords || "";
-      $("removeRegex").value = state.removeRegex || "";
-      $("descFlag").checked = !!state.desc;
+      $("forwardMode").value =
+        state.forwardMode || spec.forward_mode || "clone";
+      $("excludeKeywords").value =
+        state.excludeKeywords || spec.exclude_keywords || "";
+      $("excludeRegex").value = state.excludeRegex || spec.exclude_regex || "";
+      $("removeKeywords").value =
+        state.removeKeywords || spec.remove_keywords || "";
+      $("removeRegex").value = state.removeRegex || spec.remove_regex || "";
+      $("descFlag").checked =
+        state.desc === undefined ? !!spec.reverse : !!state.desc;
       updateRangeUI({ preserveValues: true });
-      setMessage("batchMessage", `已恢复任务: ${title.textContent}`);
+      setMessage(
+        "batchMessage",
+        rangeType === "time"
+          ? `已恢复任务并续期: ${title.textContent}`
+          : `已恢复任务: ${title.textContent}`
+      );
     });
 
     const detail = document.createElement("pre");
@@ -886,7 +899,7 @@ async function submitBatch(event) {
   let end = $("endValue").value.trim();
   if (rangeType === "time") {
     start = dateStringToMidnightTimestamp(start);
-    end = dateStringToMidnightTimestamp(end);
+    end = dateStringToEndOfDayTimestamp(end);
   }
 
   const spec = {
@@ -991,8 +1004,39 @@ function dateStringToMidnightTimestamp(dateStr) {
   return String(Math.floor(dt.getTime() / 1000));
 }
 
+function dateStringToEndOfDayTimestamp(dateStr, now = Date.now()) {
+  const m = String(dateStr || "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return "";
+  const dt = new Date(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    23,
+    59,
+    59,
+    0,
+  );
+  return String(Math.floor(Math.min(dt.getTime(), now) / 1000));
+}
+
 function isUnixTimestampLike(value) {
   return /^\d{10}$/.test(String(value || "").trim());
+}
+
+function historyDateValue(value, fallback = "") {
+  if (!value) return fallback;
+  return isUnixTimestampLike(value)
+    ? localDateStringFromTimestamp(value) || fallback
+    : value;
+}
+
+function renewedTimeRange(state, today = todayLocalDateString()) {
+  const oldEnd = historyDateValue(state?.endValue);
+  const oldStart = historyDateValue(state?.startValue, today);
+  return {
+    start: oldEnd || oldStart,
+    end: today,
+  };
 }
 
 function updateTimeRangeHint() {
@@ -1002,7 +1046,7 @@ function updateTimeRangeHint() {
     return;
   }
   const start = dateStringToMidnightTimestamp($("startValue").value);
-  const end = dateStringToMidnightTimestamp($("endValue").value);
+  const end = dateStringToEndOfDayTimestamp($("endValue").value);
   hint.textContent = `时间戳: ${start || "—"} → ${end || "—"}`;
   hint.hidden = false;
 }
