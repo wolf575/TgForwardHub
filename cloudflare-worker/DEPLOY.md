@@ -128,7 +128,7 @@ git pull
 npx wrangler@4.152.0 deploy
 ```
 
-如果修改了 `container/` 内的代码或实例规格，先把 `CONTAINER_INSTANCE_ID` 从 `singleton-v8` 递增到 `singleton-v9`，再部署，确保 Container 拉起新实例。
+如果修改了 `container/` 内的代码、实例规格或保活配置，先把 `CONTAINER_INSTANCE_ID` 从 `singleton-v9` 递增到 `singleton-v10`，再部署，确保 Container 拉起新实例。
 
 ## 常见问题
 

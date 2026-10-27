@@ -16,8 +16,8 @@ const CODE_CONFIG = Object.freeze({
   STORAGE_BACKEND: "auto",
   MAX_RANGE_MESSAGES: 10000,
   CONTAINER_PORT: 8080,
-  CONTAINER_INACTIVITY_MS: 60 * 60 * 1000,
-  CONTAINER_INSTANCE_ID: "singleton-v8",
+  CONTAINER_INACTIVITY_MS: 6 * 60 * 60 * 1000,
+  CONTAINER_INSTANCE_ID: "singleton-v9",
 });
 
 const TELEGRAM_API_BASE = "https://api.telegram.org";
@@ -827,7 +827,7 @@ function resolveConfig(env = {}) {
     10,
   );
   const inactivityRaw =
-    pick("CONTAINER_INACTIVITY_MS") || String(10 * 60 * 1000);
+    pick("CONTAINER_INACTIVITY_MS") || String(6 * 60 * 60 * 1000);
   const containerInactivityMs = Number.parseInt(inactivityRaw, 10);
 
   return {
@@ -851,8 +851,8 @@ function resolveConfig(env = {}) {
     containerInactivityMs:
       Number.isFinite(containerInactivityMs) && containerInactivityMs > 0
         ? containerInactivityMs
-        : 60 * 60 * 1000,
-    containerInstanceId: pick("CONTAINER_INSTANCE_ID") || "singleton-v8",
+        : 6 * 60 * 60 * 1000,
+    containerInstanceId: pick("CONTAINER_INSTANCE_ID") || "singleton-v9",
   };
 }
 

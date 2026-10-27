@@ -59,9 +59,9 @@ cloudflare-worker/
 
 单条链接和区间链接都交给 Container 处理，因此可以识别并完整复制相册。Worker 只负责 Webhook、白名单、链接解析和把完整任务提交给 Container，不再拆分区间、维护转发队列或发送完成汇总。
 
-Worker 始终通过固定的 `CONTAINER_INSTANCE_ID` 访问同一个逻辑 Container，避免多个 Telegram Bot 客户端并行运行。当前值是 `singleton-v8`。如果更新了 Container 镜像或实例规格，需要把这个值递增为 `singleton-v9`、`singleton-v10`，强制 Durable Object 启动新实例。
+Worker 始终通过固定的 `CONTAINER_INSTANCE_ID` 访问同一个逻辑 Container，避免多个 Telegram Bot 客户端并行运行。当前值是 `singleton-v9`。如果更新了 Container 镜像、实例规格或保活配置，需要把这个值递增为 `singleton-v10`、`singleton-v11`，强制 Durable Object 启动新实例。
 
-Container 实例类型为 `standard-4`（4 vCPU、12 GiB 内存、20 GB 磁盘），并使用 1 小时空闲保活。
+Container 实例类型为 `standard-4`（4 vCPU、12 GiB 内存、20 GB 磁盘），并使用最长 6 小时空闲保活。
 
 ### 为什么单相册链接需要 Container
 
@@ -122,8 +122,8 @@ const CODE_CONFIG = Object.freeze({
   STORAGE_BACKEND: "auto",
   MAX_RANGE_MESSAGES: 10000,
   CONTAINER_PORT: 8080,
-  CONTAINER_INACTIVITY_MS: 60 * 60 * 1000,
-  CONTAINER_INSTANCE_ID: "singleton-v8",
+  CONTAINER_INACTIVITY_MS: 6 * 60 * 60 * 1000,
+  CONTAINER_INSTANCE_ID: "singleton-v9",
 });
 ```
 
@@ -234,7 +234,7 @@ https://t.me/username/100 https://t.me/username/120
 - 单条链接：Worker 解析后提交给 Container，由 Pyrogram 复制；如果消息属于相册，会复制完整相册。
 - 区间链接：Worker 把完整区间提交给 Container，由 Container 内部按 100 条分块并逐条复制；消息间等待 0.2 秒。
 - `?single` 是 Telegram 分享链接的查询参数，不影响相册展开或区间终点。例如单条 `55260?single` 会复制 55260 所在完整相册，`55260?single ... 55268` 仍会处理 55260-55268。
-- Container 默认保持 1 小时热实例，减少频繁冷启动；这会产生相应的 Container 运行时长费用。
+- Container 默认保持最长 6 小时热实例，减少频繁冷启动；这会产生相应的 Container 运行时长费用。
 - 暖 Container 单条转发通常在数秒内完成；Container 冷启动和 Pyrogram 重新连接 Telegram 时可能达到 20 秒以上。
 - Telegram 429/FloodWait：任务进入 `retrying`，等待 `retry_after` 后重试。
 - 同一用户 30 秒内重复发送完全相同的链接会被忽略，避免 Webhook 重试或连续点击造成重复内容。
