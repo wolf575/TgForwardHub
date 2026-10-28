@@ -2467,4 +2467,23 @@ export default {
     );
     return textResponse("ok");
   },
+
+  async scheduled(_controller, env) {
+    const config = resolveConfig(env);
+    if (!env.BOT_CONTAINER) {
+      throw new Error("BOT_CONTAINER binding is missing");
+    }
+    const issues = configIssues(config, { requireContainer: true });
+    if (issues.length) throw new Error(issues.join("; "));
+
+    const response = await env.BOT_CONTAINER.getByName(
+      config.containerInstanceId,
+    ).fetch("https://container/healthz", {
+      signal: AbortSignal.timeout(120_000),
+    });
+    await response.body?.cancel();
+    if (!response.ok) {
+      throw new Error(`Container keepalive returned ${response.status}`);
+    }
+  },
 };

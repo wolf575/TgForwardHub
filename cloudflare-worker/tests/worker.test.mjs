@@ -202,8 +202,14 @@ function makeFakeContainer(calls) {
       return {
         async fetch(url, init) {
           const path = new URL(url).pathname;
-          const body = JSON.parse(init.body);
+          const body = init?.body ? JSON.parse(init.body) : null;
           calls.push({ id, path, body });
+          if (path === "/healthz") {
+            return new Response(JSON.stringify({ ok: true }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
           if (path === "/forward") {
             return new Response(
               JSON.stringify({ ok: true, accepted: true, job_id: "job-1" }),
@@ -325,6 +331,17 @@ test("help explains commands without internal routing details", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("scheduled keepalive wakes the singleton container", async () => {
+  const containerCalls = [];
+  const env = makeEnv(new FakeKV(), makeFakeContainer(containerCalls));
+
+  await worker.default.scheduled({ cron: "*/5 * * * *" }, env);
+
+  assert.equal(containerCalls.length, 1);
+  assert.equal(containerCalls[0].id, "singleton-v9");
+  assert.equal(containerCalls[0].path, "/healthz");
 });
 
 test("admin can allow an ID and a range is copied through Container", async () => {

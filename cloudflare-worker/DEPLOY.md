@@ -107,6 +107,8 @@ https://<Worker域名>/install?secret=<WEBHOOK_SECRET>
 6. 用白名单用户发送一条 Telegram 消息链接。
 7. 如果链接属于相册，确认完整媒体组都已复制。
 
+部署配置包含每 5 分钟一次的 Cron Trigger。它会请求 Container 的 `/healthz` 做近似常驻保活；Cloudflare 平台维护或故障后，下一次 Cron 会自动重新拉起实例。该配置会产生接近全天运行的 Container 费用。
+
 ## 可选：使用 KV
 
 不使用 D1 时：
