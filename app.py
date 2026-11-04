@@ -1005,6 +1005,51 @@ def api_batch_forward_cancel(job_id):
     return jsonify({'error': 'job not found'}), 404
 
 
+@app.route('/api/batch-forward/<job_id>/rules', methods=['PATCH'])
+def api_batch_forward_rules(job_id):
+    if 'username' not in session:
+        return jsonify({'error': '未登录'}), 401
+
+    if not batch_forward.get_task(job_id):
+        return jsonify({'error': 'job not found'}), 404
+
+    try:
+        spec = batch_forward.update_batch_rules(
+            job_id,
+            request.get_json(silent=True) or {},
+        )
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    if not spec:
+        return jsonify({'error': '任务当前不可更新规则'}), 409
+    return jsonify({'ok': True, 'spec': spec})
+
+
+@app.route('/api/batch-forward/<job_id>/pause', methods=['POST'])
+def api_batch_forward_pause(job_id):
+    if 'username' not in session:
+        return jsonify({'error': '未登录'}), 401
+
+    if not batch_forward.get_task(job_id):
+        return jsonify({'error': 'job not found'}), 404
+    if batch_forward.pause_batch_task(job_id):
+        return jsonify({'ok': True, 'status': 'paused'})
+    return jsonify({'error': '任务当前不可暂停'}), 409
+
+
+@app.route('/api/batch-forward/<job_id>/resume', methods=['POST'])
+def api_batch_forward_resume(job_id):
+    if 'username' not in session:
+        return jsonify({'error': '未登录'}), 401
+
+    if not batch_forward.get_task(job_id):
+        return jsonify({'error': 'job not found'}), 404
+    if batch_forward.resume_batch_task(job_id):
+        return jsonify({'ok': True, 'status': 'running'})
+    return jsonify({'error': '任务当前不可继续'}), 409
+
+
 @app.route('/api/watch-config', methods=['GET', 'POST'])
 def api_watch_config():
     if 'username' not in session:

@@ -763,6 +763,43 @@ function historySubtitle(item) {
   return parts.join(" · ");
 }
 
+function applyBatchSpecToForm(spec = {}, state = {}, options = {}) {
+  const rangeType = state.rangeType || spec.range_type || "id";
+  const startValue = state.startValue || spec.start || "";
+  const endValue = state.endValue || spec.end || "";
+  $("taskName").value =
+    state.taskName || spec.task_name || $("taskName").value || "";
+  $("sourceId").value =
+    state.sourceId || spec.source || $("sourceId").value || "";
+  $("targetId").value =
+    state.targetId || spec.target || $("targetId").value || "";
+  $("relayChat").value =
+    state.relayChat || spec.relay_chat || $("relayChat").value || "";
+  $("rangeType").value = rangeType;
+  if (rangeType === "time" && options.renewTime) {
+    const renewed = renewedTimeRange({ startValue, endValue });
+    $("startValue").value = renewed.start;
+    $("endValue").value = renewed.end;
+  } else {
+    $("startValue").value = startValue;
+    $("endValue").value = endValue;
+  }
+  $("forwardMode").value =
+    state.forwardMode || spec.forward_mode || "clone";
+  $("excludeKeywords").value =
+    state.excludeKeywords ?? spec.exclude_keywords ?? "";
+  $("excludeRegex").value =
+    state.excludeRegex ?? spec.exclude_regex ?? "";
+  $("removeKeywords").value =
+    state.removeKeywords ?? spec.remove_keywords ?? "";
+  $("removeRegex").value =
+    state.removeRegex ?? spec.remove_regex ?? "";
+  $("descFlag").checked =
+    state.desc === undefined ? !!spec.reverse : !!state.desc;
+  updateRangeUI({ preserveValues: true });
+  return { rangeType };
+}
+
 async function loadHistory() {
   const body = $("historyBody");
   body.textContent = "";
@@ -785,39 +822,15 @@ async function loadHistory() {
     card.addEventListener("click", () => {
       const state = item.state || {};
       const spec = item.task_spec || {};
-      const rangeType = state.rangeType || spec.range_type || "id";
-      const startValue = state.startValue || spec.start || "";
-      const endValue = state.endValue || spec.end || "";
-      $("taskName").value =
-        state.taskName || item.taskName || spec.task_name || "";
-      $("sourceId").value =
-        state.sourceId || item.sourceId || spec.source || "";
-      $("targetId").value =
-        state.targetId || item.targetId || spec.target || "";
-      $("relayChat").value = state.relayChat || spec.relay_chat || "";
-      $("rangeType").value = rangeType;
-      if (rangeType === "time") {
-        const renewed = renewedTimeRange({
-          startValue,
-          endValue,
-        });
-        $("startValue").value = renewed.start;
-        $("endValue").value = renewed.end;
-      } else {
-        $("startValue").value = startValue;
-        $("endValue").value = endValue;
-      }
-      $("forwardMode").value =
-        state.forwardMode || spec.forward_mode || "clone";
-      $("excludeKeywords").value =
-        state.excludeKeywords || spec.exclude_keywords || "";
-      $("excludeRegex").value = state.excludeRegex || spec.exclude_regex || "";
-      $("removeKeywords").value =
-        state.removeKeywords || spec.remove_keywords || "";
-      $("removeRegex").value = state.removeRegex || spec.remove_regex || "";
-      $("descFlag").checked =
-        state.desc === undefined ? !!spec.reverse : !!state.desc;
-      updateRangeUI({ preserveValues: true });
+      const formSpec = {
+        ...spec,
+        task_name: state.taskName || item.taskName || spec.task_name || "",
+        source: state.sourceId || item.sourceId || spec.source || "",
+        target: state.targetId || item.targetId || spec.target || "",
+      };
+      const { rangeType } = applyBatchSpecToForm(formSpec, state, {
+        renewTime: true,
+      });
       setMessage(
         "batchMessage",
         rangeType === "time"
@@ -834,8 +847,74 @@ async function loadHistory() {
 }
 
 let pollingTimer = null;
+let currentBatchJobId = "";
+let currentBatchStatus = "";
+let ruleSyncTimer = null;
+let ruleSyncBusy = false;
+let ruleSyncPending = false;
+
+const BATCH_RULE_FIELDS = {
+  excludeKeywords: "exclude_keywords",
+  excludeRegex: "exclude_regex",
+  removeKeywords: "remove_keywords",
+  removeRegex: "remove_regex",
+};
+
+function batchRulePatch() {
+  return Object.fromEntries(
+    Object.entries(BATCH_RULE_FIELDS).map(([inputId, field]) => [
+      field,
+      $(inputId).value,
+    ])
+  );
+}
+
+function batchTaskIsActive() {
+  return (
+    !!currentBatchJobId &&
+    ["running", "paused"].includes(currentBatchStatus)
+  );
+}
+
+function scheduleBatchRuleSync() {
+  if (!batchTaskIsActive()) return;
+  if (ruleSyncTimer) clearTimeout(ruleSyncTimer);
+  ruleSyncTimer = setTimeout(syncBatchRules, 600);
+}
+
+async function syncBatchRules() {
+  ruleSyncTimer = null;
+  if (!batchTaskIsActive()) return;
+  if (ruleSyncBusy) {
+    ruleSyncPending = true;
+    return;
+  }
+
+  ruleSyncBusy = true;
+  try {
+    do {
+      ruleSyncPending = false;
+      const jobId = currentBatchJobId;
+      if (!jobId || !["running", "paused"].includes(currentBatchStatus)) break;
+      try {
+        await apiFetch(`/api/batch-forward/${jobId}/rules`, {
+          method: "PATCH",
+          body: JSON.stringify(batchRulePatch()),
+          timeout: 10000,
+        });
+        setMessage("batchMessage", "运行规则已更新，将从下一条消息生效");
+      } catch (error) {
+        setMessage("batchMessage", `规则未更新：${error.message}`);
+      }
+    } while (ruleSyncPending);
+  } finally {
+    ruleSyncBusy = false;
+  }
+}
 
 function updateMonitor(data) {
+  currentBatchJobId = data.jobId || currentBatchJobId;
+  currentBatchStatus = data.status || "";
   $("jobId").textContent = data.jobId ? `jobId: ${data.jobId}` : "";
   $("jobStatus").textContent = data.status || "等待";
   const progress = data.progress || {};
@@ -844,7 +923,13 @@ function updateMonitor(data) {
   $("failedCount").textContent = progress.failed ?? 0;
   $("skippedCount").textContent = progress.skipped ?? 0;
   $("jobLog").value = data.stdoutTail || data.stderrTail || "";
-  $("cancelBtn").hidden = data.status !== "running";
+  $("pauseBtn").hidden = data.status !== "running";
+  $("resumeBtn").hidden = data.status !== "paused";
+  $("cancelBtn").hidden = !["running", "paused"].includes(data.status);
+  if (!["running", "paused"].includes(data.status) && ruleSyncTimer) {
+    clearTimeout(ruleSyncTimer);
+    ruleSyncTimer = null;
+  }
 }
 
 async function pollBatch(jobId) {
@@ -854,6 +939,8 @@ async function pollBatch(jobId) {
     updateMonitor(data);
     if (["done", "error", "cancelled", "interrupted"].includes(data.status)) {
       localStorage.removeItem(BATCH_JOB_KEY);
+      currentBatchJobId = "";
+      currentBatchStatus = data.status;
       setMessage("batchMessage", `任务 ${data.status}`);
       loadHistory();
       return;
@@ -875,8 +962,14 @@ async function restoreBatchTask() {
   try {
     const data = await apiFetch(`/api/batch-forward/${jobId}`);
     updateMonitor(data);
-    if (data.status === "running") {
-      setMessage("batchMessage", "已恢复刷新前的执行状态");
+    if (["running", "paused"].includes(data.status)) {
+      applyBatchSpecToForm(data.spec || {});
+      setMessage(
+        "batchMessage",
+        data.status === "paused"
+          ? "已恢复暂停中的任务"
+          : "已恢复刷新前的执行状态"
+      );
       pollBatch(jobId);
       return;
     }
@@ -892,6 +985,8 @@ async function restoreBatchTask() {
 async function submitBatch(event) {
   event.preventDefault();
   setMessage("batchMessage", "");
+  $("pauseBtn").hidden = true;
+  $("resumeBtn").hidden = true;
   $("cancelBtn").hidden = true;
 
   const rangeType = $("rangeType").value;
@@ -924,26 +1019,70 @@ async function submitBatch(event) {
       body: JSON.stringify(spec),
     });
     localStorage.setItem(BATCH_JOB_KEY, result.jobId);
-    $("jobId").textContent = `jobId: ${result.jobId}`;
-    $("jobStatus").textContent = "running";
-    $("cancelBtn").hidden = false;
+    updateMonitor({
+      jobId: result.jobId,
+      status: "running",
+      progress: {},
+      stdoutTail: "",
+      stderrTail: "",
+    });
     pollBatch(result.jobId);
   } catch (error) {
     setMessage("batchMessage", error.message);
   }
 }
 
-async function cancelBatch() {
-  const text = $("jobId").textContent;
-  const jobId = text.replace(/^jobId:\s*/, "").trim();
+function activeBatchJobId() {
+  if (currentBatchJobId) return currentBatchJobId;
+  return $("jobId").textContent.replace(/^jobId:\s*/, "").trim();
+}
+
+async function pauseBatch() {
+  const jobId = activeBatchJobId();
   if (!jobId) return;
-  await apiFetch(`/api/batch-forward/${jobId}/cancel`, { method: "POST" });
-  if (pollingTimer) {
-    clearTimeout(pollingTimer);
-    pollingTimer = null;
+  try {
+    await apiFetch(`/api/batch-forward/${jobId}/pause`, { method: "POST" });
+    currentBatchStatus = "paused";
+    $("jobStatus").textContent = "paused";
+    $("pauseBtn").hidden = true;
+    $("resumeBtn").hidden = false;
+    $("cancelBtn").hidden = false;
+    pollBatch(jobId);
+  } catch (error) {
+    setMessage("batchMessage", error.message);
   }
-  $("jobStatus").textContent = "cancelled";
-  $("cancelBtn").hidden = true;
+}
+
+async function resumeBatch() {
+  const jobId = activeBatchJobId();
+  if (!jobId) return;
+  try {
+    await apiFetch(`/api/batch-forward/${jobId}/resume`, { method: "POST" });
+    currentBatchStatus = "running";
+    $("jobStatus").textContent = "running";
+    $("pauseBtn").hidden = false;
+    $("resumeBtn").hidden = true;
+    $("cancelBtn").hidden = false;
+    pollBatch(jobId);
+  } catch (error) {
+    setMessage("batchMessage", error.message);
+  }
+}
+
+async function cancelBatch() {
+  const jobId = activeBatchJobId();
+  if (!jobId) return;
+  try {
+    await apiFetch(`/api/batch-forward/${jobId}/cancel`, { method: "POST" });
+    currentBatchStatus = "cancelled";
+    $("jobStatus").textContent = "cancelled";
+    $("pauseBtn").hidden = true;
+    $("resumeBtn").hidden = true;
+    $("cancelBtn").hidden = true;
+    pollBatch(jobId);
+  } catch (error) {
+    setMessage("batchMessage", error.message);
+  }
 }
 
 function parseList(value) {
@@ -1119,6 +1258,7 @@ function appendRegexToTarget(button) {
   const lines = parseRegexList(target.value);
   if (lines.includes(pattern)) return;
   target.value = lines.concat(pattern).join("\n");
+  target.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 document.addEventListener("click", (event) => {
@@ -1241,6 +1381,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
   $("batchForm").addEventListener("submit", submitBatch);
   $("rangeType").addEventListener("change", () => updateRangeUI());
+  Object.keys(BATCH_RULE_FIELDS).forEach((id) => {
+    $(id).addEventListener("input", scheduleBatchRuleSync);
+  });
   $("setupForm").addEventListener("submit", (event) => {
     event.preventDefault();
     if (setupState.busy) return;
@@ -1257,6 +1400,8 @@ document.addEventListener("DOMContentLoaded", () => {
       saveSetupConfig();
     }
   });
+  $("pauseBtn").addEventListener("click", pauseBatch);
+  $("resumeBtn").addEventListener("click", resumeBatch);
   $("cancelBtn").addEventListener("click", cancelBatch);
   $("historyRefresh").addEventListener("click", loadHistory);
   $("historyClear").addEventListener("click", async () => {
