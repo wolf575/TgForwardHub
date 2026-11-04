@@ -753,6 +753,7 @@ def _build_private_media_group_inputs(
     downloads,
     caption_override=None,
     caption_entities_override=None,
+    caption_overrides=None,
 ):
     """Build Pyrogram InputMedia objects for a downloaded media group."""
     caption_message = next(
@@ -772,8 +773,12 @@ def _build_private_media_group_inputs(
     media_inputs = []
 
     for index, (item, file_path, thumb) in enumerate(downloads):
-        item_caption = caption if index == 0 else ""
-        item_caption_entities = caption_entities if index == 0 else None
+        if caption_overrides is not None and index < len(caption_overrides):
+            item_caption = caption_overrides[index]
+            item_caption_entities = None
+        else:
+            item_caption = caption if index == 0 else ""
+            item_caption_entities = caption_entities if index == 0 else None
         msg_type = get_message_type(item)
         thumb = thumb if _nonempty_file(thumb) else None
 
@@ -936,6 +941,7 @@ def _send_downloaded_private_media_group(
     downloads,
     caption_override=None,
     caption_entities_override=None,
+    caption_overrides=None,
 ):
     """Upload a downloaded group as an album, falling back to item uploads."""
     media_inputs = _build_private_media_group_inputs(
@@ -943,6 +949,7 @@ def _send_downloaded_private_media_group(
         downloads,
         caption_override=caption_override,
         caption_entities_override=caption_entities_override,
+        caption_overrides=caption_overrides,
     )
 
     try:
@@ -960,6 +967,7 @@ def _send_downloaded_private_media_group(
                 thumbless_downloads,
                 caption_override=caption_override,
                 caption_entities_override=caption_entities_override,
+                caption_overrides=caption_overrides,
             )
             try:
                 result = bot.send_media_group(
@@ -996,8 +1004,16 @@ def _send_downloaded_private_media_group(
             item,
             file_path,
             thumb=thumb,
-            caption_override=caption_override if index == 0 else None,
-            caption_entities_override=caption_entities_override if index == 0 else None,
+            caption_override=(
+                caption_overrides[index]
+                if caption_overrides is not None and index < len(caption_overrides)
+                else caption_override if index == 0 else None
+            ),
+            caption_entities_override=(
+                None
+                if caption_overrides is not None
+                else caption_entities_override if index == 0 else None
+            ),
         )
         if index == 0:
             forwarded_message_id = _message_id(result)
