@@ -232,6 +232,74 @@ class BatchFilterTests(unittest.TestCase):
 
 
 class BatchProgressTests(unittest.TestCase):
+    def test_batch_task_resends_plain_text_when_quote_preview_matches_delete_rule(self):
+        job_id = "quote-delete-job"
+        task = _task(job_id)
+        message = _FakeMessage(1, text="保留正文")
+        message.reply_to_message = _FakeMessage(2, text=USER_REGEX)
+        acc = mock.Mock()
+        acc.get_messages.return_value = [message]
+        forwarded = []
+
+        def forward_unit(*args, **_kwargs):
+            forwarded.append(args)
+            return 1, False
+
+        with mock.patch.dict(batch_forward.TASKS, {job_id: task}, clear=True), \
+             mock.patch.object(batch_forward, "get_acc_instance", return_value=acc), \
+             mock.patch.object(batch_forward, "get_bot_instance", return_value=None), \
+             mock.patch.object(
+                 batch_forward,
+                 "_resolve_chat",
+                 side_effect=lambda _client, ref: int(ref),
+             ), \
+             mock.patch.object(
+                 batch_forward,
+                 "_resolve_source_username",
+                 return_value=None,
+             ), \
+             mock.patch.object(
+                 batch_forward,
+                 "_collect_message_ids",
+                 return_value=[1],
+             ), \
+             mock.patch.object(
+                 batch_forward,
+                 "_get_private_media_group_messages",
+                 side_effect=lambda _client, _source, item: [item],
+             ), \
+             mock.patch.object(
+                 batch_forward,
+                 "_forward_batch_unit",
+                 side_effect=forward_unit,
+             ), \
+             mock.patch.object(batch_forward, "MessageWorker", _FakeWorker), \
+             mock.patch.object(
+                 batch_forward,
+                 "_persist_task_history",
+                 return_value=None,
+             ):
+            batch_forward._run_batch_task(
+                job_id,
+                {
+                    "source": "-1001",
+                    "target": "-1002",
+                    "range_type": "id",
+                    "start": 1,
+                    "end": 1,
+                    "forward_mode": "clone",
+                    "exclude_keywords": "",
+                    "exclude_regex": "",
+                    "remove_keywords": "",
+                    "remove_regex": USER_REGEX,
+                },
+            )
+
+        self.assertEqual(len(forwarded), 1)
+        self.assertEqual(forwarded[0][5], "保留正文")
+        self.assertTrue(forwarded[0][6])
+        self.assertIn("引用、回复或链接预览命中删除规则", task["stdoutTail"])
+
     def test_large_task_uses_batched_message_reads_and_reports_progress(self):
         job_id = "progress-job"
         task = _task(job_id)
