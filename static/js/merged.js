@@ -912,6 +912,17 @@ async function syncBatchRules() {
   }
 }
 
+function formatEta(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value < 0) return "";
+  if (value < 60) return `${Math.max(1, Math.round(value))} 秒`;
+  const minutes = Math.ceil(value / 60);
+  if (minutes < 60) return `${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours} 小时 ${rest} 分钟` : `${hours} 小时`;
+}
+
 function updateMonitor(data) {
   currentBatchJobId = data.jobId || currentBatchJobId;
   currentBatchStatus = data.status || "";
@@ -923,6 +934,46 @@ function updateMonitor(data) {
   $("failedCount").textContent = progress.failed ?? 0;
   $("skippedCount").textContent = progress.skipped ?? 0;
   $("jobLog").value = data.stdoutTail || data.stderrTail || "";
+  const total = Number(progress.total || 0);
+  const processed = Number(progress.processed || 0);
+  const percent = Number(
+    progress.percent ?? (total > 0 ? (processed * 100) / total : 0)
+  );
+  const progressBar = $("jobProgressBar");
+  const indeterminate =
+    data.status === "running" &&
+    !total &&
+    ["resolving", "collecting", "preparing"].includes(progress.phase);
+  progressBar.classList.toggle("indeterminate", indeterminate);
+  progressBar.style.width = indeterminate
+    ? ""
+    : `${Math.max(0, Math.min(100, percent))}%`;
+
+  let phaseText =
+    progress.phase_label ||
+    (data.status === "paused" ? "已暂停" : "等待任务");
+  if (progress.phase === "collecting") {
+    phaseText =
+      `正在收集消息 · 已扫描 ${progress.scanned || 0} 条 · ` +
+      `已找到 ${progress.collected || 0} 条`;
+  } else if (progress.phase === "preparing") {
+    phaseText =
+      `准备消息批次 · ${progress.fetched || 0}/${progress.total || 0}`;
+  } else if (progress.phase === "forwarding") {
+    phaseText =
+      `正在转发 · ${progress.processed || 0}/${progress.total || 0}`;
+  } else if (data.status === "paused") {
+    phaseText = "已暂停，当前消息完成后停止";
+  } else if (data.status === "done") {
+    phaseText = "已完成";
+  }
+  $("jobPhase").textContent = phaseText;
+  const eta = formatEta(progress.eta_seconds);
+  $("jobEta").textContent = eta
+    ? `预计剩余 ${eta}`
+    : data.status === "running" && total
+      ? "正在估算剩余时间"
+      : "";
   $("pauseBtn").hidden = data.status !== "running";
   $("resumeBtn").hidden = data.status !== "paused";
   $("cancelBtn").hidden = !["running", "paused"].includes(data.status);
@@ -952,7 +1003,7 @@ async function pollBatch(jobId) {
     }
     setMessage("batchMessage", error.message);
   }
-  pollingTimer = setTimeout(() => pollBatch(jobId), 1200);
+  pollingTimer = setTimeout(() => pollBatch(jobId), 800);
 }
 
 async function restoreBatchTask() {
@@ -1022,7 +1073,12 @@ async function submitBatch(event) {
     updateMonitor({
       jobId: result.jobId,
       status: "running",
-      progress: {},
+      progress: {
+        phase: "queued",
+        phase_label: "排队中",
+        total: 0,
+        processed: 0,
+      },
       stdoutTail: "",
       stderrTail: "",
     });

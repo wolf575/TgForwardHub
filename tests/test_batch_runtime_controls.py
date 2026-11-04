@@ -66,6 +66,8 @@ class _RunAcc:
         self.messages = messages
 
     def get_messages(self, source_id, message_id):
+        if isinstance(message_id, (list, tuple)):
+            return [self.messages.get(item) for item in message_id]
         return self.messages[message_id]
 
 

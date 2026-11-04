@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>TG Forward Hub</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/merged.css') }}?v=20261104-runtime-controls">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/merged.css') }}?v=20261104-filter-progress">
 </head>
 <body>
   <header class="topbar">
@@ -126,6 +126,15 @@
             <div><span>成功</span><strong id="successCount">0</strong></div>
             <div><span>失败</span><strong id="failedCount">0</strong></div>
             <div><span>跳过</span><strong id="skippedCount">0</strong></div>
+          </div>
+          <div class="job-progress">
+            <div class="job-progress-head">
+              <span id="jobPhase">等待任务</span>
+              <span id="jobEta" class="muted"></span>
+            </div>
+            <div class="progress-track">
+              <div id="jobProgressBar" class="progress-fill"></div>
+            </div>
           </div>
           <textarea id="jobLog" readonly placeholder="任务日志"></textarea>
           <div class="monitor-actions">
@@ -413,6 +422,6 @@
     </section>
   </main>
 
-  <script src="{{ url_for('static', filename='js/merged.js') }}?v=20261104-runtime-controls"></script>
+  <script src="{{ url_for('static', filename='js/merged.js') }}?v=20261104-filter-progress"></script>
 </body>
 </html>

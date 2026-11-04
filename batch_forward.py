@@ -25,6 +25,12 @@ from pyrogram.errors import (
     InternalServerError,
     Timeout as TelegramTimeout,
 )
+from pyrogram.types import (
+    InputMediaAudio,
+    InputMediaDocument,
+    InputMediaPhoto,
+    InputMediaVideo,
+)
 
 from database import DATA_DIR
 from app_settings import get_app_timezone
@@ -63,6 +69,18 @@ DOWNLOADABLE_MEDIA_TYPES = {
 
 TASKS = {}
 TASKS_LOCK = threading.Lock()
+BATCH_FETCH_CHUNK_SIZE = 100
+PROGRESS_PHASES = {
+    "queued": "排队中",
+    "resolving": "解析来源与目标",
+    "collecting": "收集消息",
+    "preparing": "准备消息批次",
+    "forwarding": "转发消息",
+    "paused": "已暂停",
+    "done": "已完成",
+    "cancelled": "已取消",
+    "error": "执行失败",
+}
 FILTER_FIELDS = (
     "exclude_keywords",
     "exclude_regex",
@@ -343,6 +361,81 @@ def _media_group_copy_kwargs(cleaned_text, text_changed):
     return {"captions": cleaned_text}
 
 
+def _caption_overrides(cleaned_texts, cleaned_text, count):
+    """Build one caption value for every media-group item."""
+    if cleaned_texts is None:
+        return [cleaned_text] + [""] * max(0, count - 1)
+    values = list(cleaned_texts)
+    if len(values) < count:
+        values.extend([""] * (count - len(values)))
+    return values[:count]
+
+
+def _media_group_inputs_from_file_ids(group_messages, captions):
+    """Build native album inputs without downloading the media."""
+    media_inputs = []
+    for index, item in enumerate(group_messages):
+        caption = captions[index] if index < len(captions) else ""
+        msg_type = get_message_type(item)
+        if msg_type == "Photo":
+            media_inputs.append(
+                InputMediaPhoto(
+                    item.photo.file_id,
+                    caption=caption,
+                    caption_entities=None,
+                    has_spoiler=getattr(item, "has_media_spoiler", None),
+                )
+            )
+        elif msg_type == "Video":
+            video = item.video
+            media_inputs.append(
+                InputMediaVideo(
+                    video.file_id,
+                    caption=caption,
+                    caption_entities=None,
+                    width=getattr(video, "width", 0) or 0,
+                    height=getattr(video, "height", 0) or 0,
+                    duration=getattr(video, "duration", 0) or 0,
+                    supports_streaming=(
+                        getattr(video, "supports_streaming", None)
+                        if getattr(video, "supports_streaming", None) is not None
+                        else True
+                    ),
+                    has_spoiler=getattr(item, "has_media_spoiler", None),
+                )
+            )
+        elif msg_type == "Document":
+            media_inputs.append(
+                InputMediaDocument(
+                    item.document.file_id,
+                    caption=caption,
+                    caption_entities=None,
+                )
+            )
+        elif msg_type == "Audio":
+            audio = item.audio
+            media_inputs.append(
+                InputMediaAudio(
+                    audio.file_id,
+                    caption=caption,
+                    caption_entities=None,
+                    duration=getattr(audio, "duration", 0) or 0,
+                    performer=getattr(audio, "performer", "") or "",
+                    title=getattr(audio, "title", "") or "",
+                )
+            )
+        else:
+            raise ValueError(f"媒体组包含不支持的原生发送类型: {msg_type}")
+    return media_inputs
+
+
+def _send_media_group_with_captions(client, destination, group_messages, captions):
+    return client.send_media_group(
+        destination,
+        _media_group_inputs_from_file_ids(group_messages, captions),
+    )
+
+
 def _strip_trailing_blocks(text, terms):
     if not text or not terms:
         return text
@@ -508,7 +601,7 @@ def _resolve_relay_chat(worker, acc, bot, ref):
     return chat_id
 
 
-def _collect_message_ids(acc, source_id, spec):
+def _collect_message_ids(acc, source_id, spec, progress_callback=None):
     range_type = spec.get("range_type", "id")
     start = spec.get("start")
     end = spec.get("end")
@@ -523,15 +616,21 @@ def _collect_message_ids(acc, source_id, spec):
             start_ts, end_ts = end_ts, start_ts
 
         ids = []
+        scanned = 0
         offset_date = datetime.fromtimestamp(end_ts, tz=timezone.utc)
         for message in acc.get_chat_history(source_id, offset_date=offset_date):
+            scanned += 1
             ts = message.date.timestamp()
             if ts < start_ts:
                 break
             if ts <= end_ts:
                 ids.append(message.id)
+            if progress_callback and scanned % 100 == 0:
+                progress_callback(scanned, len(ids))
         if not reverse:
             ids.reverse()
+        if progress_callback:
+            progress_callback(scanned, len(ids))
         return ids
 
     start_id = int(start)
@@ -541,6 +640,8 @@ def _collect_message_ids(acc, source_id, spec):
     ids = list(range(start_id, end_id + 1))
     if reverse:
         ids.reverse()
+    if progress_callback:
+        progress_callback(len(ids), len(ids))
     return ids
 
 
@@ -596,15 +697,16 @@ def _filter_rule_set(spec):
     }
 
 
+def _group_texts(group_messages):
+    """Return every caption/text in a media group, preserving item order."""
+    return [
+        str(getattr(message, "caption", None) or getattr(message, "text", None) or "")
+        for message in group_messages
+    ]
+
+
 def _group_text(group_messages):
-    for message in group_messages:
-        caption = getattr(message, "caption", None)
-        if caption:
-            return caption
-        text = getattr(message, "text", None)
-        if text:
-            return text
-    return ""
+    return next((text for text in _group_texts(group_messages) if text), "")
 
 
 def _worker_execute(worker, name, operation):
@@ -681,6 +783,7 @@ def _copy_messages_to_relay(
     cleaned_text,
     text_changed,
     source_username=None,
+    cleaned_texts=None,
 ):
     """Copy one batch unit into the relay chat using the Bot identity."""
     source_ref = _bot_source_ref(source_id, group_messages, source_username)
@@ -695,13 +798,22 @@ def _copy_messages_to_relay(
         pass
 
     if len(group_messages) > 1:
-        kwargs = _media_group_copy_kwargs(cleaned_text, text_changed)
-        result = bot.copy_media_group(
-            relay_id,
-            source_ref,
-            anchor.id,
-            **kwargs,
-        )
+        if text_changed and cleaned_texts is not None:
+            bot_group = bot.get_media_group(source_ref, anchor.id) or group_messages
+            result = _send_media_group_with_captions(
+                bot,
+                relay_id,
+                bot_group,
+                _caption_overrides(cleaned_texts, cleaned_text, len(bot_group)),
+            )
+        else:
+            kwargs = _media_group_copy_kwargs(cleaned_text, text_changed)
+            result = bot.copy_media_group(
+                relay_id,
+                source_ref,
+                anchor.id,
+                **kwargs,
+            )
         return _relay_message_ids(result)
 
     message = group_messages[0]
@@ -729,6 +841,7 @@ def _forward_cache_via_bot_relay(
     text_changed,
     log=None,
     source_username=None,
+    cleaned_texts=None,
 ):
     """Relay a restricted cached-copy through Bot, then hidden-forward as user."""
     try:
@@ -777,6 +890,7 @@ def _forward_cache_via_bot_relay(
                 cleaned_text,
                 text_changed,
                 source_username=resolved_username,
+                cleaned_texts=cleaned_texts,
             ),
         )
         _emit_log(
@@ -1079,6 +1193,7 @@ def _reupload_batch_media_group(
     cleaned_text,
     text_changed,
     log=None,
+    cleaned_texts=None,
 ):
     group_messages, downloads, work_dir = _download_batch_media_group_with_retry(
         acc,
@@ -1101,6 +1216,7 @@ def _reupload_batch_media_group(
                 downloads,
                 caption_override=cleaned_text if text_changed else None,
                 caption_entities_override=None if text_changed else None,
+                caption_overrides=cleaned_texts if text_changed else None,
             ),
         )
         _emit_log(
@@ -1131,6 +1247,7 @@ def _forward_batch_media_group(
     bot=None,
     relay_chat_id=None,
     source_username=None,
+    cleaned_texts=None,
 ):
     anchor = group_messages[0]
 
@@ -1141,17 +1258,33 @@ def _forward_batch_media_group(
                 f"{source_id} -> {dest_id}，RPC=copy_media_group",
                 log,
             )
-            copy_kwargs = _media_group_copy_kwargs(cleaned_text, text_changed)
-            _worker_execute(
-                worker,
-                "复制媒体组（缓存发送）",
-                lambda: acc.copy_media_group(
-                    dest_id,
-                    source_id,
-                    anchor.id,
-                    **copy_kwargs,
-                ),
-            )
+            if text_changed and cleaned_texts is not None:
+                _worker_execute(
+                    worker,
+                    "发送修改 caption 的媒体组（缓存发送）",
+                    lambda: _send_media_group_with_captions(
+                        acc,
+                        dest_id,
+                        group_messages,
+                        _caption_overrides(
+                            cleaned_texts,
+                            cleaned_text,
+                            len(group_messages),
+                        ),
+                    ),
+                )
+            else:
+                copy_kwargs = _media_group_copy_kwargs(cleaned_text, text_changed)
+                _worker_execute(
+                    worker,
+                    "复制媒体组（缓存发送）",
+                    lambda: acc.copy_media_group(
+                        dest_id,
+                        source_id,
+                        anchor.id,
+                        **copy_kwargs,
+                    ),
+                )
             _emit_log(
                 f"媒体组 {anchor.id} 已通过缓存复制原样发送: "
                 f"{source_id} -> {dest_id}",
@@ -1187,6 +1320,7 @@ def _forward_batch_media_group(
                     text_changed,
                     log,
                     source_username=source_username,
+                    cleaned_texts=cleaned_texts,
                 ):
                     return len(group_messages), False
             reuploaded = _reupload_batch_media_group(
@@ -1198,6 +1332,7 @@ def _forward_batch_media_group(
                 cleaned_text,
                 text_changed,
                 log,
+                cleaned_texts=cleaned_texts,
             )
             return len(group_messages), True
 
@@ -1253,16 +1388,32 @@ def _forward_batch_media_group(
 
     try:
         if text_changed:
-            _worker_execute(
-                worker,
-                "复制媒体组并修改 caption",
-                lambda: acc.copy_media_group(
-                    dest_id,
-                    source_id,
-                    anchor.id,
-                    **_media_group_copy_kwargs(cleaned_text, True),
-                ),
-            )
+            if cleaned_texts is not None:
+                _worker_execute(
+                    worker,
+                    "发送修改 caption 的媒体组",
+                    lambda: _send_media_group_with_captions(
+                        acc,
+                        dest_id,
+                        group_messages,
+                        _caption_overrides(
+                            cleaned_texts,
+                            cleaned_text,
+                            len(group_messages),
+                        ),
+                    ),
+                )
+            else:
+                _worker_execute(
+                    worker,
+                    "复制媒体组并修改 caption",
+                    lambda: acc.copy_media_group(
+                        dest_id,
+                        source_id,
+                        anchor.id,
+                        **_media_group_copy_kwargs(cleaned_text, True),
+                    ),
+                )
         else:
             _worker_execute(
                 worker,
@@ -1296,6 +1447,7 @@ def _forward_batch_media_group(
             cleaned_text,
             text_changed,
             log,
+            cleaned_texts=cleaned_texts,
         )
         return len(group_messages), True
 
@@ -1691,6 +1843,7 @@ def _forward_batch_unit(
     bot=None,
     relay_chat_id=None,
     source_username=None,
+    cleaned_texts=None,
 ):
     if restricted_source_ids is not None and source_id in restricted_source_ids:
         if cache_send and bot is not None and relay_chat_id is not None:
@@ -1711,6 +1864,7 @@ def _forward_batch_unit(
                 text_changed,
                 log,
                 source_username=source_username,
+                cleaned_texts=cleaned_texts,
             ):
                 return len(group_messages), False
         _emit_log(
@@ -1726,6 +1880,7 @@ def _forward_batch_unit(
             cleaned_text,
             text_changed,
             log,
+            cleaned_texts=cleaned_texts,
         )
 
     if len(group_messages) > 1:
@@ -1744,6 +1899,7 @@ def _forward_batch_unit(
             bot=bot,
             relay_chat_id=relay_chat_id,
             source_username=source_username,
+            cleaned_texts=cleaned_texts,
         )
 
     message = group_messages[0]
@@ -1791,6 +1947,7 @@ def _reupload_batch_unit(
     cleaned_text,
     text_changed,
     log=None,
+    cleaned_texts=None,
 ):
     """Handle a cached-forward-restricted source without trying forbidden RPCs."""
     if len(group_messages) > 1:
@@ -1804,6 +1961,7 @@ def _reupload_batch_unit(
                 cleaned_text,
                 text_changed,
                 log,
+                cleaned_texts=cleaned_texts,
             ),
             True,
         )
@@ -1870,6 +2028,8 @@ def _wait_until_task_active(job_id, log=None):
 def _run_batch_task(job_id, spec):
     log_lines = []
     last_persist = time.monotonic()
+    started_monotonic = time.monotonic()
+    started_at = _now_iso()
 
     def persist(force=False):
         nonlocal last_persist
@@ -1891,19 +2051,71 @@ def _run_batch_task(job_id, spec):
 
     def finish_cancelled():
         log("任务已取消")
+        current = get_task(job_id).get("progress") or {}
         _update_task(
             job_id,
             status="cancelled",
             exitCode=130,
             stderrTail=_tail("\n".join(log_lines)),
         )
+        publish_progress(
+            "cancelled",
+            total=current.get("total", 0),
+            processed=current.get("processed", 0),
+            success=current.get("success", 0),
+            failed=current.get("failed", 0),
+            skipped=current.get("skipped", 0),
+            fetched=current.get("fetched", 0),
+            scanned=current.get("scanned", 0),
+            collected=current.get("collected", 0),
+            current_id=current.get("current_id"),
+        )
         persist(force=True)
+
+    def publish_progress(phase, **values):
+        elapsed = max(0.0, time.monotonic() - started_monotonic)
+        total = int(values.get("total") or 0)
+        processed = int(values.get("processed") or 0)
+        fetched = int(values.get("fetched") or 0)
+        eta_seconds = None
+        if phase == "forwarding" and total > 0 and processed > 0 and elapsed > 0:
+            eta_seconds = max(
+                0,
+                round((total - processed) * elapsed / processed),
+            )
+        percent = (
+            min(100.0, round(processed * 100.0 / total, 1))
+            if total > 0
+            else None
+        )
+        progress = {
+            "phase": phase,
+            "phase_label": PROGRESS_PHASES.get(phase, phase),
+            "started_at": started_at,
+            "elapsed_seconds": round(elapsed, 1),
+            "eta_seconds": eta_seconds,
+            "percent": percent,
+            "total": total,
+            "fetched": fetched,
+            "processed": processed,
+            "success": int(values.get("success") or 0),
+            "failed": int(values.get("failed") or 0),
+            "skipped": int(values.get("skipped") or 0),
+            "scanned": int(values.get("scanned") or 0),
+            "collected": int(values.get("collected") or 0),
+            "current_id": values.get("current_id"),
+        }
+        _update_task(job_id, progress=progress)
+        persist()
+        return progress
 
     try:
         acc = get_acc_instance()
         if acc is None:
             raise RuntimeError("用户客户端尚未初始化，请先完成 /setup 配置")
 
+        publish_progress("resolving")
+        log("正在解析来源与目标")
         worker = MessageWorker(None, acc, max_retries=3)
         source_ref = spec.get("source")
         source_id = _resolve_chat(acc, source_ref)
@@ -1922,16 +2134,24 @@ def _run_batch_task(job_id, spec):
                     f"{type(exc).__name__}: {exc}",
                     level="warning",
                 )
-        ids = _collect_message_ids(acc, source_id, spec)
+        publish_progress("collecting", scanned=0, collected=0)
+        log("正在收集消息范围")
+        ids = _collect_message_ids(
+            acc,
+            source_id,
+            spec,
+            progress_callback=lambda scanned, collected: publish_progress(
+                "collecting",
+                scanned=scanned,
+                collected=collected,
+            ),
+        )
 
         total = len(ids)
         if not _wait_until_task_active(job_id, log):
             finish_cancelled()
             return
-        _update_task(
-            job_id,
-            progress={"total": total, "processed": 0, "success": 0, "failed": 0, "skipped": 0},
-        )
+        publish_progress("preparing", total=total)
         log(f"开始处理 {total} 条消息: {source_id} -> {dest_id}")
 
         forward_mode = str(spec.get("forward_mode", "clone")).lower()
@@ -1953,120 +2173,222 @@ def _run_batch_task(job_id, spec):
         )
         processed = success = failed = skipped = 0
         handled_ids = set()
+        group_cache = {}
         restricted_source_ids = set()
+        last_logged_bucket = 0
 
-        def persist_progress():
-            _update_task(
-                job_id,
-                progress={
-                    "total": total,
-                    "processed": processed,
-                    "success": success,
-                    "failed": failed,
-                    "skipped": skipped,
-                },
-            )
-            persist()
-
-        for index, message_id in enumerate(ids, start=1):
+        for chunk_start in range(0, total, BATCH_FETCH_CHUNK_SIZE):
+            chunk_ids = ids[chunk_start:chunk_start + BATCH_FETCH_CHUNK_SIZE]
             if not _wait_until_task_active(job_id, log):
                 finish_cancelled()
                 return
 
-            unit_count = 1
-            group_messages = None
+            publish_progress(
+                "preparing",
+                total=total,
+                fetched=chunk_start,
+                processed=processed,
+                success=success,
+                failed=failed,
+                skipped=skipped,
+                current_id=chunk_ids[0] if chunk_ids else None,
+            )
             try:
-                if message_id in handled_ids:
-                    continue
-
-                message = acc.get_messages(source_id, message_id)
-                if not message or getattr(message, "empty", False):
-                    skipped += 1
-                    processed += 1
-                    persist_progress()
-                    continue
-
-                group_messages = _get_private_media_group_messages(
-                    acc,
-                    source_id,
-                    message,
+                fetched_messages = _worker_execute(
+                    worker,
+                    "批量读取消息",
+                    lambda: acc.get_messages(source_id, chunk_ids),
                 )
-                group_ids = [item.id for item in group_messages]
-                handled_ids.update(group_ids)
-                unit_count = len(group_messages)
-                text = _group_text(group_messages)
+                if not isinstance(fetched_messages, list):
+                    fetched_messages = [fetched_messages]
+            except Exception as exc:
+                log(
+                    f"批量读取消息失败，回退逐条读取: "
+                    f"{type(exc).__name__}: {exc}",
+                    level="warning",
+                )
+                fetched_messages = []
+                for message_id in chunk_ids:
+                    try:
+                        fetched_messages.append(
+                            acc.get_messages(source_id, message_id)
+                        )
+                    except Exception:
+                        fetched_messages.append(None)
 
+            message_map = {
+                getattr(item, "id", None): item
+                for item in fetched_messages
+                if item is not None and not getattr(item, "empty", False)
+            }
+            fetched_count = min(chunk_start + len(chunk_ids), total)
+
+            for message_id in chunk_ids:
                 if not _wait_until_task_active(job_id, log):
                     finish_cancelled()
                     return
-
-                task = get_task(job_id)
-                rules = _filter_rule_set(task.get("spec") or spec)
-                exclude_terms = rules["exclude_terms"]
-                exclude_patterns = rules["exclude_patterns"]
-                remove_terms = rules["remove_terms"]
-                remove_patterns = rules["remove_patterns"]
-                if _matches_exclude(text, exclude_terms) or _matches_exclude_regex(
-                    text,
-                    exclude_patterns,
-                ):
-                    skipped += unit_count
-                    processed += unit_count
-                    persist_progress()
+                if message_id in handled_ids:
                     continue
 
-                cleaned = _remove_matches(text, remove_terms, remove_patterns)
-                text_changed = cleaned != text
-                if unit_count == 1 and get_message_type(
-                    group_messages[0]
-                ) in ("Text", None) and not cleaned.strip():
-                    skipped += unit_count
-                    processed += unit_count
-                    persist_progress()
-                    continue
+                unit_count = 1
+                group_messages = None
+                try:
+                    message = message_map.get(message_id)
+                    if not message:
+                        skipped += 1
+                        processed += 1
+                        publish_progress(
+                            "forwarding",
+                            total=total,
+                            fetched=fetched_count,
+                            processed=processed,
+                            success=success,
+                            failed=failed,
+                            skipped=skipped,
+                            current_id=message_id,
+                        )
+                        continue
 
-                sent_count, used_fallback = _forward_batch_unit(
-                    worker,
-                    acc,
-                    source_id,
-                    dest_id,
-                    group_messages,
-                    cleaned,
-                    text_changed,
-                    preserve_source,
-                    log,
-                    restricted_source_ids,
-                    cache_send=cache_send,
-                    bot=bot,
-                    relay_chat_id=relay_chat_id,
-                    source_username=source_username,
-                )
-                success += sent_count
-                processed += sent_count
-                if used_fallback:
-                    fallback_label = "媒体组" if unit_count > 1 else "消息"
-                    log(
-                        f"消息 {message_id} 受限，已通过用户客户端下载后重传"
-                        f"（{fallback_label}，共 {sent_count} 项）"
+                    media_group_id = getattr(message, "media_group_id", None)
+                    if media_group_id and media_group_id in group_cache:
+                        group_messages = group_cache[media_group_id]
+                    else:
+                        group_messages = _get_private_media_group_messages(
+                            acc,
+                            source_id,
+                            message,
+                        )
+                        if media_group_id:
+                            group_cache[media_group_id] = group_messages
+                    group_ids = [item.id for item in group_messages]
+                    handled_ids.update(group_ids)
+                    unit_count = len(group_messages)
+                    texts = _group_texts(group_messages)
+
+                    if not _wait_until_task_active(job_id, log):
+                        finish_cancelled()
+                        return
+
+                    task = get_task(job_id)
+                    rules = _filter_rule_set(task.get("spec") or spec)
+                    exclude_terms = rules["exclude_terms"]
+                    exclude_patterns = rules["exclude_patterns"]
+                    remove_terms = rules["remove_terms"]
+                    remove_patterns = rules["remove_patterns"]
+                    if any(
+                        _matches_exclude(text, exclude_terms)
+                        or _matches_exclude_regex(text, exclude_patterns)
+                        for text in texts
+                    ):
+                        skipped += unit_count
+                        processed += unit_count
+                        publish_progress(
+                            "forwarding",
+                            total=total,
+                            fetched=fetched_count,
+                            processed=processed,
+                            success=success,
+                            failed=failed,
+                            skipped=skipped,
+                            current_id=message_id,
+                        )
+                        continue
+
+                    cleaned_texts = [
+                        _remove_matches(text, remove_terms, remove_patterns)
+                        for text in texts
+                    ]
+                    text_changed = any(
+                        cleaned != original
+                        for cleaned, original in zip(cleaned_texts, texts)
                     )
-            except Exception as exc:
-                unit_count = len(group_messages) if group_messages else 1
-                failed += unit_count
-                processed += unit_count
-                log(
-                    f"消息 {message_id} 失败: {type(exc).__name__}: {exc}",
-                    level="error",
-                )
+                    cleaned_text = next(
+                        (text for text in cleaned_texts if text),
+                        "",
+                    )
+                    if unit_count == 1 and get_message_type(
+                        group_messages[0]
+                    ) in ("Text", None) and not cleaned_text.strip():
+                        skipped += unit_count
+                        processed += unit_count
+                        publish_progress(
+                            "forwarding",
+                            total=total,
+                            fetched=fetched_count,
+                            processed=processed,
+                            success=success,
+                            failed=failed,
+                            skipped=skipped,
+                            current_id=message_id,
+                        )
+                        continue
 
-            persist_progress()
-            if index % 10 == 0:
-                log(f"进度 {processed}/{total}，成功 {success}，失败 {failed}，跳过 {skipped}")
+                    sent_count, used_fallback = _forward_batch_unit(
+                        worker,
+                        acc,
+                        source_id,
+                        dest_id,
+                        group_messages,
+                        cleaned_text,
+                        text_changed,
+                        preserve_source,
+                        log,
+                        restricted_source_ids,
+                        cache_send=cache_send,
+                        bot=bot,
+                        relay_chat_id=relay_chat_id,
+                        source_username=source_username,
+                        cleaned_texts=cleaned_texts,
+                    )
+                    success += sent_count
+                    processed += sent_count
+                    if used_fallback:
+                        fallback_label = "媒体组" if unit_count > 1 else "消息"
+                        log(
+                            f"消息 {message_id} 受限，已通过用户客户端下载后重传"
+                            f"（{fallback_label}，共 {sent_count} 项）"
+                        )
+                except Exception as exc:
+                    unit_count = len(group_messages) if group_messages else 1
+                    failed += unit_count
+                    processed += unit_count
+                    log(
+                        f"消息 {message_id} 失败: {type(exc).__name__}: {exc}",
+                        level="error",
+                    )
+
+                publish_progress(
+                    "forwarding",
+                    total=total,
+                    fetched=fetched_count,
+                    processed=processed,
+                    success=success,
+                    failed=failed,
+                    skipped=skipped,
+                    current_id=message_id,
+                )
+                log_bucket = processed // 10
+                if log_bucket > last_logged_bucket:
+                    last_logged_bucket = log_bucket
+                    log(
+                        f"进度 {processed}/{total}，成功 {success}，"
+                        f"失败 {failed}，跳过 {skipped}"
+                    )
 
         if get_task(job_id).get("cancelled"):
             finish_cancelled()
             return
 
         log(f"任务完成: 成功 {success}，失败 {failed}，跳过 {skipped}")
+        publish_progress(
+            "done" if failed == 0 else "error",
+            total=total,
+            fetched=total,
+            processed=processed,
+            success=success,
+            failed=failed,
+            skipped=skipped,
+        )
         _update_task(
             job_id,
             status="done" if failed == 0 else "error",
@@ -2079,6 +2401,17 @@ def _run_batch_task(job_id, spec):
             finish_cancelled()
             return
         log(f"任务异常终止: {type(exc).__name__}: {exc}")
+        current = get_task(job_id).get("progress") or {}
+        publish_progress(
+            "error",
+            total=current.get("total", 0),
+            fetched=current.get("fetched", 0),
+            processed=current.get("processed", 0),
+            success=current.get("success", 0),
+            failed=current.get("failed", 0),
+            skipped=current.get("skipped", 0),
+            current_id=current.get("current_id"),
+        )
         _update_task(
             job_id,
             status="error",
@@ -2117,7 +2450,16 @@ def submit_batch_task(spec):
         "cancelled": False,
         "paused": False,
         "resume_event": threading.Event(),
-        "progress": {},
+        "progress": {
+            "phase": "queued",
+            "phase_label": PROGRESS_PHASES["queued"],
+            "total": 0,
+            "fetched": 0,
+            "processed": 0,
+            "success": 0,
+            "failed": 0,
+            "skipped": 0,
+        },
         "stdoutTail": "",
         "stderrTail": "",
         "spec": spec,
@@ -2225,6 +2567,10 @@ def pause_batch_task(job_id):
             event.clear()
         task["paused"] = True
         task["status"] = "paused"
+        progress = dict(task.get("progress") or {})
+        progress["phase"] = "paused"
+        progress["phase_label"] = PROGRESS_PHASES["paused"]
+        task["progress"] = progress
     _persist_task_history(job_id)
     return True
 
@@ -2236,6 +2582,11 @@ def resume_batch_task(job_id):
             return False
         task["paused"] = False
         task["status"] = "running"
+        progress = dict(task.get("progress") or {})
+        progress["phase"] = "forwarding"
+        progress["phase_label"] = PROGRESS_PHASES["forwarding"]
+        progress["eta_seconds"] = None
+        task["progress"] = progress
         event = task.get("resume_event")
         if event is not None:
             event.set()
