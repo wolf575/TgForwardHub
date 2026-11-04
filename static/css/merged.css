@@ -414,7 +414,16 @@ textarea {
   cursor: pointer;
 }
 
+.history-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .history-item strong { display: block; }
+.history-delete { flex: 0 0 auto; }
+.history-delete:disabled { cursor: not-allowed; opacity: 0.55; }
 .history-item .meta { margin-top: 4px; color: var(--muted); font-size: 12px; }
 .history-item pre {
   white-space: pre-wrap;

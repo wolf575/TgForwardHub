@@ -971,6 +971,21 @@ def api_history():
     return jsonify({'ok': True})
 
 
+@app.route('/api/history/<path:record_id>', methods=['DELETE'])
+def api_history_item(record_id):
+    if 'username' not in session:
+        return jsonify({'error': '未登录'}), 401
+
+    record = batch_forward.get_history_record(record_id)
+    if not record:
+        return jsonify({'error': 'history record not found'}), 404
+    if record.get('status') in ('running', 'paused'):
+        return jsonify({'error': '运行中或暂停中的任务不能删除'}), 409
+    if batch_forward.delete_history_record(record_id):
+        return jsonify({'ok': True})
+    return jsonify({'error': 'history record not found'}), 404
+
+
 @app.route('/api/batch-forward', methods=['POST'])
 def api_batch_forward():
     if 'username' not in session:

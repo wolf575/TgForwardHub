@@ -1,5 +1,6 @@
 import threading
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import batch_forward
@@ -141,6 +142,93 @@ class BatchFilterTests(unittest.TestCase):
 
         media = client.group_sends[0][1]
         self.assertEqual([item.caption for item in media], cleaned)
+
+    def test_exclude_rule_sees_quote_and_reply_preview_text(self):
+        message = _FakeMessage(1, text="正常正文")
+        message.quote_text = USER_REGEX
+        rules = batch_forward._filter_rule_set(
+            {
+                "range_type": "id",
+                "start": 1,
+                "end": 1,
+                "exclude_regex": USER_REGEX,
+            }
+        )
+
+        filtered = batch_forward._apply_filter_rules([message], rules)
+
+        self.assertTrue(filtered["excluded"])
+
+        quote_object_message = _FakeMessage(1, text="普通正文")
+        quote_object_message.quote = SimpleNamespace(text=USER_REGEX)
+        filtered_quote_object = batch_forward._apply_filter_rules(
+            [quote_object_message],
+            rules,
+        )
+
+        self.assertTrue(filtered_quote_object["excluded"])
+
+        reply_message = _FakeMessage(1, text="普通回复")
+        reply_message.reply_to_message = _FakeMessage(2, text=USER_REGEX)
+        filtered_reply = batch_forward._apply_filter_rules(
+            [reply_message],
+            rules,
+        )
+
+        self.assertTrue(filtered_reply["excluded"])
+
+        link_message = _FakeMessage(1, text="链接消息")
+        link_message.web_page = SimpleNamespace(
+            title=USER_REGEX,
+            description=None,
+        )
+        filtered_link = batch_forward._apply_filter_rules(
+            [link_message],
+            rules,
+        )
+
+        self.assertTrue(filtered_link["excluded"])
+
+    def test_delete_rule_on_quote_preview_removes_the_quote_without_changing_text(self):
+        message = _FakeMessage(1, text="保留正文")
+        message.reply_to_message = _FakeMessage(2, text=USER_REGEX)
+        rules = batch_forward._filter_rule_set(
+            {
+                "range_type": "id",
+                "start": 1,
+                "end": 1,
+                "remove_regex": USER_REGEX,
+            }
+        )
+
+        filtered = batch_forward._apply_filter_rules([message], rules)
+
+        self.assertFalse(filtered["excluded"])
+        self.assertEqual(filtered["cleaned_texts"], ["保留正文"])
+        self.assertTrue(filtered["text_changed"])
+        self.assertTrue(filtered["rich_content_changed"])
+
+    def test_blockquote_entity_text_remains_filterable(self):
+        message = _FakeMessage(1, text=USER_REGEX)
+        message.entities = [
+            SimpleNamespace(
+                type="blockquote",
+                offset=0,
+                length=len(USER_REGEX),
+            )
+        ]
+        rules = batch_forward._filter_rule_set(
+            {
+                "range_type": "id",
+                "start": 1,
+                "end": 1,
+                "exclude_regex": USER_REGEX,
+            }
+        )
+
+        filtered = batch_forward._apply_filter_rules([message], rules)
+
+        self.assertTrue(filtered["excluded"])
 
 
 class BatchProgressTests(unittest.TestCase):

@@ -108,6 +108,20 @@ class BatchHistoryTests(unittest.TestCase):
         self.assertEqual(len(history), 1)
         self.assertEqual(history[0]["id"], "newer")
 
+    def test_delete_single_history_record_keeps_other_commands(self):
+        batch_forward.save_history(
+            _history_record("keep-job", "Keep", "2026-10-23T10:00:00+08:00")
+        )
+        batch_forward.save_history(
+            _history_record("delete-job", "Delete", "2026-10-24T10:00:00+08:00")
+        )
+
+        self.assertTrue(batch_forward.delete_history_record("delete-job"))
+
+        history = batch_forward.list_history()
+        self.assertEqual([item["id"] for item in history], ["keep-job"])
+        self.assertFalse(batch_forward.delete_history_record("missing-job"))
+
     def test_time_range_includes_the_end_date(self):
         start = int(
             datetime(2026, 10, 24, 0, 0, tzinfo=timezone.utc).timestamp()

@@ -269,6 +269,18 @@ def clear_history():
         conn.execute("DELETE FROM history")
 
 
+def delete_history_record(record_id):
+    record_id = str(record_id or "").strip()
+    if not record_id:
+        return False
+    with _history_conn() as conn:
+        cursor = conn.execute(
+            "DELETE FROM history WHERE id = ? OR jobId = ?",
+            (record_id, record_id),
+        )
+        return cursor.rowcount > 0
+
+
 def _tail(value, limit=4000):
     value = value or ""
     return value[-limit:]
@@ -703,6 +715,111 @@ def _group_texts(group_messages):
         str(getattr(message, "caption", None) or getattr(message, "text", None) or "")
         for message in group_messages
     ]
+
+
+def _unique_text_fragments(values):
+    result = []
+    seen = set()
+    for value in values:
+        if value is None:
+            continue
+        text = str(value)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _message_filter_texts(message, include_reply=True):
+    """Return visible text fragments, including quote and reply previews."""
+    # Pyrogram 2.0.x does not expose Telegram quote_text directly, so the
+    # referenced message is also used as a fallback for visible quote content.
+    values = [
+        getattr(message, attr, None)
+        for attr in ("text", "caption", "quote_text", "quote_caption")
+    ]
+
+    quote = getattr(message, "quote", None)
+    if isinstance(quote, dict):
+        values.extend(
+            quote.get(attr)
+            for attr in ("text", "caption", "quote_text", "quote_caption")
+        )
+    elif quote is not None:
+        values.extend(
+            getattr(quote, attr, None)
+            for attr in ("text", "caption", "quote_text", "quote_caption")
+        )
+
+    web_page = getattr(message, "web_page", None)
+    if web_page is not None:
+        values.extend(
+            getattr(web_page, attr, None)
+            for attr in ("title", "description")
+        )
+
+    if include_reply:
+        reply = getattr(message, "reply_to_message", None)
+        if reply is not None and reply is not message:
+            values.extend(_message_filter_texts(reply, include_reply=False))
+
+    return _unique_text_fragments(values)
+
+
+def _group_filter_texts(group_messages):
+    texts = []
+    for message in group_messages:
+        texts.extend(_message_filter_texts(message))
+    return _unique_text_fragments(texts)
+
+
+def _apply_filter_rules(group_messages, rules):
+    """Evaluate exclusion and deletion rules across primary and rich text."""
+    primary_texts = _group_texts(group_messages)
+    filter_texts = _group_filter_texts(group_messages)
+    exclude_terms = rules["exclude_terms"]
+    exclude_patterns = rules["exclude_patterns"]
+    remove_terms = rules["remove_terms"]
+    remove_patterns = rules["remove_patterns"]
+
+    excluded = any(
+        _matches_exclude(text, exclude_terms)
+        or _matches_exclude_regex(text, exclude_patterns)
+        for text in filter_texts
+    )
+    if excluded:
+        return {
+            "excluded": True,
+            "texts": primary_texts,
+            "cleaned_texts": primary_texts,
+            "text_changed": False,
+            "rich_content_changed": False,
+        }
+
+    cleaned_texts = [
+        _remove_matches(text, remove_terms, remove_patterns)
+        for text in primary_texts
+    ]
+    cleaned_filter_texts = [
+        _remove_matches(text, remove_terms, remove_patterns)
+        for text in filter_texts
+    ]
+    text_changed = any(
+        cleaned != original
+        for cleaned, original in zip(cleaned_filter_texts, filter_texts)
+    )
+    primary_changed = any(
+        cleaned != original
+        for cleaned, original in zip(cleaned_texts, primary_texts)
+    )
+    return {
+        "excluded": False,
+        "texts": primary_texts,
+        "cleaned_texts": cleaned_texts,
+        "text_changed": text_changed,
+        "rich_content_changed": text_changed and not primary_changed,
+    }
 
 
 def _group_text(group_messages):
@@ -2263,7 +2380,6 @@ def _run_batch_task(job_id, spec):
                     group_ids = [item.id for item in group_messages]
                     handled_ids.update(group_ids)
                     unit_count = len(group_messages)
-                    texts = _group_texts(group_messages)
 
                     if not _wait_until_task_active(job_id, log):
                         finish_cancelled()
@@ -2271,15 +2387,8 @@ def _run_batch_task(job_id, spec):
 
                     task = get_task(job_id)
                     rules = _filter_rule_set(task.get("spec") or spec)
-                    exclude_terms = rules["exclude_terms"]
-                    exclude_patterns = rules["exclude_patterns"]
-                    remove_terms = rules["remove_terms"]
-                    remove_patterns = rules["remove_patterns"]
-                    if any(
-                        _matches_exclude(text, exclude_terms)
-                        or _matches_exclude_regex(text, exclude_patterns)
-                        for text in texts
-                    ):
+                    filtered = _apply_filter_rules(group_messages, rules)
+                    if filtered["excluded"]:
                         skipped += unit_count
                         processed += unit_count
                         publish_progress(
@@ -2294,14 +2403,13 @@ def _run_batch_task(job_id, spec):
                         )
                         continue
 
-                    cleaned_texts = [
-                        _remove_matches(text, remove_terms, remove_patterns)
-                        for text in texts
-                    ]
-                    text_changed = any(
-                        cleaned != original
-                        for cleaned, original in zip(cleaned_texts, texts)
-                    )
+                    cleaned_texts = filtered["cleaned_texts"]
+                    text_changed = filtered["text_changed"]
+                    if filtered["rich_content_changed"]:
+                        log(
+                            f"消息 {message_id} 的引用、回复或链接预览命中删除规则，"
+                            "将移除富文本预览后重发正文"
+                        )
                     cleaned_text = next(
                         (text for text in cleaned_texts if text),
                         "",

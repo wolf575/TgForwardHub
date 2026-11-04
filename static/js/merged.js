@@ -21,6 +21,7 @@ async function apiFetch(url, options = {}) {
         401: "登录状态已失效，请重新登录",
         403: "没有执行此操作的权限",
         404: "请求的资源不存在",
+        409: "当前状态不允许执行此操作",
         500: "服务器内部错误",
         503: "服务暂时不可用，请稍后重试",
       };
@@ -756,11 +757,29 @@ async function loadStatus() {
 }
 
 function historySubtitle(item) {
-  const parts = [];
+  const spec = item.task_spec || {};
+  const state = item.state || {};
+  const rangeType = state.rangeType || spec.range_type || "id";
+  const startValue = state.startValue ?? spec.start ?? "";
+  const endValue = state.endValue ?? spec.end ?? "";
+  const range =
+    rangeType === "time"
+      ? `时间: ${historyDateValue(startValue) || "未知"} → ${
+          historyDateValue(endValue) || "未知"
+        }`
+      : `消息 ID: ${startValue || "?"} → ${endValue || "?"}`;
+  const parts = [range];
   if (item.sourceId) parts.push(`来源: ${item.sourceId}`);
   if (item.targetId) parts.push(`目标: ${item.targetId}`);
   if (item.status) parts.push(item.status);
+  if (item.createdAt) parts.push(`创建: ${formatHistoryCreatedAt(item.createdAt)}`);
   return parts.join(" · ");
+}
+
+function formatHistoryCreatedAt(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("zh-CN", { hour12: false });
 }
 
 function applyBatchSpecToForm(spec = {}, state = {}, options = {}) {
@@ -812,12 +831,45 @@ async function loadHistory() {
   for (const item of items) {
     const card = document.createElement("div");
     card.className = "history-item";
+    const titleRow = document.createElement("div");
+    titleRow.className = "history-title-row";
     const title = document.createElement("strong");
     title.textContent = item.taskName || item.targetId || "未命名任务";
+    const deleteButton = document.createElement("button");
+    const recordId = item.id || item.jobId || "";
+    const isActive = ["running", "paused"].includes(item.status);
+    deleteButton.type = "button";
+    deleteButton.className = "danger small history-delete";
+    deleteButton.textContent = "删除";
+    deleteButton.disabled = !recordId || isActive;
+    deleteButton.title = isActive
+      ? "运行中或暂停中的任务不能删除"
+      : "删除这条命令历史";
+    deleteButton.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      if (!recordId || !window.confirm(`确定删除“${title.textContent}”？`)) {
+        return;
+      }
+      deleteButton.disabled = true;
+      try {
+        await apiFetch(`/api/history/${encodeURIComponent(recordId)}`, {
+          method: "DELETE",
+        });
+        card.remove();
+        if (!body.querySelector(".history-item")) {
+          body.textContent = "暂无历史记录";
+        }
+        setMessage("batchMessage", `已删除历史记录: ${title.textContent}`);
+      } catch (error) {
+        deleteButton.disabled = false;
+        setMessage("batchMessage", `删除失败: ${error.message}`);
+      }
+    });
+    titleRow.append(title, deleteButton);
     const meta = document.createElement("div");
     meta.className = "meta";
     meta.textContent = historySubtitle(item);
-    card.append(title, meta);
+    card.append(titleRow, meta);
 
     card.addEventListener("click", () => {
       const state = item.state || {};

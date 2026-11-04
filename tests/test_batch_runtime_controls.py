@@ -507,6 +507,36 @@ class BatchRuntimeApiTests(unittest.TestCase):
         self.assertEqual(paused.get_json()["status"], "paused")
         self.assertEqual(resumed.get_json()["status"], "running")
 
+    def test_single_history_delete_endpoint(self):
+        with mock.patch.object(
+            batch_forward,
+            "get_history_record",
+            return_value={"id": "done-job", "status": "done"},
+        ), mock.patch.object(
+            batch_forward,
+            "delete_history_record",
+            return_value=True,
+        ) as delete:
+            response = self.client.delete("/api/history/done-job")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["ok"])
+        delete.assert_called_once_with("done-job")
+
+    def test_active_history_delete_is_rejected(self):
+        with mock.patch.object(
+            batch_forward,
+            "get_history_record",
+            return_value={"id": "active-job", "status": "running"},
+        ), mock.patch.object(
+            batch_forward,
+            "delete_history_record",
+        ) as delete:
+            response = self.client.delete("/api/history/active-job")
+
+        self.assertEqual(response.status_code, 409)
+        delete.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
