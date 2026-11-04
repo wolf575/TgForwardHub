@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>TG Forward Hub</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/merged.css') }}?v=20260923-account-mobile">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/merged.css') }}?v=20261104-runtime-controls">
 </head>
 <body>
   <header class="topbar">
@@ -128,7 +128,11 @@
             <div><span>跳过</span><strong id="skippedCount">0</strong></div>
           </div>
           <textarea id="jobLog" readonly placeholder="任务日志"></textarea>
-          <button id="cancelBtn" class="secondary" hidden>取消任务</button>
+          <div class="monitor-actions">
+            <button id="pauseBtn" class="secondary" type="button" hidden>暂停任务</button>
+            <button id="resumeBtn" class="primary" type="button" hidden>继续任务</button>
+            <button id="cancelBtn" class="danger" type="button" hidden>取消任务</button>
+          </div>
         </div>
       </div>
 
@@ -409,6 +413,6 @@
     </section>
   </main>
 
-  <script src="{{ url_for('static', filename='js/merged.js') }}?v=20261025-batch-renewal"></script>
+  <script src="{{ url_for('static', filename='js/merged.js') }}?v=20261104-runtime-controls"></script>
 </body>
 </html>

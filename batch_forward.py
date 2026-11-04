@@ -63,6 +63,18 @@ DOWNLOADABLE_MEDIA_TYPES = {
 
 TASKS = {}
 TASKS_LOCK = threading.Lock()
+FILTER_FIELDS = (
+    "exclude_keywords",
+    "exclude_regex",
+    "remove_keywords",
+    "remove_regex",
+)
+FILTER_STATE_KEYS = {
+    "exclude_keywords": "excludeKeywords",
+    "exclude_regex": "excludeRegex",
+    "remove_keywords": "removeKeywords",
+    "remove_regex": "removeRegex",
+}
 
 
 def _connect():
@@ -107,7 +119,7 @@ def init_history_db():
             """
             UPDATE history
             SET status = 'interrupted', exitCode = COALESCE(exitCode, 130)
-            WHERE status = 'running'
+            WHERE status IN ('running', 'paused')
             """
         )
         conn.execute(
@@ -320,6 +332,15 @@ def _compile_regex_patterns(raw, field_name="正则表达式"):
 
 def _matches_exclude_regex(text, patterns):
     return any(pattern.search(text or "") for pattern in patterns)
+
+
+def _media_group_copy_kwargs(cleaned_text, text_changed):
+    if not text_changed:
+        return {}
+    # Pyrogram treats an empty list item as "not provided" and keeps the
+    # original caption. A string, including "", reliably overrides the first
+    # album caption and clears any caption on the remaining items.
+    return {"captions": cleaned_text}
 
 
 def _strip_trailing_blocks(text, terms):
@@ -674,7 +695,7 @@ def _copy_messages_to_relay(
         pass
 
     if len(group_messages) > 1:
-        kwargs = {"captions": [cleaned_text]} if text_changed else {}
+        kwargs = _media_group_copy_kwargs(cleaned_text, text_changed)
         result = bot.copy_media_group(
             relay_id,
             source_ref,
@@ -1120,7 +1141,7 @@ def _forward_batch_media_group(
                 f"{source_id} -> {dest_id}，RPC=copy_media_group",
                 log,
             )
-            copy_kwargs = {"captions": [cleaned_text]} if text_changed else {}
+            copy_kwargs = _media_group_copy_kwargs(cleaned_text, text_changed)
             _worker_execute(
                 worker,
                 "复制媒体组（缓存发送）",
@@ -1239,7 +1260,7 @@ def _forward_batch_media_group(
                     dest_id,
                     source_id,
                     anchor.id,
-                    captions=[cleaned_text],
+                    **_media_group_copy_kwargs(cleaned_text, True),
                 ),
             )
         else:
@@ -1822,6 +1843,30 @@ def _reupload_batch_unit(
     )
 
 
+def _wait_until_task_active(job_id, log=None):
+    task = get_task(job_id)
+    if task.get("cancelled"):
+        return False
+    if not task.get("paused"):
+        return True
+
+    if log is not None:
+        log("任务已暂停，等待继续")
+    event = task.get("resume_event")
+    if event is not None:
+        event.wait()
+    else:
+        while get_task(job_id).get("paused"):
+            time.sleep(0.2)
+
+    task = get_task(job_id)
+    if task.get("cancelled"):
+        return False
+    if log is not None:
+        log("任务已继续")
+    return True
+
+
 def _run_batch_task(job_id, spec):
     log_lines = []
     last_persist = time.monotonic()
@@ -1880,21 +1925,15 @@ def _run_batch_task(job_id, spec):
         ids = _collect_message_ids(acc, source_id, spec)
 
         total = len(ids)
-        if get_task(job_id).get("cancelled"):
+        if not _wait_until_task_active(job_id, log):
             finish_cancelled()
             return
         _update_task(
             job_id,
-            status="running",
             progress={"total": total, "processed": 0, "success": 0, "failed": 0, "skipped": 0},
         )
         log(f"开始处理 {total} 条消息: {source_id} -> {dest_id}")
 
-        rules = _filter_rule_set(spec)
-        exclude_terms = rules["exclude_terms"]
-        exclude_patterns = rules["exclude_patterns"]
-        remove_terms = rules["remove_terms"]
-        remove_patterns = rules["remove_patterns"]
         forward_mode = str(spec.get("forward_mode", "clone")).lower()
         preserve_source = forward_mode == "direct"
         mode = {
@@ -1916,9 +1955,21 @@ def _run_batch_task(job_id, spec):
         handled_ids = set()
         restricted_source_ids = set()
 
+        def persist_progress():
+            _update_task(
+                job_id,
+                progress={
+                    "total": total,
+                    "processed": processed,
+                    "success": success,
+                    "failed": failed,
+                    "skipped": skipped,
+                },
+            )
+            persist()
+
         for index, message_id in enumerate(ids, start=1):
-            task = get_task(job_id)
-            if task.get("cancelled"):
+            if not _wait_until_task_active(job_id, log):
                 finish_cancelled()
                 return
 
@@ -1932,6 +1983,7 @@ def _run_batch_task(job_id, spec):
                 if not message or getattr(message, "empty", False):
                     skipped += 1
                     processed += 1
+                    persist_progress()
                     continue
 
                 group_messages = _get_private_media_group_messages(
@@ -1944,12 +1996,23 @@ def _run_batch_task(job_id, spec):
                 unit_count = len(group_messages)
                 text = _group_text(group_messages)
 
+                if not _wait_until_task_active(job_id, log):
+                    finish_cancelled()
+                    return
+
+                task = get_task(job_id)
+                rules = _filter_rule_set(task.get("spec") or spec)
+                exclude_terms = rules["exclude_terms"]
+                exclude_patterns = rules["exclude_patterns"]
+                remove_terms = rules["remove_terms"]
+                remove_patterns = rules["remove_patterns"]
                 if _matches_exclude(text, exclude_terms) or _matches_exclude_regex(
                     text,
                     exclude_patterns,
                 ):
                     skipped += unit_count
                     processed += unit_count
+                    persist_progress()
                     continue
 
                 cleaned = _remove_matches(text, remove_terms, remove_patterns)
@@ -1959,6 +2022,7 @@ def _run_batch_task(job_id, spec):
                 ) in ("Text", None) and not cleaned.strip():
                     skipped += unit_count
                     processed += unit_count
+                    persist_progress()
                     continue
 
                 sent_count, used_fallback = _forward_batch_unit(
@@ -1994,17 +2058,7 @@ def _run_batch_task(job_id, spec):
                     level="error",
                 )
 
-            _update_task(
-                job_id,
-                progress={
-                    "total": total,
-                    "processed": processed,
-                    "success": success,
-                    "failed": failed,
-                    "skipped": skipped,
-                },
-            )
-            persist()
+            persist_progress()
             if index % 10 == 0:
                 log(f"进度 {processed}/{total}，成功 {success}，失败 {failed}，跳过 {skipped}")
 
@@ -2061,6 +2115,8 @@ def submit_batch_task(spec):
         "active": True,
         "exitCode": None,
         "cancelled": False,
+        "paused": False,
+        "resume_event": threading.Event(),
         "progress": {},
         "stdoutTail": "",
         "stderrTail": "",
@@ -2071,6 +2127,7 @@ def submit_batch_task(spec):
         "createdAt": _now_iso(),
         "state": state,
     }
+    task["resume_event"].set()
     with TASKS_LOCK:
         task_name_key = _task_name(task.get("taskName")).casefold()
         if task_name_key:
@@ -2117,17 +2174,90 @@ def submit_batch_task(spec):
     return job_id
 
 
+def update_batch_rules(job_id, rules):
+    if not isinstance(rules, dict):
+        raise ValueError("规则格式不正确")
+
+    updates = {
+        field: str(rules[field] or "")
+        for field in FILTER_FIELDS
+        if field in rules
+    }
+    if not updates:
+        raise ValueError("没有可更新的规则")
+
+    if "exclude_regex" in updates:
+        _compile_regex_patterns(updates["exclude_regex"], "排除正则")
+    if "remove_regex" in updates:
+        _compile_regex_patterns(updates["remove_regex"], "删除正则")
+
+    with TASKS_LOCK:
+        task = TASKS.get(job_id)
+        if not task:
+            return False
+        active = task.get("active", task.get("status") in ("running", "paused"))
+        if not active or task.get("status") not in ("running", "paused"):
+            return False
+
+        spec = dict(task.get("spec") or {})
+        spec.update(updates)
+        state = dict(task.get("state") or {})
+        state.update(
+            {
+                FILTER_STATE_KEYS[field]: value
+                for field, value in updates.items()
+            }
+        )
+        task["spec"] = spec
+        task["state"] = state
+
+    _persist_task_history(job_id)
+    return spec
+
+
+def pause_batch_task(job_id):
+    with TASKS_LOCK:
+        task = TASKS.get(job_id)
+        if not task or task.get("status") != "running" or not task.get("active"):
+            return False
+        event = task.get("resume_event")
+        if event is not None:
+            event.clear()
+        task["paused"] = True
+        task["status"] = "paused"
+    _persist_task_history(job_id)
+    return True
+
+
+def resume_batch_task(job_id):
+    with TASKS_LOCK:
+        task = TASKS.get(job_id)
+        if not task or task.get("status") != "paused" or not task.get("active"):
+            return False
+        task["paused"] = False
+        task["status"] = "running"
+        event = task.get("resume_event")
+        if event is not None:
+            event.set()
+    _persist_task_history(job_id)
+    return True
+
+
 def cancel_batch_task(job_id):
     with TASKS_LOCK:
         task = TASKS.get(job_id)
         if not task:
             return False
         active = task.get("active", task.get("status") == "running")
-        if not active or task.get("status") not in ("running", "cancelled"):
+        if not active or task.get("status") not in ("running", "paused"):
             return False
         task["cancelled"] = True
+        task["paused"] = False
         task["status"] = "cancelled"
         task["exitCode"] = 130
+        event = task.get("resume_event")
+        if event is not None:
+            event.set()
     _persist_task_history(job_id)
     return True
 
@@ -2142,6 +2272,7 @@ def batch_status(job_id):
             "jobId": job_id,
             "status": history.get("status") or "unknown",
             "exitCode": history.get("exitCode"),
+            "paused": history.get("status") == "paused",
             "progress": history.get("progress") or {},
             "stdoutTail": history.get("stdoutTail") or "",
             "stderrTail": history.get("stderrTail") or "",
@@ -2151,6 +2282,7 @@ def batch_status(job_id):
         "jobId": job_id,
         "status": task.get("status"),
         "exitCode": task.get("exitCode"),
+        "paused": bool(task.get("paused")),
         "progress": task.get("progress") or {},
         "stdoutTail": task.get("stdoutTail") or "",
         "stderrTail": task.get("stderrTail") or "",

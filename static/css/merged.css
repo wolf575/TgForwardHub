@@ -346,6 +346,16 @@ textarea {
   font-size: 18px;
 }
 
+.monitor-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.monitor-actions button {
+  flex: 1;
+}
+
 .history-head,
 .monitor-head {
   display: flex;
@@ -532,6 +542,8 @@ textarea {
   .settings-card-grid,
   .field-row,
   .stat-grid { grid-template-columns: 1fr; }
+  .monitor-actions { flex-wrap: wrap; }
+  .monitor-actions button { flex: 1 1 140px; }
   .stat-grid { grid-template-columns: repeat(2, 1fr); }
   .stat-grid.two { grid-template-columns: repeat(2, 1fr); }
   .setup-status-card { position: static; }
