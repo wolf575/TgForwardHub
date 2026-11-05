@@ -5,6 +5,7 @@
 ### Changed
 
 - Telegram 客户端从 Pyrogram 2.0.106 升级到 Pyrofork 2.3.69，启用 Layer 220 的 `message.quote`、`quote_text` 和 `quote_entities` 解析
+- GHCR 基础镜像从 Python 3.9 升级到 Python 3.12，满足 Pyrofork 2.3.69 的运行时要求
 - 增加 Pyrofork `WEB_PAGE_PREVIEW` 兼容映射和 Telegram 客户端版本启动日志
 
 ### Fixed
