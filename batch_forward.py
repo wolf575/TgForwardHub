@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-from pyrogram import raw
+from pyrogram import raw, utils
 from pyrogram.errors import (
     ChatForwardsRestricted,
     FileReferenceExpired,
@@ -26,13 +26,6 @@ from pyrogram.errors import (
     InternalServerError,
     Timeout as TelegramTimeout,
 )
-from pyrogram.types import (
-    InputMediaAudio,
-    InputMediaDocument,
-    InputMediaPhoto,
-    InputMediaVideo,
-)
-
 from database import DATA_DIR
 from app_settings import get_app_timezone
 from bot.handlers.messages import (
@@ -71,6 +64,12 @@ DOWNLOADABLE_MEDIA_TYPES = {
 TASKS = {}
 TASKS_LOCK = threading.Lock()
 BATCH_FETCH_CHUNK_SIZE = 100
+
+
+class BatchTaskStopped(Exception):
+    """Raised when a paused/cancelled task must not start another send."""
+
+
 PROGRESS_PHASES = {
     "queued": "排队中",
     "resolving": "解析来源与目标",
@@ -384,68 +383,39 @@ def _caption_overrides(cleaned_texts, cleaned_text, count):
     return values[:count]
 
 
-def _media_group_inputs_from_file_ids(group_messages, captions):
-    """Build native album inputs without downloading the media."""
-    media_inputs = []
-    for index, item in enumerate(group_messages):
-        caption = captions[index] if index < len(captions) else ""
-        msg_type = get_message_type(item)
-        if msg_type == "Photo":
-            media_inputs.append(
-                InputMediaPhoto(
-                    item.photo.file_id,
-                    caption=caption,
-                    caption_entities=None,
-                    has_spoiler=getattr(item, "has_media_spoiler", None),
-                )
-            )
-        elif msg_type == "Video":
-            video = item.video
-            media_inputs.append(
-                InputMediaVideo(
-                    video.file_id,
-                    caption=caption,
-                    caption_entities=None,
-                    width=getattr(video, "width", 0) or 0,
-                    height=getattr(video, "height", 0) or 0,
-                    duration=getattr(video, "duration", 0) or 0,
-                    supports_streaming=(
-                        getattr(video, "supports_streaming", None)
-                        if getattr(video, "supports_streaming", None) is not None
-                        else True
-                    ),
-                    has_spoiler=getattr(item, "has_media_spoiler", None),
-                )
-            )
-        elif msg_type == "Document":
-            media_inputs.append(
-                InputMediaDocument(
-                    item.document.file_id,
-                    caption=caption,
-                    caption_entities=None,
-                )
-            )
-        elif msg_type == "Audio":
-            audio = item.audio
-            media_inputs.append(
-                InputMediaAudio(
-                    audio.file_id,
-                    caption=caption,
-                    caption_entities=None,
-                    duration=getattr(audio, "duration", 0) or 0,
-                    performer=getattr(audio, "performer", "") or "",
-                    title=getattr(audio, "title", "") or "",
-                )
-            )
-        else:
-            raise ValueError(f"媒体组包含不支持的原生发送类型: {msg_type}")
-    return media_inputs
+def _media_group_file_id(item):
+    msg_type = get_message_type(item)
+    if msg_type == "Photo":
+        return item.photo.file_id
+    if msg_type == "Video":
+        return item.video.file_id
+    if msg_type == "Document":
+        return item.document.file_id
+    if msg_type == "Audio":
+        return item.audio.file_id
+    raise ValueError(f"媒体组包含不支持的原生发送类型: {msg_type}")
 
 
 def _send_media_group_with_captions(client, destination, group_messages, captions):
-    return client.send_media_group(
-        destination,
-        _media_group_inputs_from_file_ids(group_messages, captions),
+    """Copy cached media through SendMultiMedia with per-item plain captions."""
+    multi_media = []
+    for index, item in enumerate(group_messages):
+        caption = captions[index] if index < len(captions) else ""
+        multi_media.append(
+            raw.types.InputSingleMedia(
+                media=utils.get_input_media_from_file_id(
+                    _media_group_file_id(item)
+                ),
+                random_id=client.rnd_id(),
+                message=caption or "",
+                entities=[],
+            )
+        )
+    return client.invoke(
+        raw.functions.messages.SendMultiMedia(
+            peer=client.resolve_peer(destination),
+            multi_media=multi_media,
+        )
     )
 
 
@@ -1349,7 +1319,10 @@ def _reupload_batch_media_group(
     text_changed,
     log=None,
     cleaned_texts=None,
+    wait_for_active=None,
 ):
+    if wait_for_active is not None and not wait_for_active():
+        raise BatchTaskStopped()
     group_messages, downloads, work_dir = _download_batch_media_group_with_retry(
         acc,
         source_id,
@@ -1357,6 +1330,8 @@ def _reupload_batch_media_group(
         log,
     )
     try:
+        if wait_for_active is not None and not wait_for_active():
+            raise BatchTaskStopped()
         _emit_log(
             f"开始上传受限媒体组 {[item.id for item in group_messages]}",
             log,
@@ -1403,7 +1378,10 @@ def _forward_batch_media_group(
     relay_chat_id=None,
     source_username=None,
     cleaned_texts=None,
+    wait_for_active=None,
 ):
+    if wait_for_active is not None and not wait_for_active():
+        raise BatchTaskStopped()
     anchor = group_messages[0]
 
     if cache_send:
@@ -1488,6 +1466,7 @@ def _forward_batch_media_group(
                 text_changed,
                 log,
                 cleaned_texts=cleaned_texts,
+                wait_for_active=wait_for_active,
             )
             return len(group_messages), True
 
@@ -1538,6 +1517,7 @@ def _forward_batch_media_group(
                 cleaned_text,
                 text_changed,
                 log,
+                wait_for_active=wait_for_active,
             )
             return len(group_messages), True
 
@@ -1603,6 +1583,7 @@ def _forward_batch_media_group(
             text_changed,
             log,
             cleaned_texts=cleaned_texts,
+            wait_for_active=wait_for_active,
         )
         return len(group_messages), True
 
@@ -1615,7 +1596,10 @@ def _reupload_batch_single_media(
     cleaned_text,
     text_changed,
     log=None,
+    wait_for_active=None,
 ):
+    if wait_for_active is not None and not wait_for_active():
+        raise BatchTaskStopped()
     work_dir = tempfile.mkdtemp(prefix="tg_forward_batch_media_")
     try:
         file_path = _download_batch_media_with_retry(
@@ -1635,6 +1619,8 @@ def _reupload_batch_single_media(
             _emit_log(f"受限媒体 {message.id} 缩略图下载完成: {thumb}", log)
         else:
             _emit_log(f"受限媒体 {message.id} 无缩略图或缩略图下载失败", log)
+        if wait_for_active is not None and not wait_for_active():
+            raise BatchTaskStopped()
         _emit_log(f"开始上传受限单条媒体 {message.id}: {file_path}", log)
         _worker_execute(
             worker,
@@ -1671,7 +1657,10 @@ def _forward_batch_single_media(
     bot=None,
     relay_chat_id=None,
     source_username=None,
+    wait_for_active=None,
 ):
+    if wait_for_active is not None and not wait_for_active():
+        raise BatchTaskStopped()
     if cache_send:
         try:
             _emit_log(
@@ -1737,6 +1726,7 @@ def _forward_batch_single_media(
                 cleaned_text,
                 text_changed,
                 log,
+                wait_for_active=wait_for_active,
             )
             return count, True
 
@@ -1788,6 +1778,7 @@ def _forward_batch_single_media(
                 cleaned_text,
                 text_changed,
                 log,
+                wait_for_active=wait_for_active,
             )
             return count, True
 
@@ -1833,6 +1824,7 @@ def _forward_batch_single_media(
             cleaned_text,
             text_changed,
             log,
+            wait_for_active=wait_for_active,
         )
         return count, True
 
@@ -1999,7 +1991,10 @@ def _forward_batch_unit(
     relay_chat_id=None,
     source_username=None,
     cleaned_texts=None,
+    wait_for_active=None,
 ):
+    if wait_for_active is not None and not wait_for_active():
+        raise BatchTaskStopped()
     if restricted_source_ids is not None and source_id in restricted_source_ids:
         if cache_send and bot is not None and relay_chat_id is not None:
             _emit_log(
@@ -2036,6 +2031,7 @@ def _forward_batch_unit(
             text_changed,
             log,
             cleaned_texts=cleaned_texts,
+            wait_for_active=wait_for_active,
         )
 
     if len(group_messages) > 1:
@@ -2055,6 +2051,7 @@ def _forward_batch_unit(
             relay_chat_id=relay_chat_id,
             source_username=source_username,
             cleaned_texts=cleaned_texts,
+            wait_for_active=wait_for_active,
         )
 
     message = group_messages[0]
@@ -2091,6 +2088,7 @@ def _forward_batch_unit(
         bot=bot,
         relay_chat_id=relay_chat_id,
         source_username=source_username,
+        wait_for_active=wait_for_active,
     )
 
 
@@ -2103,6 +2101,7 @@ def _reupload_batch_unit(
     text_changed,
     log=None,
     cleaned_texts=None,
+    wait_for_active=None,
 ):
     """Handle a cached-forward-restricted source without trying forbidden RPCs."""
     if len(group_messages) > 1:
@@ -2117,6 +2116,7 @@ def _reupload_batch_unit(
                 text_changed,
                 log,
                 cleaned_texts=cleaned_texts,
+                wait_for_active=wait_for_active,
             ),
             True,
         )
@@ -2151,6 +2151,7 @@ def _reupload_batch_unit(
             cleaned_text,
             text_changed,
             log,
+            wait_for_active=wait_for_active,
         ),
         True,
     )
@@ -2479,6 +2480,10 @@ def _run_batch_task(job_id, spec):
                         )
                         continue
 
+                    if not _wait_until_task_active(job_id, log):
+                        finish_cancelled()
+                        return
+
                     sent_count, used_fallback = _forward_batch_unit(
                         worker,
                         acc,
@@ -2495,6 +2500,10 @@ def _run_batch_task(job_id, spec):
                         relay_chat_id=relay_chat_id,
                         source_username=source_username,
                         cleaned_texts=cleaned_texts,
+                        wait_for_active=lambda: _wait_until_task_active(
+                            job_id,
+                            log,
+                        ),
                     )
                     success += sent_count
                     processed += sent_count
@@ -2504,6 +2513,9 @@ def _run_batch_task(job_id, spec):
                             f"消息 {message_id} 受限，已通过用户客户端下载后重传"
                             f"（{fallback_label}，共 {sent_count} 项）"
                         )
+                except BatchTaskStopped:
+                    finish_cancelled()
+                    return
                 except Exception as exc:
                     unit_count = len(group_messages) if group_messages else 1
                     failed += unit_count

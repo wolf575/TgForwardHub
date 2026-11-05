@@ -34,11 +34,19 @@ class _FakeMessage:
 
 class _FakeClient:
     def __init__(self):
-        self.group_sends = []
+        self.invocations = []
+        self._random_id = 100
 
-    def send_media_group(self, destination, media):
-        self.group_sends.append((destination, media))
-        return []
+    def rnd_id(self):
+        self._random_id += 1
+        return self._random_id
+
+    def resolve_peer(self, peer):
+        return peer
+
+    def invoke(self, query):
+        self.invocations.append(query)
+        return query
 
 
 class _FakeAcc:
@@ -113,16 +121,25 @@ class BatchFilterTests(unittest.TestCase):
         ]
         client = _FakeClient()
 
-        batch_forward._send_media_group_with_captions(
-            client,
-            -1001,
-            messages,
-            ["第一条", ""],
-        )
+        with mock.patch.object(
+            batch_forward.utils,
+            "get_input_media_from_file_id",
+            side_effect=lambda file_id: SimpleNamespace(file_id=file_id),
+        ):
+            batch_forward._send_media_group_with_captions(
+                client,
+                -1001,
+                messages,
+                ["第一条", ""],
+            )
 
-        self.assertEqual(len(client.group_sends), 1)
-        media = client.group_sends[0][1]
-        self.assertEqual([item.caption for item in media], ["第一条", ""])
+        self.assertEqual(len(client.invocations), 1)
+        media = client.invocations[0].multi_media
+        self.assertEqual([item.message for item in media], ["第一条", ""])
+        self.assertEqual(
+            [item.media.file_id for item in media],
+            ["photo-file-id", "photo-file-id"],
+        )
 
     def test_forwarded_group_uses_cleaned_caption_for_non_first_item(self):
         messages = [
@@ -136,20 +153,83 @@ class BatchFilterTests(unittest.TestCase):
         client = _FakeClient()
         cleaned = ["第一条", "第二条\n"]
 
-        batch_forward._forward_batch_media_group(
-            _FakeWorker(),
-            client,
-            -1001,
-            -1002,
-            messages,
-            cleaned[1],
-            True,
-            False,
-            cleaned_texts=cleaned,
+        with mock.patch.object(
+            batch_forward.utils,
+            "get_input_media_from_file_id",
+            side_effect=lambda file_id: SimpleNamespace(file_id=file_id),
+        ):
+            sent_count, used_fallback = batch_forward._forward_batch_media_group(
+                _FakeWorker(),
+                client,
+                -1001,
+                -1002,
+                messages,
+                cleaned[1],
+                True,
+                False,
+                cleaned_texts=cleaned,
+            )
+
+        self.assertEqual(sent_count, 2)
+        self.assertFalse(used_fallback)
+        media = client.invocations[0].multi_media
+        self.assertEqual([item.message for item in media], cleaned)
+
+    def test_multi_item_media_group_preserves_source_order(self):
+        first = _FakeMessage(1, caption="第一项", media_group_id="group")
+        second = _FakeMessage(2, caption="第二项", media_group_id="group")
+        second.photo = None
+        second.video = SimpleNamespace(file_id="video-file-id")
+        third = _FakeMessage(3, caption="第三项", media_group_id="group")
+        client = _FakeClient()
+
+        with mock.patch.object(
+            batch_forward.utils,
+            "get_input_media_from_file_id",
+            side_effect=lambda file_id: SimpleNamespace(file_id=file_id),
+        ):
+            batch_forward._send_media_group_with_captions(
+                client,
+                -1001,
+                [first, second, third],
+                ["第一项", "", "第三项"],
+            )
+
+        media = client.invocations[0].multi_media
+        self.assertEqual(
+            [item.media.file_id for item in media],
+            ["photo-file-id", "video-file-id", "photo-file-id"],
+        )
+        self.assertEqual(
+            [item.message for item in media],
+            ["第一项", "", "第三项"],
         )
 
-        media = client.group_sends[0][1]
-        self.assertEqual([item.caption for item in media], cleaned)
+    def test_cancelled_fallback_does_not_upload_after_download(self):
+        message = _FakeMessage(1, caption="广告", media_group_id="group")
+        waits = iter([True, False])
+
+        with mock.patch.object(
+            batch_forward,
+            "_download_batch_media_group_with_retry",
+            return_value=([message], [(message, "fake.jpg", None)], "fake-dir"),
+        ), mock.patch.object(
+            batch_forward,
+            "_send_downloaded_private_media_group",
+        ) as send_group:
+            with self.assertRaises(batch_forward.BatchTaskStopped):
+                batch_forward._reupload_batch_media_group(
+                    _FakeWorker(),
+                    _FakeClient(),
+                    -1001,
+                    -1002,
+                    [message],
+                    "",
+                    True,
+                    wait_for_active=lambda: next(waits),
+                )
+
+        send_group.assert_not_called()
 
     def test_exclude_rule_sees_quote_and_reply_preview_text(self):
         message = _FakeMessage(1, text="正常正文")

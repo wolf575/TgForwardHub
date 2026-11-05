@@ -458,6 +458,71 @@ class BatchRuntimeControlTests(unittest.TestCase):
         self.assertIn("任务已暂停，等待继续", task["stdoutTail"])
         self.assertIn("任务已继续", task["stdoutTail"])
 
+    def test_cancel_immediately_before_send_prevents_extra_message(self):
+        job_id = "cancel-before-send-job"
+        spec = _base_spec()
+        task = _task(job_id, spec)
+        acc = _RunAcc({1: _Message(1, text="must-not-send")})
+        wait_calls = 0
+
+        def cancel_before_send(_task_id, _log=None):
+            nonlocal wait_calls
+            wait_calls += 1
+            if wait_calls >= 3:
+                task["cancelled"] = True
+                task["status"] = "cancelled"
+                return False
+            return True
+
+        with mock.patch.dict(
+            batch_forward.TASKS,
+            {job_id: task},
+            clear=True,
+        ), mock.patch.object(
+            batch_forward,
+            "get_acc_instance",
+            return_value=acc,
+        ), mock.patch.object(
+            batch_forward,
+            "MessageWorker",
+            _RunWorker,
+        ), mock.patch.object(
+            batch_forward,
+            "_resolve_chat",
+            side_effect=lambda _client, ref: -1001 if ref == "source" else -1002,
+        ), mock.patch.object(
+            batch_forward,
+            "_resolve_source_username",
+            return_value="source",
+        ), mock.patch.object(
+            batch_forward,
+            "_collect_message_ids",
+            return_value=[1],
+        ), mock.patch.object(
+            batch_forward,
+            "_get_private_media_group_messages",
+            side_effect=lambda _acc, _source, message: [message],
+        ), mock.patch.object(
+            batch_forward,
+            "_forward_batch_unit",
+        ) as forward, mock.patch.object(
+            batch_forward,
+            "get_bot_instance",
+            return_value=None,
+        ), mock.patch.object(
+            batch_forward,
+            "_persist_task_history",
+        ), mock.patch.object(
+            batch_forward,
+            "_wait_until_task_active",
+            side_effect=cancel_before_send,
+        ):
+            batch_forward._run_batch_task(job_id, spec)
+
+        forward.assert_not_called()
+        self.assertEqual(task["status"], "cancelled")
+        self.assertEqual(task["progress"]["phase"], "cancelled")
+
 
 class BatchRuntimeApiTests(unittest.TestCase):
     def setUp(self):
