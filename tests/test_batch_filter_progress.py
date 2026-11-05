@@ -4,6 +4,9 @@ from types import SimpleNamespace
 from unittest import mock
 
 import batch_forward
+from pyrogram.enums import MessageEntityType
+from pyrogram.types import MessageEntity
+from pyrogram.types.messages_and_media.message import Str
 
 
 USER_REGEX = r"(?s)后续内容进会员群查看.*\Z"
@@ -223,6 +226,54 @@ class BatchFilterTests(unittest.TestCase):
                 "start": 1,
                 "end": 1,
                 "exclude_regex": USER_REGEX,
+            }
+        )
+
+        filtered = batch_forward._apply_filter_rules([message], rules)
+
+        self.assertTrue(filtered["excluded"])
+
+    def test_invisible_format_characters_are_removed_before_filtering(self):
+        formatted_text = (
+            "保留正文\n后续\u200b内容进会员群查看\ufe0f 👉\n广告尾部"
+        )
+        formatted = Str(formatted_text).init(
+            [
+                MessageEntity(
+                    type=MessageEntityType.BLOCKQUOTE,
+                    offset=0,
+                    length=len(formatted_text),
+                )
+            ]
+        )
+        message = _FakeMessage(1, text=formatted)
+        message.entities = formatted.entities
+        rules = batch_forward._filter_rule_set(
+            {
+                "range_type": "id",
+                "start": 1,
+                "end": 1,
+                "remove_regex": USER_REGEX,
+            }
+        )
+
+        filtered = batch_forward._apply_filter_rules([message], rules)
+
+        self.assertFalse(filtered["excluded"])
+        self.assertTrue(filtered["text_changed"])
+        self.assertEqual(filtered["cleaned_texts"], ["保留正文\n"])
+
+    def test_formatted_text_with_fullwidth_characters_uses_plain_filter_view(self):
+        message = _FakeMessage(
+            1,
+            text="后续内容进会员群查看（全角括号）",
+        )
+        rules = batch_forward._filter_rule_set(
+            {
+                "range_type": "id",
+                "start": 1,
+                "end": 1,
+                "exclude_regex": r"(?s)后续内容进会员群查看.*\Z",
             }
         )
 

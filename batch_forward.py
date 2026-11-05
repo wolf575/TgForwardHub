@@ -12,6 +12,7 @@ import sqlite3
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
@@ -717,13 +718,34 @@ def _group_texts(group_messages):
     ]
 
 
+def _plain_filter_text(value):
+    """Build a normalized plain-text view before applying filter rules."""
+    # Pyrogram keeps bold/quote/custom-emoji formatting in Str.entities while
+    # str(value) exposes the underlying visible text; normalize that view.
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = (
+        text.replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\u2028", "\n")
+        .replace("\u2029", "\n")
+        .replace("\xa0", " ")
+        .replace("\x00", "")
+    )
+    return "".join(
+        char
+        for char in text
+        if unicodedata.category(char) != "Cf"
+        and char not in ("\ufe0e", "\ufe0f")
+    )
+
+
 def _unique_text_fragments(values):
     result = []
     seen = set()
     for value in values:
         if value is None:
             continue
-        text = str(value)
+        text = _plain_filter_text(value)
         if not text or text in seen:
             continue
         seen.add(text)
@@ -777,6 +799,7 @@ def _group_filter_texts(group_messages):
 def _apply_filter_rules(group_messages, rules):
     """Evaluate exclusion and deletion rules across primary and rich text."""
     primary_texts = _group_texts(group_messages)
+    plain_primary_texts = [_plain_filter_text(text) for text in primary_texts]
     filter_texts = _group_filter_texts(group_messages)
     exclude_terms = rules["exclude_terms"]
     exclude_patterns = rules["exclude_patterns"]
@@ -797,9 +820,9 @@ def _apply_filter_rules(group_messages, rules):
             "rich_content_changed": False,
         }
 
-    cleaned_texts = [
+    cleaned_plain_texts = [
         _remove_matches(text, remove_terms, remove_patterns)
-        for text in primary_texts
+        for text in plain_primary_texts
     ]
     cleaned_filter_texts = [
         _remove_matches(text, remove_terms, remove_patterns)
@@ -811,8 +834,14 @@ def _apply_filter_rules(group_messages, rules):
     )
     primary_changed = any(
         cleaned != original
-        for cleaned, original in zip(cleaned_texts, primary_texts)
+        for cleaned, original in zip(cleaned_plain_texts, plain_primary_texts)
     )
+    if primary_changed:
+        cleaned_texts = cleaned_plain_texts
+    elif text_changed:
+        cleaned_texts = plain_primary_texts
+    else:
+        cleaned_texts = primary_texts
     return {
         "excluded": False,
         "texts": primary_texts,
