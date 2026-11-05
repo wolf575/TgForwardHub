@@ -7,6 +7,9 @@
 - Telegram 客户端从 Pyrogram 2.0.106 升级到 Pyrofork 2.3.69，启用 Layer 220 的 `message.quote`、`quote_text` 和 `quote_entities` 解析
 - GHCR 基础镜像从 Python 3.9 升级到 Python 3.12，满足 Pyrofork 2.3.69 的运行时要求
 - 增加 Pyrofork `WEB_PAGE_PREVIEW` 兼容映射和 Telegram 客户端版本启动日志
+- 排除/删除关键词改为任务级预编译，规则不变时不再为每条消息重复编译
+- 无过滤规则的任务直接走快速路径，跳过富文本归一化和规则匹配
+- 移除发送链路中重复的暂停/取消检查，仅保留发送前和下载重传上传前的必要检查点
 
 ### Fixed
 

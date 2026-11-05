@@ -283,6 +283,65 @@ class BatchRegexForwardingTests(unittest.TestCase):
 
 
 class BatchRuntimeControlTests(unittest.TestCase):
+    def test_unchanged_filter_rules_compile_once_per_task(self):
+        job_id = "compile-once-job"
+        spec = _base_spec()
+        task = _task(job_id, spec)
+        acc = _RunAcc(
+            {
+                1: _Message(1, text="first"),
+                2: _Message(2, text="second"),
+            }
+        )
+
+        with mock.patch.dict(
+            batch_forward.TASKS,
+            {job_id: task},
+            clear=True,
+        ), mock.patch.object(
+            batch_forward,
+            "get_acc_instance",
+            return_value=acc,
+        ), mock.patch.object(
+            batch_forward,
+            "MessageWorker",
+            _RunWorker,
+        ), mock.patch.object(
+            batch_forward,
+            "_resolve_chat",
+            side_effect=lambda _client, ref: -1001 if ref == "source" else -1002,
+        ), mock.patch.object(
+            batch_forward,
+            "_resolve_source_username",
+            return_value="source",
+        ), mock.patch.object(
+            batch_forward,
+            "_collect_message_ids",
+            return_value=[1, 2],
+        ), mock.patch.object(
+            batch_forward,
+            "_get_private_media_group_messages",
+            side_effect=lambda _acc, _source, message: [message],
+        ), mock.patch.object(
+            batch_forward,
+            "_forward_batch_unit",
+            return_value=(1, False),
+        ), mock.patch.object(
+            batch_forward,
+            "get_bot_instance",
+            return_value=None,
+        ), mock.patch.object(
+            batch_forward,
+            "_persist_task_history",
+        ), mock.patch.object(
+            batch_forward,
+            "_filter_rule_set",
+            wraps=batch_forward._filter_rule_set,
+        ) as build_rules:
+            batch_forward._run_batch_task(job_id, spec)
+
+        self.assertEqual(build_rules.call_count, 1)
+
     def test_update_rules_changes_only_filter_fields(self):
         job_id = "rules-job"
         spec = _base_spec()

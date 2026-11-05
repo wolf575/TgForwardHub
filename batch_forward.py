@@ -335,8 +335,19 @@ def _parse_terms(raw):
 def _matches_exclude(text, terms):
     if not terms:
         return False
+    if hasattr(terms, "search"):
+        return bool(terms.search(text or ""))
     pattern = re.compile("|".join(re.escape(term) for term in terms), re.IGNORECASE)
     return bool(pattern.search(text or ""))
+
+
+def _compile_literal_terms(terms):
+    if not terms:
+        return None
+    return re.compile(
+        "|".join(re.escape(term) for term in terms),
+        re.IGNORECASE,
+    )
 
 
 def _parse_regex_patterns(raw):
@@ -529,8 +540,12 @@ def _remove_matches(text, terms, patterns):
     """Delete literal terms and regex matches from forwarded text."""
     if not text:
         return text
-    for term in terms:
-        text = re.sub(re.escape(term), "", text, flags=re.IGNORECASE)
+    if terms:
+        if hasattr(terms, "sub"):
+            text = terms.sub("", text)
+        else:
+            for term in terms:
+                text = re.sub(re.escape(term), "", text, flags=re.IGNORECASE)
     for pattern in patterns:
         text = pattern.sub("", text)
     return text
@@ -763,12 +778,16 @@ def _validate_task_spec(spec):
 
 def _filter_rule_set(spec):
     return {
-        "exclude_terms": _parse_terms(spec.get("exclude_keywords")),
+        "exclude_terms": _compile_literal_terms(
+            _parse_terms(spec.get("exclude_keywords"))
+        ),
         "exclude_patterns": _compile_regex_patterns(
             spec.get("exclude_regex"),
             "排除正则",
         ),
-        "remove_terms": _parse_terms(spec.get("remove_keywords")),
+        "remove_terms": _compile_literal_terms(
+            _parse_terms(spec.get("remove_keywords"))
+        ),
         "remove_patterns": _compile_regex_patterns(
             spec.get("remove_regex"),
             "删除正则",
@@ -868,6 +887,24 @@ def _group_filter_texts(group_messages):
 def _apply_filter_rules(group_messages, rules):
     """Evaluate exclusion and deletion rules across primary and rich text."""
     primary_texts = _group_texts(group_messages)
+    if not any(
+        rules.get(field)
+        for field in (
+            "exclude_terms",
+            "exclude_patterns",
+            "remove_terms",
+            "remove_patterns",
+        )
+    ):
+        return {
+            "excluded": False,
+            "texts": primary_texts,
+            "cleaned_texts": primary_texts,
+            "text_changed": False,
+            "rich_content_changed": False,
+            "quote_text_present": False,
+        }
+
     plain_primary_texts = [_plain_filter_text(text) for text in primary_texts]
     filter_texts = _group_filter_texts(group_messages)
     quote_text_present = any(
@@ -1483,8 +1520,6 @@ def _forward_batch_media_group(
     cleaned_texts=None,
     wait_for_active=None,
 ):
-    if wait_for_active is not None and not wait_for_active():
-        raise BatchTaskStopped()
     anchor = group_messages[0]
 
     if cache_send:
@@ -1776,8 +1811,6 @@ def _forward_batch_single_media(
     source_username=None,
     wait_for_active=None,
 ):
-    if wait_for_active is not None and not wait_for_active():
-        raise BatchTaskStopped()
     if cache_send:
         try:
             _emit_log(
@@ -2450,6 +2483,8 @@ def _run_batch_task(job_id, spec):
         restricted_source_ids = set()
         last_logged_bucket = 0
         logged_quote_filter = False
+        filter_signature = None
+        filter_rules = None
 
         for chunk_start in range(0, total, BATCH_FETCH_CHUNK_SIZE):
             chunk_ids = ids[chunk_start:chunk_start + BATCH_FETCH_CHUNK_SIZE]
@@ -2543,8 +2578,18 @@ def _run_batch_task(job_id, spec):
                         return
 
                     task = get_task(job_id)
-                    rules = _filter_rule_set(task.get("spec") or spec)
-                    filtered = _apply_filter_rules(group_messages, rules)
+                    task_spec = task.get("spec") or spec
+                    next_filter_signature = tuple(
+                        str(task_spec.get(field) or "")
+                        for field in FILTER_FIELDS
+                    )
+                    if next_filter_signature != filter_signature:
+                        filter_rules = _filter_rule_set(task_spec)
+                        filter_signature = next_filter_signature
+                    filtered = _apply_filter_rules(
+                        group_messages,
+                        filter_rules,
+                    )
                     if (
                         filtered["quote_text_present"]
                         and not logged_quote_filter
@@ -2596,10 +2641,6 @@ def _run_batch_task(job_id, spec):
                             current_id=message_id,
                         )
                         continue
-
-                    if not _wait_until_task_active(job_id, log):
-                        finish_cancelled()
-                        return
 
                     sent_count, used_fallback = _forward_batch_unit(
                         worker,

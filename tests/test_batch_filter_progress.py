@@ -121,6 +121,26 @@ def _task(job_id):
 
 
 class BatchFilterTests(unittest.TestCase):
+    def test_no_filter_rules_skip_rich_text_normalization(self):
+        message = _FakeMessage(1, caption="普通说明")
+        rules = batch_forward._filter_rule_set(
+            {
+                "range_type": "id",
+                "start": 1,
+                "end": 1,
+            }
+        )
+
+        with mock.patch.object(
+            batch_forward,
+            "_group_filter_texts",
+        ) as group_filter_texts:
+            filtered = batch_forward._apply_filter_rules([message], rules)
+
+        group_filter_texts.assert_not_called()
+        self.assertEqual(filtered["cleaned_texts"], ["普通说明"])
+        self.assertFalse(filtered["text_changed"])
+
     def test_filters_consider_every_media_group_caption(self):
         first = _FakeMessage(1, caption="正常标题", media_group_id="group")
         second = _FakeMessage(
