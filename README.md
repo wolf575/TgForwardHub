@@ -5,7 +5,7 @@
 
 TG Forward Hub 是一个把 **网页端批量转发** 和 **Telegram 自动监控/记录** 合并在一起的 Pyrogram 转发中心。
 
-项目直接使用 Pyrogram 完成消息读取、缓存复制、隐藏来源转发和受限媒体下载重传，同时提供 Flask Web 管理页、Bot 私聊链接转发、监控任务、记录笔记、WebDAV 存储和磁力链接校准能力。
+项目使用 Pyrofork 2.3.69（Pyrogram 兼容客户端）完成消息读取、引用文本解析、缓存复制、隐藏来源转发和受限媒体下载重传，同时提供 Flask Web 管理页、Bot 私聊链接转发、监控任务、记录笔记、WebDAV 存储和磁力链接校准能力。
 
 > 公共镜像：`ghcr.io/wolf575/tg-forward-hub:latest`
 >

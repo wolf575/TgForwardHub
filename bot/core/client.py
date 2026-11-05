@@ -3,6 +3,7 @@
 职责：初始化Bot客户端和User客户端
 """
 import os
+import pyrogram
 from pyrogram import Client
 from bot.utils.logger import get_logger
 from config import load_config, getenv
@@ -28,6 +29,8 @@ def initialize_clients():
             - bot_client: Bot客户端实例
             - user_client: User客户端实例（如果配置了session string），否则为None
     """
+    logger.info(f"Telegram 客户端库版本: Pyrogram {pyrogram.__version__}")
+
     # 加载配置
     DATA = load_config()
 

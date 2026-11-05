@@ -2,8 +2,15 @@
 
 ## 2026-11-05
 
+### Changed
+
+- Telegram 客户端从 Pyrogram 2.0.106 升级到 Pyrofork 2.3.69，启用 Layer 220 的 `message.quote`、`quote_text` 和 `quote_entities` 解析
+- 增加 Pyrofork `WEB_PAGE_PREVIEW` 兼容映射和 Telegram 客户端版本启动日志
+
 ### Fixed
 
+- 修复 Telegram 引用回复中的可见文本未被读取，导致富文本内容无法命中排除/删除规则的问题
+- 过滤任务日志会记录首次检测到 Pyrofork 引用文本，便于确认规则是否进入过滤分支
 - 过滤前统一生成纯文本视图，清除 Telegram entities、零宽字符、双向控制符、变体选择符并执行 Unicode NFKC 归一化
 - 删除规则命中富文本时使用纯文本结果重发，确保目标消息不再保留粗体、引用、自定义表情等格式
 - 排除和删除规则现在会检查正文、媒体 caption、引用文本、回复预览和链接预览标题/描述

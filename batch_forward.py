@@ -774,7 +774,10 @@ def _message_filter_texts(message, include_reply=True):
             for attr in ("text", "caption", "quote_text", "quote_caption")
         )
 
-    web_page = getattr(message, "web_page", None)
+    web_page = (
+        getattr(message, "web_page", None)
+        or getattr(message, "web_page_preview", None)
+    )
     if web_page is not None:
         values.extend(
             getattr(web_page, attr, None)
@@ -801,6 +804,10 @@ def _apply_filter_rules(group_messages, rules):
     primary_texts = _group_texts(group_messages)
     plain_primary_texts = [_plain_filter_text(text) for text in primary_texts]
     filter_texts = _group_filter_texts(group_messages)
+    quote_text_present = any(
+        bool(getattr(getattr(message, "quote", None), "text", None))
+        for message in group_messages
+    )
     exclude_terms = rules["exclude_terms"]
     exclude_patterns = rules["exclude_patterns"]
     remove_terms = rules["remove_terms"]
@@ -818,6 +825,7 @@ def _apply_filter_rules(group_messages, rules):
             "cleaned_texts": primary_texts,
             "text_changed": False,
             "rich_content_changed": False,
+            "quote_text_present": quote_text_present,
         }
 
     cleaned_plain_texts = [
@@ -848,6 +856,7 @@ def _apply_filter_rules(group_messages, rules):
         "cleaned_texts": cleaned_texts,
         "text_changed": text_changed,
         "rich_content_changed": text_changed and not primary_changed,
+        "quote_text_present": quote_text_present,
     }
 
 
@@ -2322,6 +2331,7 @@ def _run_batch_task(job_id, spec):
         group_cache = {}
         restricted_source_ids = set()
         last_logged_bucket = 0
+        logged_quote_filter = False
 
         for chunk_start in range(0, total, BATCH_FETCH_CHUNK_SIZE):
             chunk_ids = ids[chunk_start:chunk_start + BATCH_FETCH_CHUNK_SIZE]
@@ -2417,6 +2427,15 @@ def _run_batch_task(job_id, spec):
                     task = get_task(job_id)
                     rules = _filter_rule_set(task.get("spec") or spec)
                     filtered = _apply_filter_rules(group_messages, rules)
+                    if (
+                        filtered["quote_text_present"]
+                        and not logged_quote_filter
+                    ):
+                        log(
+                            "检测到 Telegram 引用文本，已通过 Pyrofork quote "
+                            "字段纳入纯文本过滤"
+                        )
+                        logged_quote_filter = True
                     if filtered["excluded"]:
                         skipped += unit_count
                         processed += unit_count

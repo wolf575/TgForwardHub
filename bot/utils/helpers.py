@@ -18,7 +18,11 @@ _MESSAGE_MEDIA_TYPE_NAMES = {
     MessageMediaType.LOCATION: "Location",
     MessageMediaType.VENUE: "Venue",
     MessageMediaType.POLL: "Poll",
-    MessageMediaType.WEB_PAGE: "WebPage",
+    getattr(
+        MessageMediaType,
+        "WEB_PAGE",
+        getattr(MessageMediaType, "WEB_PAGE_PREVIEW", None),
+    ): "WebPage",
     MessageMediaType.DICE: "Dice",
     MessageMediaType.GAME: "Game",
 }

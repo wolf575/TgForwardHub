@@ -8,6 +8,11 @@ from pyrogram.enums import MessageEntityType
 from pyrogram.types import MessageEntity
 from pyrogram.types.messages_and_media.message import Str
 
+try:
+    from pyrogram.types import TextQuote
+except ImportError:
+    TextQuote = None
+
 
 USER_REGEX = r"(?s)后续内容进会员群查看.*\Z"
 
@@ -170,6 +175,7 @@ class BatchFilterTests(unittest.TestCase):
         )
 
         self.assertTrue(filtered_quote_object["excluded"])
+        self.assertTrue(filtered_quote_object["quote_text_present"])
 
         reply_message = _FakeMessage(1, text="普通回复")
         reply_message.reply_to_message = _FakeMessage(2, text=USER_REGEX)
@@ -191,6 +197,51 @@ class BatchFilterTests(unittest.TestCase):
         )
 
         self.assertTrue(filtered_link["excluded"])
+
+    @unittest.skipUnless(TextQuote is not None, "Pyrofork quote support required")
+    def test_pyrofork_text_quote_is_filtered_and_removed_as_plain_text(self):
+        message = _FakeMessage(1, text="保留正文")
+        message.quote = TextQuote(
+            text=Str(USER_REGEX).init([]),
+            entities=None,
+            position=0,
+            is_manual=True,
+        )
+        rules = batch_forward._filter_rule_set(
+            {
+                "range_type": "id",
+                "start": 1,
+                "end": 1,
+                "remove_regex": USER_REGEX,
+            }
+        )
+
+        filtered = batch_forward._apply_filter_rules([message], rules)
+
+        self.assertFalse(filtered["excluded"])
+        self.assertTrue(filtered["quote_text_present"])
+        self.assertTrue(filtered["text_changed"])
+        self.assertTrue(filtered["rich_content_changed"])
+        self.assertEqual(filtered["cleaned_texts"], ["保留正文"])
+
+    def test_pyrofork_web_page_preview_title_is_filtered(self):
+        message = _FakeMessage(1, text="链接消息")
+        message.web_page_preview = SimpleNamespace(
+            title=USER_REGEX,
+            description=None,
+        )
+        rules = batch_forward._filter_rule_set(
+            {
+                "range_type": "id",
+                "start": 1,
+                "end": 1,
+                "exclude_regex": USER_REGEX,
+            }
+        )
+
+        filtered = batch_forward._apply_filter_rules([message], rules)
+
+        self.assertTrue(filtered["excluded"])
 
     def test_delete_rule_on_quote_preview_removes_the_quote_without_changing_text(self):
         message = _FakeMessage(1, text="保留正文")
