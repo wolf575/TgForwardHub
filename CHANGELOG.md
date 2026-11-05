@@ -10,8 +10,9 @@
 
 ### Fixed
 
-- 媒体组修改 caption 时改用 `messages.SendMultiMedia` 缓存发送，按源消息 ID 顺序构建每一项，避免后续媒体组排版错乱和直接发送回退
-- 媒体组纯文本 caption 逐项传入，空字符串会真正清除对应条目说明，不再依赖 Pyrogram `copy_media_group` 的空 caption 特殊分支
+- 媒体组修改 caption 时改为“先复制或隐藏转发原媒体组，再逐项调用 edit_message_caption”，避免 `SendMultiMedia` 因 `INPUT_REQUEST_TOO_LONG` 被误判为受限频道
+- 媒体组先按源消息 ID 顺序完成原相册发送，再逐项写入纯文本 caption；空字符串会真正清除对应条目说明
+- 下载重传日志不再统一标记为“受限媒体”，只有真实 `CHAT_FORWARDS_RESTRICTED` 才记录受限状态
 - 暂停或取消会在每个发送单元开始前再次检查；下载重传完成、真正上传前也会检查，取消后不再启动新的上传
 - 修复 Telegram 引用回复中的可见文本未被读取，导致富文本内容无法命中排除/删除规则的问题
 - 过滤任务日志会记录首次检测到 Pyrofork 引用文本，便于确认规则是否进入过滤分支

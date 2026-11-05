@@ -50,6 +50,9 @@ class _SendAcc:
         self.sent = []
         self.copied = []
         self.group_copies = []
+        self.edited_captions = []
+        self._message_id = 1000
+        self._random_id = 1
 
     def send_message(self, *args, **kwargs):
         self.sent.append((args, kwargs))
@@ -59,6 +62,58 @@ class _SendAcc:
 
     def copy_media_group(self, *args, **kwargs):
         self.group_copies.append((args, kwargs))
+        result = []
+        for _ in range(2):
+            self._message_id += 1
+            result.append(
+                type("Sent", (), {"id": self._message_id})()
+            )
+        return result
+
+    def forward_messages(self, destination, source, message_ids):
+        ids = message_ids if isinstance(message_ids, list) else [message_ids]
+        return [
+            type("Sent", (), {"id": message_id})()
+            for message_id in ids
+        ]
+
+    def edit_message_caption(self, destination, message_id, caption):
+        self.edited_captions.append((destination, message_id, caption))
+        return type(
+            "Sent",
+            (),
+            {"id": message_id, "caption": caption},
+        )()
+
+    def resolve_peer(self, peer):
+        return peer
+
+    def rnd_id(self):
+        self._random_id += 1
+        return self._random_id
+
+    def invoke(self, query):
+        ids = list(getattr(query, "id", []) or [])
+        return type(
+            "Result",
+            (),
+            {
+                "updates": [
+                    type(
+                        "Update",
+                        (),
+                        {
+                            "message": type(
+                                "Sent",
+                                (),
+                                {"id": message_id},
+                            )()
+                        },
+                    )()
+                    for message_id in ids
+                ]
+            },
+        )()
 
 
 class _RunAcc:
@@ -197,7 +252,7 @@ class BatchRegexForwardingTests(unittest.TestCase):
                 self.assertEqual(acc.sent, [])
                 self.assertEqual(acc.group_copies, [])
 
-    def test_media_group_empty_caption_uses_string_override_in_every_mode(self):
+    def test_media_group_empty_caption_updates_every_item_in_every_mode(self):
         first = _Message(
             3,
             caption=USER_SAMPLE,
@@ -221,9 +276,10 @@ class BatchRegexForwardingTests(unittest.TestCase):
                     cache_send=mode == "cache",
                 )
                 self.assertEqual((count, fallback), (2, False))
-                caption_override = acc.group_copies[0][1]["captions"]
-                self.assertIsInstance(caption_override, str)
-                self.assertEqual(caption_override, "")
+                self.assertEqual(
+                    [caption for _dest, _msg_id, caption in acc.edited_captions],
+                    ["", ""],
+                )
 
 
 class BatchRuntimeControlTests(unittest.TestCase):

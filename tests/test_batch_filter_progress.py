@@ -35,18 +35,46 @@ class _FakeMessage:
 class _FakeClient:
     def __init__(self):
         self.invocations = []
+        self.copied_groups = []
+        self.edited_captions = []
+        self.copy_result = None
         self._random_id = 100
+        self._message_id = 1000
 
     def rnd_id(self):
         self._random_id += 1
         return self._random_id
+
+    def copy_media_group(self, destination, source, message_id, **_kwargs):
+        self.copied_groups.append((destination, source, message_id))
+        if self.copy_result is not None:
+            return self.copy_result
+        result = []
+        for _ in range(2):
+            self._message_id += 1
+            result.append(
+                SimpleNamespace(id=self._message_id, caption="original")
+            )
+        return result
+
+    def edit_message_caption(self, destination, message_id, caption):
+        self.edited_captions.append((destination, message_id, caption))
+        return SimpleNamespace(id=message_id, caption=caption)
 
     def resolve_peer(self, peer):
         return peer
 
     def invoke(self, query):
         self.invocations.append(query)
-        return query
+        ids = list(getattr(query, "id", []) or [])
+        if not ids:
+            return query
+        return SimpleNamespace(
+            updates=[
+                SimpleNamespace(message=SimpleNamespace(id=message_id))
+                for message_id in ids
+            ]
+        )
 
 
 class _FakeAcc:
@@ -114,31 +142,30 @@ class BatchFilterTests(unittest.TestCase):
         self.assertEqual(cleaned[0], "正常标题")
         self.assertEqual(cleaned[1], "正常标题\n")
 
-    def test_native_media_group_send_keeps_per_item_captions(self):
+    def test_copy_media_group_then_updates_per_item_captions(self):
         messages = [
             _FakeMessage(1, caption="第一条", media_group_id="group"),
             _FakeMessage(2, caption="第二条", media_group_id="group"),
         ]
         client = _FakeClient()
+        client.copy_result = [
+            SimpleNamespace(id=101, caption="第一条"),
+            SimpleNamespace(id=102, caption="第二条"),
+        ]
 
-        with mock.patch.object(
-            batch_forward.utils,
-            "get_input_media_from_file_id",
-            side_effect=lambda file_id: SimpleNamespace(file_id=file_id),
-        ):
-            batch_forward._send_media_group_with_captions(
-                client,
-                -1001,
-                messages,
-                ["第一条", ""],
-            )
+        batch_forward._copy_media_group_and_set_captions(
+            _FakeWorker(),
+            client,
+            -1002,
+            -1001,
+            messages[0].id,
+            ["第一条", ""],
+        )
 
-        self.assertEqual(len(client.invocations), 1)
-        media = client.invocations[0].multi_media
-        self.assertEqual([item.message for item in media], ["第一条", ""])
+        self.assertEqual(client.copied_groups, [(-1002, -1001, 1)])
         self.assertEqual(
-            [item.media.file_id for item in media],
-            ["photo-file-id", "photo-file-id"],
+            client.edited_captions,
+            [(-1002, 101, "第一条"), (-1002, 102, "")],
         )
 
     def test_forwarded_group_uses_cleaned_caption_for_non_first_item(self):
@@ -153,27 +180,24 @@ class BatchFilterTests(unittest.TestCase):
         client = _FakeClient()
         cleaned = ["第一条", "第二条\n"]
 
-        with mock.patch.object(
-            batch_forward.utils,
-            "get_input_media_from_file_id",
-            side_effect=lambda file_id: SimpleNamespace(file_id=file_id),
-        ):
-            sent_count, used_fallback = batch_forward._forward_batch_media_group(
-                _FakeWorker(),
-                client,
-                -1001,
-                -1002,
-                messages,
-                cleaned[1],
-                True,
-                False,
-                cleaned_texts=cleaned,
-            )
+        sent_count, used_fallback = batch_forward._forward_batch_media_group(
+            _FakeWorker(),
+            client,
+            -1001,
+            -1002,
+            messages,
+            cleaned[1],
+            True,
+            False,
+            cleaned_texts=cleaned,
+        )
 
         self.assertEqual(sent_count, 2)
         self.assertFalse(used_fallback)
-        media = client.invocations[0].multi_media
-        self.assertEqual([item.message for item in media], cleaned)
+        self.assertEqual(
+            client.edited_captions,
+            [(-1002, 1, "第一条"), (-1002, 2, "第二条\n")],
+        )
 
     def test_multi_item_media_group_preserves_source_order(self):
         first = _FakeMessage(1, caption="第一项", media_group_id="group")
@@ -183,25 +207,26 @@ class BatchFilterTests(unittest.TestCase):
         third = _FakeMessage(3, caption="第三项", media_group_id="group")
         client = _FakeClient()
 
-        with mock.patch.object(
-            batch_forward.utils,
-            "get_input_media_from_file_id",
-            side_effect=lambda file_id: SimpleNamespace(file_id=file_id),
-        ):
-            batch_forward._send_media_group_with_captions(
-                client,
-                -1001,
-                [first, second, third],
-                ["第一项", "", "第三项"],
-            )
+        client.copy_result = [
+            SimpleNamespace(id=201, caption="第一项"),
+            SimpleNamespace(id=202, caption="第二项"),
+            SimpleNamespace(id=203, caption="第三项"),
+        ]
+        batch_forward._copy_media_group_and_set_captions(
+            _FakeWorker(),
+            client,
+            -1002,
+            -1001,
+            first.id,
+            ["第一项", "", "第三项"],
+        )
 
-        media = client.invocations[0].multi_media
         self.assertEqual(
-            [item.media.file_id for item in media],
-            ["photo-file-id", "video-file-id", "photo-file-id"],
+            client.copied_groups,
+            [(-1002, -1001, 1)],
         )
         self.assertEqual(
-            [item.message for item in media],
+            [caption for _destination, _message_id, caption in client.edited_captions],
             ["第一项", "", "第三项"],
         )
 

@@ -18,12 +18,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-from pyrogram import raw, utils
+from pyrogram import raw
 from pyrogram.errors import (
     ChatForwardsRestricted,
     FileReferenceExpired,
     FloodWait,
     InternalServerError,
+    MessageNotModified,
     Timeout as TelegramTimeout,
 )
 from database import DATA_DIR
@@ -364,15 +365,6 @@ def _matches_exclude_regex(text, patterns):
     return any(pattern.search(text or "") for pattern in patterns)
 
 
-def _media_group_copy_kwargs(cleaned_text, text_changed):
-    if not text_changed:
-        return {}
-    # Pyrogram treats an empty list item as "not provided" and keeps the
-    # original caption. A string, including "", reliably overrides the first
-    # album caption and clears any caption on the remaining items.
-    return {"captions": cleaned_text}
-
-
 def _caption_overrides(cleaned_texts, cleaned_text, count):
     """Build one caption value for every media-group item."""
     if cleaned_texts is None:
@@ -383,40 +375,144 @@ def _caption_overrides(cleaned_texts, cleaned_text, count):
     return values[:count]
 
 
-def _media_group_file_id(item):
-    msg_type = get_message_type(item)
-    if msg_type == "Photo":
-        return item.photo.file_id
-    if msg_type == "Video":
-        return item.video.file_id
-    if msg_type == "Document":
-        return item.document.file_id
-    if msg_type == "Audio":
-        return item.audio.file_id
-    raise ValueError(f"媒体组包含不支持的原生发送类型: {msg_type}")
+def _result_message_ids(result):
+    """Extract sent message IDs from high-level or raw forward results."""
+    ids = []
+    if isinstance(result, (list, tuple)):
+        ids.extend(
+            int(item.id)
+            for item in result
+            if getattr(item, "id", None) is not None
+        )
+    elif getattr(result, "id", None) is not None:
+        ids.append(int(result.id))
+
+    for update in getattr(result, "updates", []) or []:
+        message = getattr(update, "message", None)
+        if getattr(message, "id", None) is not None:
+            ids.append(int(message.id))
+
+    return sorted(set(ids))
 
 
-def _send_media_group_with_captions(client, destination, group_messages, captions):
-    """Copy cached media through SendMultiMedia with per-item plain captions."""
-    multi_media = []
-    for index, item in enumerate(group_messages):
-        caption = captions[index] if index < len(captions) else ""
-        multi_media.append(
-            raw.types.InputSingleMedia(
-                media=utils.get_input_media_from_file_id(
-                    _media_group_file_id(item)
+def _edit_media_group_captions(
+    worker,
+    client,
+    destination,
+    result,
+    captions,
+    log=None,
+):
+    """Set captions one by one after the album itself was sent successfully."""
+    message_ids = _result_message_ids(result)
+    if not message_ids:
+        raise RuntimeError("媒体组发送成功但无法获取目标消息 ID")
+    if len(message_ids) < len(captions):
+        _emit_log(
+            f"媒体组返回 {len(message_ids)} 项，少于源媒体组 {len(captions)} 项，"
+            "仅更新已返回条目的 caption",
+            log,
+            "warning",
+        )
+
+    for index, (message_id, caption) in enumerate(
+        zip(message_ids, captions),
+        start=1,
+    ):
+        desired = caption or ""
+        try:
+            _worker_execute(
+                worker,
+                f"更新媒体组第 {index} 项 caption",
+                lambda message_id=message_id, desired=desired: (
+                    client.edit_message_caption(
+                        destination,
+                        message_id,
+                        caption=desired,
+                    )
                 ),
-                random_id=client.rnd_id(),
-                message=caption or "",
-                entities=[],
             )
-        )
-    return client.invoke(
-        raw.functions.messages.SendMultiMedia(
-            peer=client.resolve_peer(destination),
-            multi_media=multi_media,
-        )
+        except MessageNotModified:
+            continue
+        except Exception as exc:
+            _emit_log(
+                f"媒体组第 {index} 项 caption 更新失败: "
+                f"{type(exc).__name__}: {exc}",
+                log,
+                "warning",
+            )
+
+
+def _copy_media_group_and_set_captions(
+    worker,
+    client,
+    destination,
+    source_id,
+    anchor_id,
+    captions,
+    log=None,
+):
+    result = _worker_execute(
+        worker,
+        "复制媒体组（保持原相册顺序）",
+        lambda: client.copy_media_group(
+            destination,
+            source_id,
+            anchor_id,
+        ),
     )
+    _edit_media_group_captions(
+        worker,
+        client,
+        destination,
+        result,
+        captions,
+        log,
+    )
+    return result
+
+
+def _forward_media_group_and_set_captions(
+    worker,
+    client,
+    destination,
+    source_id,
+    group_messages,
+    captions,
+    preserve_source,
+    log=None,
+):
+    message_ids = [item.id for item in group_messages]
+    if preserve_source:
+        result = _worker_execute(
+            worker,
+            "转发媒体组（保持原相册顺序）",
+            lambda: client.forward_messages(
+                destination,
+                source_id,
+                message_ids,
+            ),
+        )
+    else:
+        result = _worker_execute(
+            worker,
+            "隐藏来源转发媒体组（保持原相册顺序）",
+            lambda: _user_hidden_forward(
+                client,
+                source_id,
+                destination,
+                message_ids,
+            ),
+        )
+    _edit_media_group_captions(
+        worker,
+        client,
+        destination,
+        result,
+        captions,
+        log,
+    )
+    return result
 
 
 def _strip_trailing_blocks(text, terms):
@@ -836,6 +932,8 @@ def _group_text(group_messages):
 
 def _worker_execute(worker, name, operation):
     """Run a Pyrogram operation through the worker's FloodWait handling."""
+    if worker is None:
+        return operation()
     return worker._execute_with_flood_retry(name, operation)
 
 
@@ -909,6 +1007,7 @@ def _copy_messages_to_relay(
     text_changed,
     source_username=None,
     cleaned_texts=None,
+    worker=None,
 ):
     """Copy one batch unit into the relay chat using the Bot identity."""
     source_ref = _bot_source_ref(source_id, group_messages, source_username)
@@ -923,21 +1022,24 @@ def _copy_messages_to_relay(
         pass
 
     if len(group_messages) > 1:
-        if text_changed and cleaned_texts is not None:
-            bot_group = bot.get_media_group(source_ref, anchor.id) or group_messages
-            result = _send_media_group_with_captions(
+        if text_changed:
+            result = _copy_media_group_and_set_captions(
+                worker,
                 bot,
                 relay_id,
-                bot_group,
-                _caption_overrides(cleaned_texts, cleaned_text, len(bot_group)),
+                source_ref,
+                anchor.id,
+                _caption_overrides(
+                    cleaned_texts,
+                    cleaned_text,
+                    len(group_messages),
+                ),
             )
         else:
-            kwargs = _media_group_copy_kwargs(cleaned_text, text_changed)
             result = bot.copy_media_group(
                 relay_id,
                 source_ref,
                 anchor.id,
-                **kwargs,
             )
         return _relay_message_ids(result)
 
@@ -1016,6 +1118,7 @@ def _forward_cache_via_bot_relay(
                 text_changed,
                 source_username=resolved_username,
                 cleaned_texts=cleaned_texts,
+                worker=worker,
             ),
         )
         _emit_log(
@@ -1086,7 +1189,7 @@ def _download_batch_media_with_retry(
     last_error = None
     for attempt in range(1, attempts + 1):
         _emit_log(
-            f"开始下载受限媒体 {item_id}，第 {attempt}/{attempts} 次",
+            f"开始下载媒体用于重传 {item_id}，第 {attempt}/{attempts} 次",
             log,
         )
         try:
@@ -1096,7 +1199,7 @@ def _download_batch_media_with_retry(
                     f"媒体 {item_id} 下载失败：Telegram 未返回文件数据"
                 )
                 _emit_log(
-                    f"受限媒体 {item_id} 第 {attempt}/{attempts} 次下载返回空结果，"
+                    f"媒体 {item_id} 第 {attempt}/{attempts} 次下载返回空结果，"
                     "将稍后重试",
                     log,
                     "warning",
@@ -1111,7 +1214,7 @@ def _download_batch_media_with_retry(
                         os.remove(file_path)
                     except OSError as exc:
                         _emit_log(
-                            f"受限媒体 {item_id} 空文件删除失败: {exc}",
+                            f"媒体 {item_id} 空文件删除失败: {exc}",
                             log,
                             "warning",
                         )
@@ -1119,7 +1222,7 @@ def _download_batch_media_with_retry(
                     f"媒体 {item_id} 下载失败：Telegram 返回了 0 字节文件"
                 )
                 _emit_log(
-                    f"受限媒体 {item_id} 第 {attempt}/{attempts} 次下载得到 "
+                    f"媒体 {item_id} 第 {attempt}/{attempts} 次下载得到 "
                     "0 字节文件，将稍后重试",
                     log,
                     "warning",
@@ -1129,7 +1232,7 @@ def _download_batch_media_with_retry(
                     continue
                 break
             _emit_log(
-                f"受限媒体 {item_id} 下载完成: {file_path}",
+                f"媒体 {item_id} 下载完成，用于重传: {file_path}",
                 log,
             )
             return file_path
@@ -1137,7 +1240,7 @@ def _download_batch_media_with_retry(
             last_error = exc
             wait = int(getattr(exc, "value", 0) or 0) + 1
             _emit_log(
-                f"受限媒体 {item_id} 下载遇到 FloodWait，等待 {wait} 秒",
+                f"媒体 {item_id} 重传下载遇到 FloodWait，等待 {wait} 秒",
                 log,
                 "warning",
             )
@@ -1149,7 +1252,7 @@ def _download_batch_media_with_retry(
             if not _is_transient_download_error(exc):
                 raise
             _emit_log(
-                f"受限媒体 {item_id} 下载失败: {type(exc).__name__}: {exc}",
+                f"媒体 {item_id} 重传下载失败: {type(exc).__name__}: {exc}",
                 log,
                 "warning",
             )
@@ -1262,7 +1365,7 @@ def _download_batch_media_group_with_retry(
     last_error = None
     for attempt in range(1, attempts + 1):
         _emit_log(
-            f"开始下载受限媒体组 {item_ids}，第 {attempt}/{attempts} 次",
+            f"开始下载媒体组用于重传 {item_ids}，第 {attempt}/{attempts} 次",
             log,
         )
         try:
@@ -1276,7 +1379,7 @@ def _download_batch_media_group_with_retry(
             )
             downloaded_messages, downloads, work_dir = result
             _emit_log(
-                "受限媒体组下载完成，共 "
+                "媒体组重传下载完成，共 "
                 f"{len(downloads)}/{len(group_messages)} 项: {item_ids}",
                 log,
             )
@@ -1285,7 +1388,7 @@ def _download_batch_media_group_with_retry(
             last_error = exc
             wait = int(getattr(exc, "value", 0) or 0) + 1
             _emit_log(
-                f"受限媒体组 {item_ids} 下载遇到 FloodWait，等待 {wait} 秒",
+                f"媒体组 {item_ids} 重传下载遇到 FloodWait，等待 {wait} 秒",
                 log,
                 "warning",
             )
@@ -1297,7 +1400,7 @@ def _download_batch_media_group_with_retry(
             if not _is_transient_download_error(exc):
                 raise
             _emit_log(
-                "受限媒体组下载失败 "
+                "媒体组重传下载失败 "
                 f"{item_ids}: {type(exc).__name__}: {exc}",
                 log,
                 "warning",
@@ -1333,12 +1436,12 @@ def _reupload_batch_media_group(
         if wait_for_active is not None and not wait_for_active():
             raise BatchTaskStopped()
         _emit_log(
-            f"开始上传受限媒体组 {[item.id for item in group_messages]}",
+            f"开始上传媒体组重传 {[item.id for item in group_messages]}",
             log,
         )
         _worker_execute(
             worker,
-            "上传受限媒体组",
+            "上传媒体组重传",
             lambda: _send_downloaded_private_media_group(
                 acc,
                 dest_id,
@@ -1350,13 +1453,13 @@ def _reupload_batch_media_group(
             ),
         )
         _emit_log(
-            f"受限媒体组 {[item.id for item in group_messages]} 上传完成",
+            f"媒体组 {[item.id for item in group_messages]} 重传上传完成",
             log,
         )
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
         _emit_log(
-            f"已清理受限媒体组临时目录: {work_dir}",
+            f"已清理媒体组重传临时目录: {work_dir}",
             log,
         )
     return len(group_messages)
@@ -1392,22 +1495,34 @@ def _forward_batch_media_group(
                 log,
             )
             if text_changed and cleaned_texts is not None:
-                _worker_execute(
+                _copy_media_group_and_set_captions(
                     worker,
-                    "发送修改 caption 的媒体组（缓存发送）",
-                    lambda: _send_media_group_with_captions(
-                        acc,
-                        dest_id,
-                        group_messages,
-                        _caption_overrides(
-                            cleaned_texts,
-                            cleaned_text,
-                            len(group_messages),
-                        ),
+                    acc,
+                    dest_id,
+                    source_id,
+                    anchor.id,
+                    _caption_overrides(
+                        cleaned_texts,
+                        cleaned_text,
+                        len(group_messages),
                     ),
+                    log,
+                )
+            elif text_changed:
+                _copy_media_group_and_set_captions(
+                    worker,
+                    acc,
+                    dest_id,
+                    source_id,
+                    anchor.id,
+                    _caption_overrides(
+                        None,
+                        cleaned_text,
+                        len(group_messages),
+                    ),
+                    log,
                 )
             else:
-                copy_kwargs = _media_group_copy_kwargs(cleaned_text, text_changed)
                 _worker_execute(
                     worker,
                     "复制媒体组（缓存发送）",
@@ -1415,7 +1530,6 @@ def _forward_batch_media_group(
                         dest_id,
                         source_id,
                         anchor.id,
-                        **copy_kwargs,
                     ),
                 )
             _emit_log(
@@ -1524,30 +1638,33 @@ def _forward_batch_media_group(
     try:
         if text_changed:
             if cleaned_texts is not None:
-                _worker_execute(
+                _forward_media_group_and_set_captions(
                     worker,
-                    "发送修改 caption 的媒体组",
-                    lambda: _send_media_group_with_captions(
-                        acc,
-                        dest_id,
-                        group_messages,
-                        _caption_overrides(
-                            cleaned_texts,
-                            cleaned_text,
-                            len(group_messages),
-                        ),
+                    acc,
+                    dest_id,
+                    source_id,
+                    group_messages,
+                    _caption_overrides(
+                        cleaned_texts,
+                        cleaned_text,
+                        len(group_messages),
                     ),
+                    preserve_source,
+                    log,
                 )
             else:
-                _worker_execute(
+                _copy_media_group_and_set_captions(
                     worker,
-                    "复制媒体组并修改 caption",
-                    lambda: acc.copy_media_group(
-                        dest_id,
-                        source_id,
-                        anchor.id,
-                        **_media_group_copy_kwargs(cleaned_text, True),
+                    acc,
+                    dest_id,
+                    source_id,
+                    anchor.id,
+                    _caption_overrides(
+                        None,
+                        cleaned_text,
+                        len(group_messages),
                     ),
+                    log,
                 )
         else:
             _worker_execute(
@@ -1608,7 +1725,7 @@ def _reupload_batch_single_media(
             os.path.join(work_dir, ""),
             log,
         )
-        _emit_log(f"开始下载受限媒体 {message.id} 的缩略图", log)
+        _emit_log(f"开始下载媒体 {message.id} 的重传缩略图", log)
         thumb = _download_private_media_thumbnail(
             acc,
             _get_private_media_payload(message),
@@ -1616,9 +1733,9 @@ def _reupload_batch_single_media(
             0,
         )
         if thumb:
-            _emit_log(f"受限媒体 {message.id} 缩略图下载完成: {thumb}", log)
+            _emit_log(f"媒体 {message.id} 重传缩略图下载完成: {thumb}", log)
         else:
-            _emit_log(f"受限媒体 {message.id} 无缩略图或缩略图下载失败", log)
+            _emit_log(f"媒体 {message.id} 无重传缩略图或下载失败", log)
         if wait_for_active is not None and not wait_for_active():
             raise BatchTaskStopped()
         _emit_log(f"开始上传受限单条媒体 {message.id}: {file_path}", log)
