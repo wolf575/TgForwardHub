@@ -1,6 +1,7 @@
 """
 Message and callback handlers for the bot
 """
+import asyncio
 from pyrogram import filters
 from bot.utils.logger import get_logger
 from .commands import register_command_handlers
@@ -9,7 +10,8 @@ from .messages import save
 from .auto_forward import create_auto_forward_handler
 from .instances import (
     set_bot_instance, set_acc_instance,
-    get_bot_instance, get_acc_instance, record_bot_update
+    get_bot_instance, get_acc_instance, record_bot_command,
+    record_bot_update
 )
 
 logger = get_logger(__name__)
@@ -36,8 +38,12 @@ def register_all_handlers(bot, acc, message_queue):
 
     # 注册回调处理器
     @bot.on_callback_query()
-    def handle_callback(client, callback_query):
-        callback_handler(client, callback_query)
+    async def handle_callback(client, callback_query):
+        await asyncio.to_thread(
+            callback_handler,
+            client,
+            callback_query,
+        )
 
     logger.info("✅ 回调处理器已注册")
 
@@ -50,8 +56,21 @@ def register_all_handlers(bot, acc, message_queue):
 
     # 注册私聊消息处理器
     @bot.on_message(filters.text & filters.private & ~filters.command(["start", "help", "watch"]))
-    def handle_save(client, message):
-        save(client, message)
+    async def handle_save(client, message):
+        try:
+            await asyncio.to_thread(save, client, message)
+        except Exception as exc:
+            record_bot_command(
+                "text",
+                exc,
+                chat_id=message.chat.id,
+            )
+            logger.exception("处理 Bot 文本消息失败")
+            raise
+        record_bot_command(
+            "text",
+            chat_id=message.chat.id,
+        )
 
     logger.info("✅ 私聊消息处理器已注册")
 
@@ -59,15 +78,29 @@ def register_all_handlers(bot, acc, message_queue):
         filters.private & filters.text & filters.regex(r"^/"),
         group=1,
     )
-    def handle_unknown_command(client, message):
+    async def handle_unknown_command(client, message):
         command = (message.text or "").strip().split(None, 1)[0]
         command = command.split("@", 1)[0].lower()
         if command in {"/start", "/help", "/watch"}:
             return
-        client.send_message(
-            message.chat.id,
-            "未知命令。请使用 /start、/help 或 /watch。",
-            reply_to_message_id=message.id,
+        try:
+            reply = await client.send_message(
+                message.chat.id,
+                "未知命令。请使用 /start、/help 或 /watch。",
+                reply_to_message_id=message.id,
+            )
+        except Exception as exc:
+            record_bot_command(
+                "unknown",
+                exc,
+                chat_id=message.chat.id,
+            )
+            logger.exception("发送未知命令回复失败")
+            raise
+        record_bot_command(
+            "unknown",
+            chat_id=message.chat.id,
+            reply_message_id=getattr(reply, "id", None),
         )
 
     logger.info("✅ 未知命令处理器已注册")

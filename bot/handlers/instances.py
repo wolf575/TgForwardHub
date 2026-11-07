@@ -14,6 +14,8 @@ _bot_command_count = 0
 _bot_last_command = None
 _bot_last_command_at = None
 _bot_last_command_error = None
+_bot_last_command_chat_id = None
+_bot_last_command_reply_id = None
 
 
 def set_bot_instance(bot):
@@ -53,16 +55,24 @@ def get_bot_update_stats():
     }
 
 
-def record_bot_command(command, error=None):
+def record_bot_command(
+    command,
+    error=None,
+    chat_id=None,
+    reply_message_id=None,
+):
     """Record command-handler activity without logging message contents."""
     global _bot_command_count, _bot_last_command
     global _bot_last_command_at, _bot_last_command_error
+    global _bot_last_command_chat_id, _bot_last_command_reply_id
     _bot_command_count += 1
     _bot_last_command = str(command)
     _bot_last_command_at = time.time()
     _bot_last_command_error = (
         str(error)[:300] if error is not None else None
     )
+    _bot_last_command_chat_id = chat_id
+    _bot_last_command_reply_id = reply_message_id
 
 
 def get_bot_command_stats():
@@ -72,6 +82,8 @@ def get_bot_command_stats():
         "last_command": _bot_last_command,
         "last_command_at": _bot_last_command_at,
         "last_command_error": _bot_last_command_error,
+        "last_command_chat_id": _bot_last_command_chat_id,
+        "last_command_reply_id": _bot_last_command_reply_id,
     }
 
 

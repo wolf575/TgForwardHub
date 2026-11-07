@@ -16,7 +16,7 @@ def register_command_handlers(bot, acc):
     """Register all command handlers"""
     
     @bot.on_message(filters.command(["start"]))
-    def send_start(client: pyrogram.client.Client, message: pyrogram.types.messages_and_media.message.Message):
+    async def send_start(client: pyrogram.client.Client, message: pyrogram.types.messages_and_media.message.Message):
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📋 监控管理", callback_data="menu_watch")],
             [InlineKeyboardButton("❓ 帮助说明", callback_data="menu_help")],
@@ -32,20 +32,28 @@ def register_command_handlers(bot, acc):
         welcome_text += "点击下方按钮开始使用 👇"
         
         try:
-            bot.send_message(
+            reply = await client.send_message(
                 message.chat.id,
                 welcome_text,
                 reply_markup=keyboard,
                 reply_to_message_id=message.id,
             )
         except Exception as exc:
-            record_bot_command("start", exc)
+            record_bot_command(
+                "start",
+                exc,
+                chat_id=message.chat.id,
+            )
             logger.exception("发送 /start 回复失败")
             raise
-        record_bot_command("start")
+        record_bot_command(
+            "start",
+            chat_id=message.chat.id,
+            reply_message_id=getattr(reply, "id", None),
+        )
     
     @bot.on_message(filters.command(["help"]))
-    def send_help(client: pyrogram.client.Client, message: pyrogram.types.messages_and_media.message.Message):
+    async def send_help(client: pyrogram.client.Client, message: pyrogram.types.messages_and_media.message.Message):
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📋 监控管理", callback_data="menu_watch")],
             [InlineKeyboardButton("🏠 返回主菜单", callback_data="menu_main")]
@@ -91,40 +99,56 @@ def register_command_handlers(bot, acc):
 • 所有操作都可通过按钮完成，无需记忆复杂命令
 """
         try:
-            bot.send_message(
+            reply = await client.send_message(
                 message.chat.id,
                 help_text,
                 reply_markup=keyboard,
                 reply_to_message_id=message.id,
             )
         except Exception as exc:
-            record_bot_command("help", exc)
+            record_bot_command(
+                "help",
+                exc,
+                chat_id=message.chat.id,
+            )
             logger.exception("发送 /help 回复失败")
             raise
-        record_bot_command("help")
+        record_bot_command(
+            "help",
+            chat_id=message.chat.id,
+            reply_message_id=getattr(reply, "id", None),
+        )
     
     @bot.on_message(filters.command(["watch"]))
-    def watch_command(client: pyrogram.client.Client, message: pyrogram.types.messages_and_media.message.Message):
+    async def watch_command(client: pyrogram.client.Client, message: pyrogram.types.messages_and_media.message.Message):
         if acc is None:
             keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 返回主菜单", callback_data="menu_main")]])
             try:
-                bot.send_message(
+                reply = await client.send_message(
                     message.chat.id,
                     "**❌ 需要配置 String Session 才能使用监控功能**",
                     reply_markup=keyboard,
                     reply_to_message_id=message.id,
                 )
             except Exception as exc:
-                record_bot_command("watch", exc)
+                record_bot_command(
+                    "watch",
+                    exc,
+                    chat_id=message.chat.id,
+                )
                 logger.exception("发送 /watch 回复失败")
                 raise
-            record_bot_command("watch")
+            record_bot_command(
+                "watch",
+                chat_id=message.chat.id,
+                reply_message_id=getattr(reply, "id", None),
+            )
             return
         
-        show_watch_menu(message.chat.id, message.id)
+        await show_watch_menu(message.chat.id, message.id)
 
 
-def show_watch_menu(chat_id, reply_to_message_id=None):
+async def show_watch_menu(chat_id, reply_to_message_id=None):
     """Show watch menu"""
     from bot.handlers import get_bot_instance
     bot = get_bot_instance()
@@ -149,14 +173,18 @@ def show_watch_menu(chat_id, reply_to_message_id=None):
     text += f"当前监控任务数：**{watch_count}** 个"
     
     try:
-        bot.send_message(
+        reply = await bot.send_message(
             chat_id,
             text,
             reply_markup=keyboard,
             reply_to_message_id=reply_to_message_id,
         )
     except Exception as exc:
-        record_bot_command("watch", exc)
+        record_bot_command("watch", exc, chat_id=chat_id)
         logger.exception("发送 /watch 菜单失败")
         raise
-    record_bot_command("watch")
+    record_bot_command(
+        "watch",
+        chat_id=chat_id,
+        reply_message_id=getattr(reply, "id", None),
+    )

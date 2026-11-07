@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import unittest
 from unittest import mock
 
@@ -13,6 +14,7 @@ from bot.core.client import (
     _update_client_options,
     install_client_loop_bridge,
 )
+from bot.handlers.commands import register_command_handlers
 
 
 class _FakeLoop:
@@ -117,6 +119,26 @@ class MainBotLoopTests(unittest.TestCase):
         self.assertTrue(client._tgfh_loop_bridge_installed)
         self.assertEqual(client.send_message("ok"), "ok")
         loop.close()
+
+    def test_command_handlers_are_native_async_callbacks(self):
+        class _Bot:
+            def __init__(self):
+                self.callbacks = []
+
+            def on_message(self, *_args, **_kwargs):
+                def register(callback):
+                    self.callbacks.append(callback)
+                    return callback
+
+                return register
+
+        bot = _Bot()
+        register_command_handlers(bot, None)
+
+        self.assertEqual(len(bot.callbacks), 3)
+        self.assertTrue(
+            all(inspect.iscoroutinefunction(callback) for callback in bot.callbacks)
+        )
 
 
 if __name__ == "__main__":
