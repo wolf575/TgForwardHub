@@ -169,7 +169,8 @@ def api_app_settings_save():
     has_batch_notifications = (
         'batch_completion_notifications_enabled' in data
     )
-    if not has_timezone and not has_batch_notifications:
+    has_notify_config = 'notify_config' in data
+    if not has_timezone and not has_batch_notifications and not has_notify_config:
         return jsonify({'error': '没有需要保存的设置'}), 400
 
     timezone_name = None
@@ -183,6 +184,11 @@ def api_app_settings_save():
         batch_completion_notifications_enabled = bool(
             data.get('batch_completion_notifications_enabled')
         )
+    notify_config = None
+    if has_notify_config:
+        notify_config = data.get('notify_config')
+        if not isinstance(notify_config, dict):
+            return jsonify({'error': '通知配置必须是 JSON 对象'}), 400
 
     try:
         settings = save_app_preferences(
@@ -190,6 +196,7 @@ def api_app_settings_save():
             batch_completion_notifications_enabled=(
                 batch_completion_notifications_enabled
             ),
+            notify_config=notify_config,
         )
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
@@ -199,10 +206,50 @@ def api_app_settings_save():
         saved_fields.append('时区设置已保存')
     if has_batch_notifications:
         saved_fields.append('通知设置已保存')
+    if has_notify_config:
+        saved_fields.append('通知渠道配置已保存')
     return jsonify({
         'ok': True,
         **settings,
         'message': '，'.join(saved_fields),
+    })
+
+
+@app.route('/api/app-settings/notify-test', methods=['POST'])
+def api_app_settings_notify_test():
+    if 'username' not in session:
+        return jsonify({'error': '未登录'}), 401
+
+    data = request.get_json(silent=True) or {}
+    notify_config = data.get(
+        'notify_config',
+        get_app_settings().get('notify_config') or {},
+    )
+    if not isinstance(notify_config, dict):
+        return jsonify({'error': '通知配置必须是 JSON 对象'}), 400
+
+    try:
+        from notify import send_with_config
+
+        results = send_with_config(
+            'TgForwardHub 通知测试',
+            '这是一条来自 TgForwardHub 设置页的测试通知。',
+            notify_config,
+        )
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 502
+
+    channels = len(results or [])
+    if channels == 0:
+        return jsonify({
+            'ok': False,
+            'channels': 0,
+            'message': '没有检测到可用的通知渠道，请检查 JSON 配置',
+        }), 400
+    return jsonify({
+        'ok': any(bool(item[1]) for item in results),
+        'channels': channels,
+        'message': f'已尝试发送到 {channels} 个通知渠道',
     })
 
 

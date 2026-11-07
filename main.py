@@ -56,9 +56,19 @@ async def _idle_without_signals(bot):
         await asyncio.sleep(1)
 
 
+def _prepare_bot_loop(bot):
+    """Make Pyrogram's sync wrapper and dispatcher use the same event loop."""
+    loop = getattr(bot, "loop", None)
+    if loop is None or loop.is_closed():
+        raise RuntimeError("Bot 事件循环不可用")
+    asyncio.set_event_loop(loop)
+    return loop
+
+
 def _run_bot_loop(bot):
     """Run the client-owned event loop so dispatcher tasks keep processing."""
-    loop = getattr(bot, "loop", None) or asyncio.get_event_loop()
+    loop = _prepare_bot_loop(bot)
+    logger.info("Bot dispatcher event loop started")
     loop.run_until_complete(_idle_without_signals(bot))
 
 
@@ -109,7 +119,10 @@ def main():
         # 注册 Unix 信号处理器。这里的 Bot 运行在 ``run.py`` 创建的后台线程里，
         # 因此改用 ``start()`` 启动 dispatcher，并用不注册信号的 idle 保持事件循环。
         logger.info("🎬 启动Bot客户端...")
+        _prepare_bot_loop(bot)
         bot.start()
+        if not getattr(bot, "is_connected", False):
+            raise RuntimeError("Bot客户端启动后未连接")
         logger.info("✅ Bot客户端已启动并开始监听消息")
 
         _run_bot_loop(bot)

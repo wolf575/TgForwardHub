@@ -31,6 +31,7 @@ from database import DATA_DIR
 from app_settings import (
     batch_completion_notifications_enabled,
     get_app_timezone,
+    get_notify_config,
 )
 from bot.handlers.messages import (
     _copy_single_private_media,
@@ -99,7 +100,7 @@ def _send_batch_notification(task_name, job_id, status, progress, error=None):
     try:
         if not batch_completion_notifications_enabled():
             return
-        from notify import send
+        from notify import send_with_config
 
         title, content = _batch_notification_payload(
             task_name,
@@ -108,7 +109,7 @@ def _send_batch_notification(task_name, job_id, status, progress, error=None):
             progress,
             error,
         )
-        send(title, content, HITOKOTO=False)
+        send_with_config(title, content, get_notify_config())
     except Exception:
         logger.exception("批量任务通知发送失败")
 

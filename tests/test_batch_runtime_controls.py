@@ -315,7 +315,11 @@ class BatchRuntimeControlTests(unittest.TestCase):
             batch_forward,
             "batch_completion_notifications_enabled",
             return_value=True,
-        ), mock.patch("notify.send") as send:
+        ), mock.patch.object(
+            batch_forward,
+            "get_notify_config",
+            return_value={"TG_BOT_TOKEN": "token", "TG_USER_ID": "1"},
+        ), mock.patch("notify.send_with_config") as send:
             batch_forward._send_batch_notification(
                 "nightly",
                 "job-1",
@@ -325,15 +329,18 @@ class BatchRuntimeControlTests(unittest.TestCase):
             )
 
         send.assert_called_once()
-        self.assertEqual(send.call_args.kwargs["HITOKOTO"], False)
         self.assertIn("错误: boom", send.call_args.args[1])
+        self.assertEqual(
+            send.call_args.args[2],
+            {"TG_BOT_TOKEN": "token", "TG_USER_ID": "1"},
+        )
 
     def test_batch_notification_respects_disabled_setting(self):
         with mock.patch.object(
             batch_forward,
             "batch_completion_notifications_enabled",
             return_value=False,
-        ), mock.patch("notify.send") as send:
+        ), mock.patch("notify.send_with_config") as send:
             batch_forward._send_batch_notification(
                 "nightly",
                 "job-1",

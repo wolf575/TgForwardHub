@@ -560,6 +560,11 @@ async function loadAppSettings() {
     select.value = settings.timezone || "Asia/Shanghai";
     $("batchNotificationsEnabled").checked =
       settings.batch_completion_notifications_enabled !== false;
+    $("notifyConfigJson").value = JSON.stringify(
+      settings.notify_config || {},
+      null,
+      2
+    );
     setMessage("timezoneMessage", "");
   } catch (error) {
     const select = $("timezoneSelect");
@@ -587,19 +592,54 @@ async function saveTimezone() {
   }
 }
 
+function notificationConfigFromForm() {
+  const raw = $("notifyConfigJson").value.trim();
+  if (!raw) return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`通知配置 JSON 格式错误：${error.message}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("通知配置必须是 JSON 对象");
+  }
+  return parsed;
+}
+
 async function saveBotNotificationSettings() {
   setMessage("botNotificationMessage", "");
   try {
+    const notifyConfig = notificationConfigFromForm();
     const result = await apiFetch("/api/app-settings", {
       method: "POST",
       body: JSON.stringify({
         batch_completion_notifications_enabled:
           $("batchNotificationsEnabled").checked,
+        notify_config: notifyConfig,
       }),
     });
     setMessage(
       "botNotificationMessage",
       result.message || "通知设置已保存"
+    );
+  } catch (error) {
+    setMessage("botNotificationMessage", error.message);
+  }
+}
+
+async function testBotNotificationSettings() {
+  setMessage("botNotificationMessage", "");
+  try {
+    const notifyConfig = notificationConfigFromForm();
+    const result = await apiFetch("/api/app-settings/notify-test", {
+      method: "POST",
+      body: JSON.stringify({ notify_config: notifyConfig }),
+      timeout: 60000,
+    });
+    setMessage(
+      "botNotificationMessage",
+      result.message || "测试通知已发送"
     );
   } catch (error) {
     setMessage("botNotificationMessage", error.message);
@@ -1615,6 +1655,10 @@ document.addEventListener("DOMContentLoaded", () => {
   $("botNotificationSaveBtn").addEventListener(
     "click",
     saveBotNotificationSettings
+  );
+  $("botNotificationTestBtn").addEventListener(
+    "click",
+    testBotNotificationSettings
   );
   $("webdavSaveBtn").addEventListener("click", saveWebdavConfig);
   $("calibrationSaveBtn").addEventListener("click", saveCalibrationConfig);

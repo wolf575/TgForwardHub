@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>TG Forward Hub</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/merged.css') }}?v=20261105-rich-text-history">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/merged.css') }}?v=20261107-notifications-standard4">
 </head>
 <body>
   <header class="topbar">
@@ -331,14 +331,21 @@
         </form>
 
         <form id="botNotificationForm" class="form-card">
-          <div class="panel-subhead"><h2>机器人发送通知</h2></div>
+          <div class="panel-subhead"><h2>任务通知渠道</h2></div>
           <div id="botNotificationMessage" class="message" hidden></div>
           <label class="check">
             <input id="batchNotificationsEnabled" type="checkbox">
-            发送“批量转发完成”通知
+            发送“批量转发完成 / 失败”通知
           </label>
-          <p class="muted">关闭后，机器人仍会返回你需要的转发内容，但不再额外发送完成状态。</p>
-          <button id="botNotificationSaveBtn" class="primary" type="button">保存通知设置</button>
+          <label>通知渠道配置（JSON）
+            <textarea id="notifyConfigJson" rows="9" spellcheck="false"
+              placeholder='{"TG_BOT_TOKEN":"123456:replace-me","TG_USER_ID":"123456789","HITOKOTO":false}'></textarea>
+          </label>
+          <p class="muted">支持 notify.py 的 Telegram、Bark、飞书、Webhook、SMTP、PushPlus 等渠道。留空表示使用 Worker 环境变量 NOTIFY_CONFIG。</p>
+          <div class="monitor-actions">
+            <button id="botNotificationSaveBtn" class="primary" type="button">保存通知设置</button>
+            <button id="botNotificationTestBtn" class="secondary" type="button">发送测试通知</button>
+          </div>
         </form>
 
         <form id="passwordForm" class="form-card">
@@ -427,6 +434,6 @@
     </section>
   </main>
 
-  <script src="{{ url_for('static', filename='js/merged.js') }}?v=20261105-rich-text-history"></script>
+  <script src="{{ url_for('static', filename='js/merged.js') }}?v=20261107-notifications-standard4"></script>
 </body>
 </html>

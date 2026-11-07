@@ -79,6 +79,33 @@ class AppSettingsTests(unittest.TestCase):
                     app_settings.batch_completion_notifications_enabled()
                 )
 
+    def test_notify_config_is_persisted_and_copied(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_file = os.path.join(temp_dir, "app_settings.json")
+            with mock.patch.object(
+                app_settings,
+                "SETTINGS_FILE",
+                settings_file,
+            ):
+                app_settings.save_app_preferences(
+                    notify_config={
+                        "TG_BOT_TOKEN": "token",
+                        "TG_USER_ID": "1",
+                    }
+                )
+                settings = app_settings.get_app_settings()
+                settings["notify_config"]["TG_USER_ID"] = "changed"
+                second = app_settings.get_app_settings()
+
+            self.assertEqual(
+                second["notify_config"],
+                {"TG_BOT_TOKEN": "token", "TG_USER_ID": "1"},
+            )
+
+    def test_notify_config_rejects_non_object(self):
+        with self.assertRaises(ValueError):
+            app_settings.save_app_preferences(notify_config=["invalid"])
+
     def test_preferences_update_does_not_clear_timezone(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             settings_file = os.path.join(temp_dir, "app_settings.json")

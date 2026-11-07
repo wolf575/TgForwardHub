@@ -1389,6 +1389,16 @@ def send(title: str, content: str, ignore_default_config: bool = False, **kwargs
     [t.start() for t in ts]
     [t.join() for t in ts]
     report_notifications(results, title, content)
+    return results
+
+
+def send_with_config(title: str, content: str, config=None):
+    """Send one notification using the JSON object managed by the Web UI."""
+    if config is not None and not isinstance(config, dict):
+        raise ValueError("notify config must be a JSON object")
+    merged = dict(config or {})
+    merged["HITOKOTO"] = False
+    return send(title, content, **merged)
 
 
 def main():

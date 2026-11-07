@@ -7,6 +7,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_TIMEZONE = "Asia/Shanghai"
 DEFAULT_BATCH_COMPLETION_NOTIFICATIONS = True
+DEFAULT_NOTIFY_CONFIG = {}
+MAX_NOTIFY_CONFIG_BYTES = 64 * 1024
 DEFAULT_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "data"))
 DATA_DIR = os.environ.get("DATA_DIR", DEFAULT_DATA_DIR)
 SETTINGS_DIR = os.path.join(DATA_DIR, "config")
@@ -58,6 +60,9 @@ def get_app_settings():
         batch_completion_notifications = str(
             batch_completion_notifications
         ).strip().lower() in {"1", "true", "yes", "on"}
+    notify_config = settings.get("notify_config", DEFAULT_NOTIFY_CONFIG)
+    if not isinstance(notify_config, dict):
+        notify_config = {}
     return {
         "timezone": timezone_name,
         "timezone_options": [
@@ -66,6 +71,7 @@ def get_app_settings():
         "batch_completion_notifications_enabled": (
             batch_completion_notifications
         ),
+        "notify_config": dict(notify_config),
     }
 
 
@@ -87,9 +93,30 @@ def batch_completion_notifications_enabled():
     )
 
 
+def get_notify_config():
+    """Return the web-managed notify.py channel configuration."""
+    return dict(get_app_settings().get("notify_config") or {})
+
+
+def _normalize_notify_config(value):
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("通知配置必须是 JSON 对象")
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(encoded) > MAX_NOTIFY_CONFIG_BYTES:
+        raise ValueError("通知配置不能超过 64 KiB")
+    return value
+
+
 def save_app_preferences(
     timezone_name=None,
     batch_completion_notifications_enabled=None,
+    notify_config=None,
 ):
     """Save optional app preferences without overwriting unrelated settings."""
     with SETTINGS_LOCK:
@@ -102,6 +129,10 @@ def save_app_preferences(
         if batch_completion_notifications_enabled is not None:
             settings["batch_completion_notifications_enabled"] = bool(
                 batch_completion_notifications_enabled
+            )
+        if notify_config is not None:
+            settings["notify_config"] = _normalize_notify_config(
+                notify_config
             )
         _write_settings(settings)
     return get_app_settings()
