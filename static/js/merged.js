@@ -771,10 +771,13 @@ async function loadStatus() {
       : "var(--danger)";
 
     const dualPill = $("dualStatus");
+    const botLabel = status.bot_username
+      ? `Bot @${status.bot_username}`
+      : "Bot";
     dualPill.textContent = status.dual_end_ready
-      ? "网页端 + Bot 双端在线"
+      ? `网页端 + ${botLabel} 双端在线`
       : status.bot_running
-        ? "Bot 在线，用户客户端未就绪"
+        ? `${botLabel} 在线，用户客户端未就绪`
         : "Bot 未运行";
     dualPill.style.color = status.dual_end_ready ? "var(--success)" : "var(--danger)";
 

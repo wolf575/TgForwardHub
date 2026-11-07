@@ -986,11 +986,13 @@ def api_status():
     bot_running = bool(bot is not None and getattr(bot, 'is_connected', False))
     user_client_running = bool(acc is not None and getattr(acc, 'is_connected', False))
     dual_end_ready = bot_running and user_client_running
+    bot_username = getattr(getattr(bot, 'me', None), 'username', None)
 
     return jsonify({
         'web_ready': True,
         'bot_ready': bool(bot is not None),
         'bot_running': bot_running,
+        'bot_username': bot_username,
         'user_client_ready': bool(acc is not None),
         'user_client_running': user_client_running,
         'dual_end_ready': dual_end_ready,
