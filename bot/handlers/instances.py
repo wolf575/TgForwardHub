@@ -10,6 +10,10 @@ _bot_instance = None
 _acc_instance = None
 _bot_update_count = 0
 _bot_last_update_at = None
+_bot_command_count = 0
+_bot_last_command = None
+_bot_last_command_at = None
+_bot_last_command_error = None
 
 
 def set_bot_instance(bot):
@@ -46,6 +50,28 @@ def get_bot_update_stats():
     return {
         "count": _bot_update_count,
         "last_update_at": _bot_last_update_at,
+    }
+
+
+def record_bot_command(command, error=None):
+    """Record command-handler activity without logging message contents."""
+    global _bot_command_count, _bot_last_command
+    global _bot_last_command_at, _bot_last_command_error
+    _bot_command_count += 1
+    _bot_last_command = str(command)
+    _bot_last_command_at = time.time()
+    _bot_last_command_error = (
+        str(error)[:300] if error is not None else None
+    )
+
+
+def get_bot_command_stats():
+    """Return command-handler diagnostics for the health endpoint."""
+    return {
+        "count": _bot_command_count,
+        "last_command": _bot_last_command,
+        "last_command_at": _bot_last_command_at,
+        "last_command_error": _bot_last_command_error,
     }
 
 

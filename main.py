@@ -26,6 +26,7 @@ logger = get_logger(__name__)
 # 导入核心模块
 from bot.core import (
     initialize_clients,
+    install_client_loop_bridge,
     initialize_message_queue,
     print_startup_config
 )
@@ -87,6 +88,8 @@ def main():
         # 1. 初始化客户端
         logger.info("🚀 正在启动 Save-Restricted-Bot...")
         bot, acc = initialize_clients()
+        install_client_loop_bridge(bot)
+        install_client_loop_bridge(acc)
 
         # 2. 初始化消息队列
         message_queue, message_worker = initialize_message_queue(acc)

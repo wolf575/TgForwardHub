@@ -3,8 +3,16 @@ import unittest
 from unittest import mock
 
 import main
-from bot.handlers.instances import get_bot_update_stats, record_bot_update
-from bot.core.client import _update_client_options
+from bot.handlers.instances import (
+    get_bot_command_stats,
+    get_bot_update_stats,
+    record_bot_command,
+    record_bot_update,
+)
+from bot.core.client import (
+    _update_client_options,
+    install_client_loop_bridge,
+)
 
 
 class _FakeLoop:
@@ -49,6 +57,15 @@ class MainBotLoopTests(unittest.TestCase):
         self.assertEqual(after["count"], before["count"] + 1)
         self.assertIsNotNone(after["last_update_at"])
 
+    def test_records_command_activity_without_message_contents(self):
+        before = get_bot_command_stats()
+        record_bot_command("start")
+        after = get_bot_command_stats()
+
+        self.assertEqual(after["count"], before["count"] + 1)
+        self.assertEqual(after["last_command"], "start")
+        self.assertIsNone(after["last_command_error"])
+
     def test_prepares_client_loop(self):
         client_loop = _FakeLoop()
         bot = type("Bot", (), {"loop": client_loop})()
@@ -80,6 +97,26 @@ class MainBotLoopTests(unittest.TestCase):
 
         self.assertIsNotNone(client_loop.coroutine)
         get_event_loop.assert_not_called()
+
+    def test_installs_sync_bridge_for_pyrofork_wrapped_methods(self):
+        loop = asyncio.new_event_loop()
+
+        async def original_send(_client, value):
+            return value
+
+        class _Client:
+            pass
+
+        client = _Client()
+        client.loop = loop
+        client.send_message = lambda _client, value: value
+        client.send_message.__wrapped__ = original_send
+
+        install_client_loop_bridge(client)
+
+        self.assertTrue(client._tgfh_loop_bridge_installed)
+        self.assertEqual(client.send_message("ok"), "ok")
+        loop.close()
 
 
 if __name__ == "__main__":

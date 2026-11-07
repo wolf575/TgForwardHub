@@ -2,8 +2,10 @@
 客户端初始化模块
 职责：初始化Bot客户端和User客户端
 """
-import os
+import asyncio
+import functools
 import inspect
+import os
 import pyrogram
 from pyrogram import Client
 from bot.utils.logger import get_logger
@@ -31,6 +33,92 @@ def _update_client_options():
     if "skip_updates" in parameters:
         options["skip_updates"] = False
     return options
+
+
+_LOOP_BRIDGE_ATTR = "_tgfh_loop_bridge_installed"
+_LOOP_BRIDGE_SKIP = {
+    "authorize",
+    "connect",
+    "disconnect",
+    "initialize",
+    "restart",
+    "run",
+    "start",
+    "stop",
+}
+
+
+def _invoke_on_client_loop(client, function, *args, **kwargs):
+    """Invoke a Pyrofork async method on the loop owned by the client."""
+    loop = getattr(client, "loop", None)
+    if loop is None or loop.is_closed():
+        raise RuntimeError("Telegram client event loop is unavailable")
+
+    coroutine = function(client, *args, **kwargs)
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+
+    # Async methods may be called from code already running on the client loop.
+    if running_loop is loop:
+        return coroutine
+
+    if loop.is_running():
+        return asyncio.run_coroutine_threadsafe(coroutine, loop).result()
+    return loop.run_until_complete(coroutine)
+
+
+def install_client_loop_bridge(client):
+    """Bind Pyrofork's sync method wrappers to the client's own event loop.
+
+    Pyrofork captures the default event loop when its sync wrappers are
+    imported. That loop can differ from the loop later assigned to a client
+    when the web app imports modules from a background thread. Sync handlers
+    then schedule work onto a loop that is not running, so Telegram receives
+    the update but the handler appears to hang while sending a reply.
+
+    Replacing only the public async methods on the client instance keeps the
+    existing Bot/User Client business logic intact while making every sync
+    call use the same loop as the client that owns the dispatcher.
+    """
+    if client is None or getattr(client, _LOOP_BRIDGE_ATTR, False):
+        return client
+
+    loop = getattr(client, "loop", None)
+    if loop is None or loop.is_closed():
+        return client
+
+    installed = 0
+    for name in dir(client):
+        if name.startswith("_") or name in _LOOP_BRIDGE_SKIP:
+            continue
+        try:
+            wrapped = getattr(client, name)
+        except Exception:
+            continue
+        function = getattr(wrapped, "__wrapped__", None)
+        if function is None or not inspect.iscoroutinefunction(function):
+            continue
+
+        def sync_bridge(*args, __function=function, **kwargs):
+            return _invoke_on_client_loop(
+                client,
+                __function,
+                *args,
+                **kwargs,
+            )
+
+        sync_bridge = functools.wraps(function)(sync_bridge)
+        setattr(client, name, sync_bridge)
+        installed += 1
+
+    setattr(client, _LOOP_BRIDGE_ATTR, True)
+    logger.info(
+        "✅ Telegram客户端同步API已绑定到客户端事件循环（%s 个方法）",
+        installed,
+    )
+    return client
 
 
 def initialize_clients():

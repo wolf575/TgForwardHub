@@ -7,6 +7,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import logging
 
 from config import load_watch_config
+from bot.handlers.instances import record_bot_command
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,18 @@ def register_command_handlers(bot, acc):
         welcome_text += "🎯 **提取模式** - 提取特定内容转发\n\n"
         welcome_text += "点击下方按钮开始使用 👇"
         
-        bot.send_message(message.chat.id, welcome_text, reply_markup=keyboard, reply_to_message_id=message.id)
+        try:
+            bot.send_message(
+                message.chat.id,
+                welcome_text,
+                reply_markup=keyboard,
+                reply_to_message_id=message.id,
+            )
+        except Exception as exc:
+            record_bot_command("start", exc)
+            logger.exception("发送 /start 回复失败")
+            raise
+        record_bot_command("start")
     
     @bot.on_message(filters.command(["help"]))
     def send_help(client: pyrogram.client.Client, message: pyrogram.types.messages_and_media.message.Message):
@@ -78,13 +90,35 @@ def register_command_handlers(bot, acc):
 • 提取模式会将匹配的内容单独发送
 • 所有操作都可通过按钮完成，无需记忆复杂命令
 """
-        bot.send_message(message.chat.id, help_text, reply_markup=keyboard, reply_to_message_id=message.id)
+        try:
+            bot.send_message(
+                message.chat.id,
+                help_text,
+                reply_markup=keyboard,
+                reply_to_message_id=message.id,
+            )
+        except Exception as exc:
+            record_bot_command("help", exc)
+            logger.exception("发送 /help 回复失败")
+            raise
+        record_bot_command("help")
     
     @bot.on_message(filters.command(["watch"]))
     def watch_command(client: pyrogram.client.Client, message: pyrogram.types.messages_and_media.message.Message):
         if acc is None:
             keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 返回主菜单", callback_data="menu_main")]])
-            bot.send_message(message.chat.id, "**❌ 需要配置 String Session 才能使用监控功能**", reply_markup=keyboard, reply_to_message_id=message.id)
+            try:
+                bot.send_message(
+                    message.chat.id,
+                    "**❌ 需要配置 String Session 才能使用监控功能**",
+                    reply_markup=keyboard,
+                    reply_to_message_id=message.id,
+                )
+            except Exception as exc:
+                record_bot_command("watch", exc)
+                logger.exception("发送 /watch 回复失败")
+                raise
+            record_bot_command("watch")
             return
         
         show_watch_menu(message.chat.id, message.id)
@@ -114,4 +148,15 @@ def show_watch_menu(chat_id, reply_to_message_id=None):
     text += "🗑 **删除监控** - 移除现有监控任务\n\n"
     text += f"当前监控任务数：**{watch_count}** 个"
     
-    bot.send_message(chat_id, text, reply_markup=keyboard, reply_to_message_id=reply_to_message_id)
+    try:
+        bot.send_message(
+            chat_id,
+            text,
+            reply_markup=keyboard,
+            reply_to_message_id=reply_to_message_id,
+        )
+    except Exception as exc:
+        record_bot_command("watch", exc)
+        logger.exception("发送 /watch 菜单失败")
+        raise
+    record_bot_command("watch")
