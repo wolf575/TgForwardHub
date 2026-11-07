@@ -36,6 +36,7 @@ class _FakeClient:
     def __init__(self):
         self.invocations = []
         self.copied_groups = []
+        self.copied_group_kwargs = []
         self.edited_captions = []
         self.copy_result = None
         self._random_id = 100
@@ -45,8 +46,9 @@ class _FakeClient:
         self._random_id += 1
         return self._random_id
 
-    def copy_media_group(self, destination, source, message_id, **_kwargs):
+    def copy_media_group(self, destination, source, message_id, **kwargs):
         self.copied_groups.append((destination, source, message_id))
+        self.copied_group_kwargs.append(kwargs)
         if self.copy_result is not None:
             return self.copy_result
         result = []
@@ -121,6 +123,18 @@ def _task(job_id):
 
 
 class BatchFilterTests(unittest.TestCase):
+    def test_media_group_result_ids_preserve_returned_order(self):
+        result = [
+            SimpleNamespace(id=203),
+            SimpleNamespace(id=201),
+            SimpleNamespace(id=202),
+        ]
+
+        self.assertEqual(
+            batch_forward._result_message_ids(result),
+            [203, 201, 202],
+        )
+
     def test_no_filter_rules_skip_rich_text_normalization(self):
         message = _FakeMessage(1, caption="普通说明")
         rules = batch_forward._filter_rule_set(
@@ -162,7 +176,7 @@ class BatchFilterTests(unittest.TestCase):
         self.assertEqual(cleaned[0], "正常标题")
         self.assertEqual(cleaned[1], "正常标题\n")
 
-    def test_copy_media_group_then_updates_per_item_captions(self):
+    def test_copy_media_group_sends_filtered_captions_before_edit(self):
         messages = [
             _FakeMessage(1, caption="第一条", media_group_id="group"),
             _FakeMessage(2, caption="第二条", media_group_id="group"),
@@ -180,12 +194,17 @@ class BatchFilterTests(unittest.TestCase):
             -1001,
             messages[0].id,
             ["第一条", ""],
+            group_messages=messages,
         )
 
         self.assertEqual(client.copied_groups, [(-1002, -1001, 1)])
         self.assertEqual(
+            client.copied_group_kwargs,
+            [{"captions": ["第一条", batch_forward._EMPTY_CAPTION_SENTINEL]}],
+        )
+        self.assertEqual(
             client.edited_captions,
-            [(-1002, 101, "第一条"), (-1002, 102, "")],
+            [(-1002, 102, "")],
         )
 
     def test_forwarded_group_uses_cleaned_caption_for_non_first_item(self):
@@ -214,9 +233,10 @@ class BatchFilterTests(unittest.TestCase):
 
         self.assertEqual(sent_count, 2)
         self.assertFalse(used_fallback)
+        self.assertEqual(client.edited_captions, [])
         self.assertEqual(
-            client.edited_captions,
-            [(-1002, 1, "第一条"), (-1002, 2, "第二条\n")],
+            client.copied_group_kwargs,
+            [{"captions": ["第一条", "第二条\n"]}],
         )
 
     def test_multi_item_media_group_preserves_source_order(self):
@@ -239,6 +259,7 @@ class BatchFilterTests(unittest.TestCase):
             -1001,
             first.id,
             ["第一项", "", "第三项"],
+            group_messages=[first, second, third],
         )
 
         self.assertEqual(
@@ -246,8 +267,20 @@ class BatchFilterTests(unittest.TestCase):
             [(-1002, -1001, 1)],
         )
         self.assertEqual(
+            client.copied_group_kwargs,
+            [
+                {
+                    "captions": [
+                        "第一项",
+                        batch_forward._EMPTY_CAPTION_SENTINEL,
+                        "第三项",
+                    ]
+                }
+            ],
+        )
+        self.assertEqual(
             [caption for _destination, _message_id, caption in client.edited_captions],
-            ["第一项", "", "第三项"],
+            [""],
         )
 
     def test_cancelled_fallback_does_not_upload_after_download(self):

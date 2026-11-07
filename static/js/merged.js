@@ -1045,6 +1045,7 @@ async function pollBatch(jobId) {
       currentBatchJobId = "";
       currentBatchStatus = data.status;
       setMessage("batchMessage", `任务 ${data.status}`);
+      refreshActiveTaskList({ quiet: true });
       loadHistory();
       return;
     }
@@ -1052,37 +1053,112 @@ async function pollBatch(jobId) {
   } catch (error) {
     if (/job not found|HTTP 404/.test(error.message)) {
       localStorage.removeItem(BATCH_JOB_KEY);
+      refreshActiveTaskList({ quiet: true });
     }
     setMessage("batchMessage", error.message);
   }
   pollingTimer = setTimeout(() => pollBatch(jobId), 800);
 }
 
-async function restoreBatchTask() {
-  const jobId = localStorage.getItem(BATCH_JOB_KEY);
-  if (!jobId) return;
+async function refreshActiveTaskList(options = {}) {
+  const { quiet = false } = options;
+  const select = $("activeTaskSelect");
+  const attachButton = $("attachTaskBtn");
+  const newButton = $("newTaskBtn");
+  try {
+    const tasks = await apiFetch("/api/batch-forward/active", { timeout: 10000 });
+    const selected = currentBatchJobId || select.value;
+    select.textContent = "";
+    for (const task of tasks) {
+      const option = document.createElement("option");
+      option.value = task.jobId;
+      option.textContent =
+        `${task.taskName || task.jobId.slice(0, 8)} · ${task.status}`;
+      select.appendChild(option);
+    }
+    const hasTasks = tasks.length > 0;
+    select.hidden = !hasTasks;
+    attachButton.hidden = !hasTasks;
+    newButton.hidden = !hasTasks;
+    if (hasTasks && tasks.some((task) => task.jobId === selected)) {
+      select.value = selected;
+    }
+    attachButton.disabled = !hasTasks;
+    return tasks;
+  } catch (error) {
+    select.hidden = true;
+    attachButton.hidden = true;
+    newButton.hidden = true;
+    if (!quiet) {
+      setMessage("batchMessage", `任务列表读取失败：${error.message}`);
+    }
+    return null;
+  }
+}
 
+async function attachBatchTask(jobId, message = "") {
+  if (!jobId) return;
+  if (pollingTimer) {
+    clearTimeout(pollingTimer);
+    pollingTimer = null;
+  }
   try {
     const data = await apiFetch(`/api/batch-forward/${jobId}`);
     updateMonitor(data);
     if (["running", "paused"].includes(data.status)) {
       applyBatchSpecToForm(data.spec || {});
+      localStorage.setItem(BATCH_JOB_KEY, jobId);
       setMessage(
         "batchMessage",
-        data.status === "paused"
-          ? "已恢复暂停中的任务"
-          : "已恢复刷新前的执行状态"
+        message ||
+          (data.status === "paused"
+            ? "已接管暂停中的任务"
+            : "已接管正在执行的任务")
       );
       pollBatch(jobId);
-      return;
     }
-    localStorage.removeItem(BATCH_JOB_KEY);
-    if (["done", "error", "cancelled", "interrupted"].includes(data.status)) {
-      setMessage("batchMessage", `上次任务状态: ${data.status}`);
-    }
-  } catch (_) {
-    localStorage.removeItem(BATCH_JOB_KEY);
+  } catch (error) {
+    setMessage("batchMessage", error.message);
+    refreshActiveTaskList();
   }
+}
+
+function startNewBatchTask() {
+  if (pollingTimer) {
+    clearTimeout(pollingTimer);
+    pollingTimer = null;
+  }
+  currentBatchJobId = "";
+  currentBatchStatus = "";
+  localStorage.removeItem(BATCH_JOB_KEY);
+  $("jobId").textContent = "";
+  $("jobStatus").textContent = "等待";
+  $("processedCount").textContent = "0";
+  $("successCount").textContent = "0";
+  $("failedCount").textContent = "0";
+  $("skippedCount").textContent = "0";
+  $("jobPhase").textContent = "新任务模式";
+  $("jobEta").textContent = "";
+  $("jobLog").value = "";
+  $("jobProgressBar").classList.remove("indeterminate");
+  $("jobProgressBar").style.width = "0%";
+  $("pauseBtn").hidden = true;
+  $("resumeBtn").hidden = true;
+  $("cancelBtn").hidden = true;
+  setMessage("batchMessage", "已切换为新任务模式，原任务仍在后台执行");
+}
+
+async function restoreBatchTask() {
+  const tasks = await refreshActiveTaskList();
+  if (tasks === null) return;
+  if (!tasks.length) {
+    localStorage.removeItem(BATCH_JOB_KEY);
+    return;
+  }
+  const savedJobId = localStorage.getItem(BATCH_JOB_KEY);
+  const target =
+    tasks.find((task) => task.jobId === savedJobId) || tasks[0];
+  await attachBatchTask(target.jobId, "已发现并接管后台执行任务");
 }
 
 async function submitBatch(event) {
@@ -1135,6 +1211,7 @@ async function submitBatch(event) {
       stderrTail: "",
     });
     pollBatch(result.jobId);
+    refreshActiveTaskList({ quiet: true });
   } catch (error) {
     setMessage("batchMessage", error.message);
   }
@@ -1156,6 +1233,7 @@ async function pauseBatch() {
     $("resumeBtn").hidden = false;
     $("cancelBtn").hidden = false;
     pollBatch(jobId);
+    refreshActiveTaskList({ quiet: true });
   } catch (error) {
     setMessage("batchMessage", error.message);
   }
@@ -1172,6 +1250,7 @@ async function resumeBatch() {
     $("resumeBtn").hidden = true;
     $("cancelBtn").hidden = false;
     pollBatch(jobId);
+    refreshActiveTaskList({ quiet: true });
   } catch (error) {
     setMessage("batchMessage", error.message);
   }
@@ -1188,6 +1267,7 @@ async function cancelBatch() {
     $("resumeBtn").hidden = true;
     $("cancelBtn").hidden = true;
     pollBatch(jobId);
+    refreshActiveTaskList({ quiet: true });
   } catch (error) {
     setMessage("batchMessage", error.message);
   }
@@ -1511,6 +1591,11 @@ document.addEventListener("DOMContentLoaded", () => {
   $("pauseBtn").addEventListener("click", pauseBatch);
   $("resumeBtn").addEventListener("click", resumeBatch);
   $("cancelBtn").addEventListener("click", cancelBatch);
+  $("attachTaskBtn").addEventListener("click", () => {
+    const jobId = $("activeTaskSelect").value;
+    if (jobId) attachBatchTask(jobId);
+  });
+  $("newTaskBtn").addEventListener("click", startNewBatchTask);
   $("historyRefresh").addEventListener("click", loadHistory);
   $("historyClear").addEventListener("click", async () => {
     await apiFetch("/api/history", { method: "DELETE" });
@@ -1547,4 +1632,5 @@ document.addEventListener("DOMContentLoaded", () => {
   loadWatchConfig();
   loadNotes();
   setInterval(loadStatus, 3000);
+  setInterval(() => refreshActiveTaskList({ quiet: true }), 3000);
 });

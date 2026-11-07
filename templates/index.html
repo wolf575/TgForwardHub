@@ -118,7 +118,12 @@
         <div class="monitor-card">
           <div class="monitor-head">
             <strong>执行状态</strong>
-            <span id="jobId" class="muted"></span>
+            <div class="monitor-head-tools">
+              <select id="activeTaskSelect" hidden aria-label="正在执行的任务"></select>
+              <button id="attachTaskBtn" class="secondary small" type="button" hidden>接管</button>
+              <button id="newTaskBtn" class="secondary small" type="button" hidden>新任务</button>
+              <span id="jobId" class="muted"></span>
+            </div>
           </div>
           <div class="stat-grid">
             <div><span>状态</span><strong id="jobStatus">等待</strong></div>

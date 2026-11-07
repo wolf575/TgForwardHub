@@ -999,6 +999,13 @@ def api_batch_forward():
         return jsonify({'error': str(exc)}), 400
 
 
+@app.route('/api/batch-forward/active', methods=['GET'])
+def api_batch_forward_active():
+    if 'username' not in session:
+        return jsonify({'error': '未登录'}), 401
+    return jsonify(batch_forward.list_active_tasks())
+
+
 @app.route('/api/batch-forward/<job_id>', methods=['GET'])
 def api_batch_forward_status(job_id):
     if 'username' not in session:

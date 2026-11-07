@@ -277,12 +277,95 @@ class BatchRegexForwardingTests(unittest.TestCase):
                 )
                 self.assertEqual((count, fallback), (2, False))
                 self.assertEqual(
+                    acc.group_copies[0][1]["captions"],
+                    [batch_forward._EMPTY_CAPTION_SENTINEL, None],
+                )
+                self.assertEqual(
                     [caption for _dest, _msg_id, caption in acc.edited_captions],
-                    ["", ""],
+                    [""],
                 )
 
 
 class BatchRuntimeControlTests(unittest.TestCase):
+    def test_batch_notification_contains_detailed_counts(self):
+        title, content = batch_forward._batch_notification_payload(
+            "nightly",
+            "job-1",
+            "done",
+            {
+                "total": 20,
+                "processed": 20,
+                "success": 17,
+                "failed": 2,
+                "skipped": 1,
+                "elapsed_seconds": 8.5,
+            },
+        )
+
+        self.assertIn("执行完成", title)
+        self.assertIn("总数: 20", content)
+        self.assertIn("已处理: 20", content)
+        self.assertIn("成功: 17", content)
+        self.assertIn("失败: 2", content)
+        self.assertIn("跳过: 1", content)
+        self.assertIn("耗时: 8.5 秒", content)
+
+    def test_batch_notification_uses_configured_notifier(self):
+        with mock.patch.object(
+            batch_forward,
+            "batch_completion_notifications_enabled",
+            return_value=True,
+        ), mock.patch("notify.send") as send:
+            batch_forward._send_batch_notification(
+                "nightly",
+                "job-1",
+                "error",
+                {"processed": 1, "failed": 1},
+                RuntimeError("boom"),
+            )
+
+        send.assert_called_once()
+        self.assertEqual(send.call_args.kwargs["HITOKOTO"], False)
+        self.assertIn("错误: boom", send.call_args.args[1])
+
+    def test_batch_notification_respects_disabled_setting(self):
+        with mock.patch.object(
+            batch_forward,
+            "batch_completion_notifications_enabled",
+            return_value=False,
+        ), mock.patch("notify.send") as send:
+            batch_forward._send_batch_notification(
+                "nightly",
+                "job-1",
+                "done",
+                {"processed": 1},
+            )
+
+        send.assert_not_called()
+
+    def test_list_active_tasks_includes_running_and_paused_only(self):
+        running = _task("running-job", _base_spec())
+        paused = _task("paused-job", _base_spec(), status="paused")
+        done = _task("done-job", _base_spec())
+        done["status"] = "done"
+        done["active"] = False
+
+        with mock.patch.dict(
+            batch_forward.TASKS,
+            {
+                "running-job": running,
+                "paused-job": paused,
+                "done-job": done,
+            },
+            clear=True,
+        ):
+            tasks = batch_forward.list_active_tasks()
+
+        self.assertEqual(
+            {item["jobId"] for item in tasks},
+            {"running-job", "paused-job"},
+        )
+
     def test_unchanged_filter_rules_compile_once_per_task(self):
         job_id = "compile-once-job"
         spec = _base_spec()
@@ -664,6 +747,17 @@ class BatchRuntimeApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         update.assert_called_once_with("job", {"remove_regex": USER_REGEX})
+
+    def test_active_tasks_endpoint(self):
+        with mock.patch.object(
+            batch_forward,
+            "list_active_tasks",
+            return_value=[{"jobId": "job", "status": "running"}],
+        ):
+            response = self.client.get("/api/batch-forward/active")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()[0]["jobId"], "job")
 
     def test_pause_and_resume_endpoints(self):
         with mock.patch.object(

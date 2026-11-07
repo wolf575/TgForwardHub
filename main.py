@@ -56,6 +56,12 @@ async def _idle_without_signals(bot):
         await asyncio.sleep(1)
 
 
+def _run_bot_loop(bot):
+    """Run the client-owned event loop so dispatcher tasks keep processing."""
+    loop = getattr(bot, "loop", None) or asyncio.get_event_loop()
+    loop.run_until_complete(_idle_without_signals(bot))
+
+
 def main():
     """主函数：协调所有模块启动Bot"""
     bot = None
@@ -106,7 +112,7 @@ def main():
         bot.start()
         logger.info("✅ Bot客户端已启动并开始监听消息")
 
-        asyncio.get_event_loop().run_until_complete(_idle_without_signals(bot))
+        _run_bot_loop(bot)
 
     except KeyboardInterrupt:
         logger.info("\n⚠️ 收到中断信号，正在关闭...")

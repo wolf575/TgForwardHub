@@ -11,9 +11,13 @@ const scriptPath = [
   path.join(testDir, "..", "static", "js", "merged.js"),
   path.join(testDir, "..", "container", "app", "static", "js", "merged.js"),
 ].find((candidate) => fs.existsSync(candidate));
+const templatePath = [
+  path.join(testDir, "..", "templates", "index.html"),
+  path.join(testDir, "..", "container", "app", "templates", "index.html"),
+].find((candidate) => fs.existsSync(candidate));
 
-if (!scriptPath) {
-  throw new Error("Unable to locate static/js/merged.js");
+if (!scriptPath || !templatePath) {
+  throw new Error("Unable to locate the merged UI assets");
 }
 
 
@@ -87,4 +91,21 @@ test("message id history keeps the id range visible", () => {
   });
 
   assert.match(summary, /消息 ID: 100 → 250/);
+});
+
+
+test("active task controls support cross-device attach and new tasks", () => {
+  const source = fs.readFileSync(scriptPath, "utf8");
+  const template = fs.readFileSync(templatePath, "utf8");
+
+  assert.match(template, /id="activeTaskSelect"/);
+  assert.match(template, /id="attachTaskBtn"/);
+  assert.match(template, /id="newTaskBtn"/);
+  assert.match(source, /\/api\/batch-forward\/active/);
+  assert.match(source, /attachTaskBtn"\)\.addEventListener/);
+  assert.match(source, /newTaskBtn"\)\.addEventListener/);
+  assert.match(
+    source,
+    /setInterval\(\(\) => refreshActiveTaskList\(\{ quiet: true \}\), 3000\)/,
+  );
 });

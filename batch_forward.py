@@ -28,7 +28,10 @@ from pyrogram.errors import (
     Timeout as TelegramTimeout,
 )
 from database import DATA_DIR
-from app_settings import get_app_timezone
+from app_settings import (
+    batch_completion_notifications_enabled,
+    get_app_timezone,
+)
 from bot.handlers.messages import (
     _copy_single_private_media,
     _download_private_media_thumbnail,
@@ -65,10 +68,58 @@ DOWNLOADABLE_MEDIA_TYPES = {
 TASKS = {}
 TASKS_LOCK = threading.Lock()
 BATCH_FETCH_CHUNK_SIZE = 100
+_EMPTY_CAPTION_SENTINEL = "\u2063"
 
 
 class BatchTaskStopped(Exception):
     """Raised when a paused/cancelled task must not start another send."""
+
+
+def _batch_notification_payload(task_name, job_id, status, progress, error=None):
+    label = "执行完成" if status == "done" else "执行失败"
+    content = (
+        f"任务: {task_name or '未命名任务'}\n"
+        f"状态: {label}\n"
+        f"任务 ID: {job_id}\n"
+        f"总数: {int(progress.get('total') or 0)}\n"
+        f"已处理: {int(progress.get('processed') or 0)}\n"
+        f"成功: {int(progress.get('success') or 0)}\n"
+        f"失败: {int(progress.get('failed') or 0)}\n"
+        f"跳过: {int(progress.get('skipped') or 0)}"
+    )
+    elapsed = progress.get("elapsed_seconds")
+    if elapsed is not None:
+        content += f"\n耗时: {elapsed} 秒"
+    if error:
+        content += f"\n错误: {str(error)[:500]}"
+    return f"TgForwardHub {label}", content
+
+
+def _send_batch_notification(task_name, job_id, status, progress, error=None):
+    try:
+        if not batch_completion_notifications_enabled():
+            return
+        from notify import send
+
+        title, content = _batch_notification_payload(
+            task_name,
+            job_id,
+            status,
+            progress,
+            error,
+        )
+        send(title, content, HITOKOTO=False)
+    except Exception:
+        logger.exception("批量任务通知发送失败")
+
+
+def _queue_batch_notification(task_name, job_id, status, progress, error=None):
+    threading.Thread(
+        target=_send_batch_notification,
+        args=(task_name, job_id, status, progress, error),
+        daemon=True,
+        name="BatchNotification",
+    ).start()
 
 
 PROGRESS_PHASES = {
@@ -387,23 +438,61 @@ def _caption_overrides(cleaned_texts, cleaned_text, count):
 
 
 def _result_message_ids(result):
-    """Extract sent message IDs from high-level or raw forward results."""
+    """Extract sent message IDs in album order from high-level/raw results."""
     ids = []
+
+    def add_message_id(value):
+        if value is None:
+            return
+        try:
+            message_id = int(value)
+        except (TypeError, ValueError):
+            return
+        if message_id not in ids:
+            ids.append(message_id)
+
     if isinstance(result, (list, tuple)):
-        ids.extend(
-            int(item.id)
-            for item in result
-            if getattr(item, "id", None) is not None
-        )
+        for item in result:
+            add_message_id(getattr(item, "id", None))
     elif getattr(result, "id", None) is not None:
-        ids.append(int(result.id))
+        add_message_id(result.id)
 
     for update in getattr(result, "updates", []) or []:
         message = getattr(update, "message", None)
-        if getattr(message, "id", None) is not None:
-            ids.append(int(message.id))
+        add_message_id(getattr(message, "id", None))
 
-    return sorted(set(ids))
+    return ids
+
+
+def _media_group_caption_values(group_messages, captions):
+    """Build copy_media_group captions without retaining filtered source text.
+
+    Pyrogram treats an empty list item as "not supplied" and keeps the source
+    caption. Use ``None`` when the source item had no caption, and a tiny
+    invisible sentinel only when an existing caption must be cleared after the
+    album is sent. Non-empty filtered captions are sent in the initial RPC.
+    """
+    values = list(captions or [])
+    originals = (
+        _group_texts(group_messages)
+        if group_messages
+        else [""] * len(values)
+    )
+    result = []
+    for index, desired in enumerate(values):
+        if desired is None:
+            result.append(None)
+            continue
+        desired = str(desired)
+        original = originals[index] if index < len(originals) else ""
+        if desired:
+            result.append(desired)
+        elif original:
+            result.append(_EMPTY_CAPTION_SENTINEL)
+        else:
+            # Keep an already-empty source caption empty without an edit.
+            result.append(None)
+    return result
 
 
 def _edit_media_group_captions(
@@ -413,12 +502,16 @@ def _edit_media_group_captions(
     result,
     captions,
     log=None,
+    indexes=None,
 ):
-    """Set captions one by one after the album itself was sent successfully."""
+    """Clear sentinel captions after the album itself was sent successfully."""
     message_ids = _result_message_ids(result)
     if not message_ids:
         raise RuntimeError("媒体组发送成功但无法获取目标消息 ID")
-    if len(message_ids) < len(captions):
+    if indexes is None:
+        indexes = range(len(captions))
+    indexes = list(indexes)
+    if indexes and max(indexes) >= len(message_ids):
         _emit_log(
             f"媒体组返回 {len(message_ids)} 项，少于源媒体组 {len(captions)} 项，"
             "仅更新已返回条目的 caption",
@@ -426,15 +519,16 @@ def _edit_media_group_captions(
             "warning",
         )
 
-    for index, (message_id, caption) in enumerate(
-        zip(message_ids, captions),
-        start=1,
-    ):
+    for index in indexes:
+        if index < 0 or index >= len(message_ids) or index >= len(captions):
+            continue
+        message_id = message_ids[index]
+        caption = captions[index]
         desired = caption or ""
         try:
             _worker_execute(
                 worker,
-                f"更新媒体组第 {index} 项 caption",
+                f"清空媒体组第 {index + 1} 项 caption",
                 lambda message_id=message_id, desired=desired: (
                     client.edit_message_caption(
                         destination,
@@ -447,7 +541,7 @@ def _edit_media_group_captions(
             continue
         except Exception as exc:
             _emit_log(
-                f"媒体组第 {index} 项 caption 更新失败: "
+                f"媒体组第 {index + 1} 项 caption 更新失败: "
                 f"{type(exc).__name__}: {exc}",
                 log,
                 "warning",
@@ -462,24 +556,43 @@ def _copy_media_group_and_set_captions(
     anchor_id,
     captions,
     log=None,
+    group_messages=None,
 ):
+    """Copy an album with filtered captions in the initial request.
+
+    This avoids the old send-then-edit sequence for normal filtered captions.
+    Only an existing caption that becomes empty needs a follow-up edit because
+    Pyrogram 2.x treats an empty list item as "keep the original caption".
+    """
+    caption_values = _media_group_caption_values(
+        group_messages,
+        captions,
+    )
     result = _worker_execute(
         worker,
-        "复制媒体组（保持原相册顺序）",
+        "复制媒体组并携带过滤后的 caption（保持原相册顺序）",
         lambda: client.copy_media_group(
             destination,
             source_id,
             anchor_id,
+            captions=caption_values,
         ),
     )
-    _edit_media_group_captions(
-        worker,
-        client,
-        destination,
-        result,
-        captions,
-        log,
-    )
+    clear_indexes = [
+        index
+        for index, caption in enumerate(caption_values)
+        if caption == _EMPTY_CAPTION_SENTINEL
+    ]
+    if clear_indexes:
+        _edit_media_group_captions(
+            worker,
+            client,
+            destination,
+            result,
+            [""] * len(caption_values),
+            log,
+            indexes=clear_indexes,
+        )
     return result
 
 
@@ -493,37 +606,19 @@ def _forward_media_group_and_set_captions(
     preserve_source,
     log=None,
 ):
-    message_ids = [item.id for item in group_messages]
-    if preserve_source:
-        result = _worker_execute(
-            worker,
-            "转发媒体组（保持原相册顺序）",
-            lambda: client.forward_messages(
-                destination,
-                source_id,
-                message_ids,
-            ),
-        )
-    else:
-        result = _worker_execute(
-            worker,
-            "隐藏来源转发媒体组（保持原相册顺序）",
-            lambda: _user_hidden_forward(
-                client,
-                source_id,
-                destination,
-                message_ids,
-            ),
-        )
-    _edit_media_group_captions(
+    # Native forward RPCs cannot carry replacement captions. Copy with the
+    # filtered captions in the first request instead of forwarding the original
+    # text and issuing one edit RPC per album item.
+    return _copy_media_group_and_set_captions(
         worker,
         client,
         destination,
-        result,
+        source_id,
+        group_messages[0].id,
         captions,
         log,
+        group_messages=group_messages,
     )
-    return result
 
 
 def _strip_trailing_blocks(text, terms):
@@ -1071,6 +1166,7 @@ def _copy_messages_to_relay(
                     cleaned_text,
                     len(group_messages),
                 ),
+                group_messages=group_messages,
             )
         else:
             result = bot.copy_media_group(
@@ -1542,6 +1638,7 @@ def _forward_batch_media_group(
                         len(group_messages),
                     ),
                     log,
+                    group_messages=group_messages,
                 )
             elif text_changed:
                 _copy_media_group_and_set_captions(
@@ -1556,6 +1653,7 @@ def _forward_batch_media_group(
                         len(group_messages),
                     ),
                     log,
+                    group_messages=group_messages,
                 )
             else:
                 _worker_execute(
@@ -1700,6 +1798,7 @@ def _forward_batch_media_group(
                         len(group_messages),
                     ),
                     log,
+                    group_messages=group_messages,
                 )
         else:
             _worker_execute(
@@ -2722,6 +2821,13 @@ def _run_batch_task(job_id, spec):
             stderrTail=_tail("\n".join(log_lines)),
         )
         persist(force=True)
+        final_task = get_task(job_id)
+        _queue_batch_notification(
+            final_task.get("taskName") or spec.get("task_name"),
+            job_id,
+            "done" if failed == 0 else "error",
+            final_task.get("progress") or {},
+        )
     except Exception as exc:
         if get_task(job_id).get("cancelled"):
             finish_cancelled()
@@ -2745,6 +2851,14 @@ def _run_batch_task(job_id, spec):
             stderrTail=_tail("\n".join(log_lines)),
         )
         persist(force=True)
+        final_task = get_task(job_id)
+        _queue_batch_notification(
+            final_task.get("taskName") or spec.get("task_name"),
+            job_id,
+            "error",
+            final_task.get("progress") or {},
+            exc,
+        )
     finally:
         _update_task(job_id, active=False)
 
@@ -2965,6 +3079,31 @@ def batch_status(job_id):
         "stderrTail": task.get("stderrTail") or "",
         "spec": task.get("spec") or {},
     }
+
+
+def list_active_tasks():
+    with TASKS_LOCK:
+        tasks = [
+            {
+                "jobId": job_id,
+                "taskName": task.get("taskName") or "",
+                "status": task.get("status") or "",
+                "paused": bool(task.get("paused")),
+                "createdAt": task.get("createdAt") or "",
+                "progress": task.get("progress") or {},
+                "stdoutTail": task.get("stdoutTail") or "",
+                "stderrTail": task.get("stderrTail") or "",
+                "spec": task.get("spec") or {},
+            }
+            for job_id, task in TASKS.items()
+            if task.get("active")
+            and task.get("status") in ("running", "paused")
+        ]
+    return sorted(
+        tasks,
+        key=lambda item: item.get("createdAt") or "",
+        reverse=True,
+    )
 
 
 init_history_db()

@@ -316,7 +316,21 @@ textarea {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 12px;
   margin-bottom: 12px;
+}
+
+.monitor-head-tools {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.monitor-head-tools select {
+  max-width: 240px;
+  min-width: 150px;
 }
 
 .muted { color: var(--muted); font-size: 12px; }
