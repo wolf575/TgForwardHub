@@ -18,6 +18,7 @@
 - 修复 Bot dispatcher 在默认事件循环中等待，导致 Bot 已启动但私聊消息无响应的问题
 - 修复媒体组结果消息 ID 被排序后可能影响相册条目 caption 对应关系的问题
 - 修复 Bot 同步包装器与 dispatcher 使用不同事件循环的风险，启动前显式绑定客户端事件循环
+- 兼容 Pyrofork 2.3.69 的 `skip_updates=True` 默认行为：Bot 和 User Client 显式启用 update gap recovery，修复连接正常但 update 不进入 handler 的问题
 
 ## 2026-11-05
 
