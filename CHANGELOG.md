@@ -6,7 +6,7 @@
 
 - 同一账户可在新浏览器或新设备通过活动任务列表接管运行中/暂停中的批量任务，也可切换到新任务模式
 - 批量任务完成或失败后支持通过 `NOTIFY_CONFIG` 发送包含总数、已处理、成功、失败和跳过统计的通知
-- 设置页新增通知渠道 JSON 配置和测试通知按钮，支持直接管理 notify.py 的 Telegram、Bark、Webhook、SMTP 等渠道
+- 设置页新增通知渠道参数配置和测试通知按钮，支持直接管理 notify.py 的 Telegram、Bark、Webhook、SMTP 等渠道
 - 通知设置拆分为“机器人私聊状态通知”和“客户端批量转发外部通知”；外部通知按 notify.py 参数名逐项填写，例如 BARK_PUSH、BARK_ARCHIVE、BARK_GROUP
 
 ### Changed
