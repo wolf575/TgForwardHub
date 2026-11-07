@@ -4,9 +4,23 @@ The Pyrogram bot and user client run on the main thread so that Pyrogram's
 sync handlers can schedule API calls back onto the main event loop.  Flask
 runs in a background thread and remains available for the web UI.
 """
+import asyncio
 import os
 import threading
 import time
+
+
+def _ensure_main_event_loop():
+    """Create the loop before importing Pyrogram's sync wrappers."""
+    try:
+        return asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop
+
+
+_main_event_loop = _ensure_main_event_loop()
 
 from app import app
 import main
