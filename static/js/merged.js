@@ -560,10 +560,11 @@ async function loadAppSettings() {
     select.value = settings.timezone || "Asia/Shanghai";
     $("batchNotificationsEnabled").checked =
       settings.batch_completion_notifications_enabled !== false;
-    $("notifyConfigJson").value = JSON.stringify(
-      settings.notify_config || {},
-      null,
-      2
+    $("clientBatchNotificationsEnabled").checked =
+      settings.client_batch_notifications_enabled === true;
+    renderNotifyConfigFields(
+      settings.notify_config_keys || [],
+      settings.notify_config || {}
     );
     setMessage("timezoneMessage", "");
   } catch (error) {
@@ -592,19 +593,40 @@ async function saveTimezone() {
   }
 }
 
+function renderNotifyConfigFields(keys, values) {
+  const container = $("notifyConfigFields");
+  container.textContent = "";
+  notifyConfigKeys = Array.isArray(keys) ? keys : [];
+  const known = new Set(notifyConfigKeys);
+  notifyConfigExtra = {};
+  for (const [key, value] of Object.entries(values || {})) {
+    if (!known.has(key)) notifyConfigExtra[key] = value;
+  }
+  for (const key of notifyConfigKeys) {
+    const label = document.createElement("label");
+    label.className = "notify-config-field";
+    const name = document.createElement("span");
+    name.textContent = key;
+    const input = document.createElement("input");
+    input.dataset.notifyKey = key;
+    input.type = /(TOKEN|PASSWORD|SECRET|KEY)$/.test(key)
+      ? "password"
+      : "text";
+    input.autocomplete = "off";
+    const value = values?.[key];
+    input.value = value === undefined || value === null ? "" : String(value);
+    label.append(name, input);
+    container.appendChild(label);
+  }
+}
+
 function notificationConfigFromForm() {
-  const raw = $("notifyConfigJson").value.trim();
-  if (!raw) return {};
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    throw new Error(`通知配置 JSON 格式错误：${error.message}`);
+  const config = { ...notifyConfigExtra };
+  for (const input of document.querySelectorAll("[data-notify-key]")) {
+    const value = input.value.trim();
+    if (value) config[input.dataset.notifyKey] = value;
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("通知配置必须是 JSON 对象");
-  }
-  return parsed;
+  return config;
 }
 
 async function saveBotNotificationSettings() {
@@ -616,6 +638,8 @@ async function saveBotNotificationSettings() {
       body: JSON.stringify({
         batch_completion_notifications_enabled:
           $("batchNotificationsEnabled").checked,
+        client_batch_notifications_enabled:
+          $("clientBatchNotificationsEnabled").checked,
         notify_config: notifyConfig,
       }),
     });
@@ -947,6 +971,8 @@ let currentBatchStatus = "";
 let ruleSyncTimer = null;
 let ruleSyncBusy = false;
 let ruleSyncPending = false;
+let notifyConfigKeys = [];
+let notifyConfigExtra = {};
 
 const BATCH_RULE_FIELDS = {
   excludeKeywords: "exclude_keywords",

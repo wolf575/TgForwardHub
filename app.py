@@ -156,7 +156,13 @@ def api_setup_status():
 def api_app_settings():
     if 'username' not in session:
         return jsonify({'error': '未登录'}), 401
-    return jsonify(get_app_settings())
+    settings = get_app_settings()
+    try:
+        from notify import get_config_keys
+        settings['notify_config_keys'] = get_config_keys()
+    except Exception:
+        settings['notify_config_keys'] = []
+    return jsonify(settings)
 
 
 @app.route('/api/app-settings', methods=['POST'])
@@ -169,8 +175,16 @@ def api_app_settings_save():
     has_batch_notifications = (
         'batch_completion_notifications_enabled' in data
     )
+    has_client_batch_notifications = (
+        'client_batch_notifications_enabled' in data
+    )
     has_notify_config = 'notify_config' in data
-    if not has_timezone and not has_batch_notifications and not has_notify_config:
+    if (
+        not has_timezone
+        and not has_batch_notifications
+        and not has_client_batch_notifications
+        and not has_notify_config
+    ):
         return jsonify({'error': '没有需要保存的设置'}), 400
 
     timezone_name = None
@@ -184,6 +198,11 @@ def api_app_settings_save():
         batch_completion_notifications_enabled = bool(
             data.get('batch_completion_notifications_enabled')
         )
+    client_batch_notifications_enabled = None
+    if has_client_batch_notifications:
+        client_batch_notifications_enabled = bool(
+            data.get('client_batch_notifications_enabled')
+        )
     notify_config = None
     if has_notify_config:
         notify_config = data.get('notify_config')
@@ -196,6 +215,9 @@ def api_app_settings_save():
             batch_completion_notifications_enabled=(
                 batch_completion_notifications_enabled
             ),
+            client_batch_notifications_enabled=(
+                client_batch_notifications_enabled
+            ),
             notify_config=notify_config,
         )
     except ValueError as exc:
@@ -205,7 +227,9 @@ def api_app_settings_save():
     if has_timezone:
         saved_fields.append('时区设置已保存')
     if has_batch_notifications:
-        saved_fields.append('通知设置已保存')
+        saved_fields.append('机器人对话通知设置已保存')
+    if has_client_batch_notifications:
+        saved_fields.append('客户端批量转发通知设置已保存')
     if has_notify_config:
         saved_fields.append('通知渠道配置已保存')
     return jsonify({

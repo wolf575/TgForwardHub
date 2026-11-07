@@ -58,6 +58,9 @@ class AppSettingsTests(unittest.TestCase):
                 self.assertTrue(
                     app_settings.batch_completion_notifications_enabled()
                 )
+                self.assertFalse(
+                    app_settings.client_batch_notifications_enabled()
+                )
 
     def test_batch_notifications_can_be_disabled(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -78,6 +81,24 @@ class AppSettingsTests(unittest.TestCase):
                 self.assertFalse(
                     app_settings.batch_completion_notifications_enabled()
                 )
+
+    def test_client_batch_notifications_can_be_enabled_separately(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_file = os.path.join(temp_dir, "app_settings.json")
+            with mock.patch.object(
+                app_settings,
+                "SETTINGS_FILE",
+                settings_file,
+            ):
+                app_settings.save_app_preferences(
+                    client_batch_notifications_enabled=True
+                )
+                settings = app_settings.get_app_settings()
+
+            self.assertTrue(settings["client_batch_notifications_enabled"])
+            self.assertTrue(
+                settings["batch_completion_notifications_enabled"]
+            )
 
     def test_notify_config_is_persisted_and_copied(self):
         with tempfile.TemporaryDirectory() as temp_dir:

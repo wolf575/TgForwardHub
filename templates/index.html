@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>TG Forward Hub</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/merged.css') }}?v=20261107-bot-diagnostics-standard4">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/merged.css') }}?v=20261107-notification-channels">
 </head>
 <body>
   <header class="topbar">
@@ -335,13 +335,15 @@
           <div id="botNotificationMessage" class="message" hidden></div>
           <label class="check">
             <input id="batchNotificationsEnabled" type="checkbox">
-            发送“批量转发完成 / 失败”通知
+            在机器人私聊中发送“批量转发完成 / 失败”状态
           </label>
-          <label>通知渠道配置（JSON）
-            <textarea id="notifyConfigJson" rows="9" spellcheck="false"
-              placeholder='{"TG_BOT_TOKEN":"123456:replace-me","TG_USER_ID":"123456789","HITOKOTO":false}'></textarea>
+          <p class="muted">此开关只控制 Telegram 机器人与用户的对话，不使用 notify.py 外部通知渠道。</p>
+          <label class="check">
+            <input id="clientBatchNotificationsEnabled" type="checkbox">
+            客户端批量转发完成 / 失败时发送外部通知
           </label>
-          <p class="muted">支持 notify.py 的 Telegram、Bark、飞书、Webhook、SMTP、PushPlus 等渠道。留空表示使用 Worker 环境变量 NOTIFY_CONFIG。</p>
+          <div class="notify-config-fields" id="notifyConfigFields"></div>
+          <p class="muted">参数名由 notify.py 提供，例如 BARK_PUSH、BARK_ARCHIVE、BARK_GROUP；留空表示不启用该参数。外部通知只用于客户端批量转发。</p>
           <div class="monitor-actions">
             <button id="botNotificationSaveBtn" class="primary" type="button">保存通知设置</button>
             <button id="botNotificationTestBtn" class="secondary" type="button">发送测试通知</button>
@@ -434,6 +436,6 @@
     </section>
   </main>
 
-  <script src="{{ url_for('static', filename='js/merged.js') }}?v=20261107-bot-diagnostics-standard4"></script>
+  <script src="{{ url_for('static', filename='js/merged.js') }}?v=20261107-notification-channels"></script>
 </body>
 </html>

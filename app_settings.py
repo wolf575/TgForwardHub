@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_TIMEZONE = "Asia/Shanghai"
 DEFAULT_BATCH_COMPLETION_NOTIFICATIONS = True
+DEFAULT_CLIENT_BATCH_NOTIFICATIONS = False
 DEFAULT_NOTIFY_CONFIG = {}
 MAX_NOTIFY_CONFIG_BYTES = 64 * 1024
 DEFAULT_DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "data"))
@@ -60,6 +61,14 @@ def get_app_settings():
         batch_completion_notifications = str(
             batch_completion_notifications
         ).strip().lower() in {"1", "true", "yes", "on"}
+    client_batch_notifications = settings.get(
+        "client_batch_notifications_enabled",
+        DEFAULT_CLIENT_BATCH_NOTIFICATIONS,
+    )
+    if not isinstance(client_batch_notifications, bool):
+        client_batch_notifications = str(
+            client_batch_notifications
+        ).strip().lower() in {"1", "true", "yes", "on"}
     notify_config = settings.get("notify_config", DEFAULT_NOTIFY_CONFIG)
     if not isinstance(notify_config, dict):
         notify_config = {}
@@ -70,6 +79,9 @@ def get_app_settings():
         ],
         "batch_completion_notifications_enabled": (
             batch_completion_notifications
+        ),
+        "client_batch_notifications_enabled": (
+            client_batch_notifications
         ),
         "notify_config": dict(notify_config),
     }
@@ -90,6 +102,12 @@ def get_app_timezone():
 def batch_completion_notifications_enabled():
     return bool(
         get_app_settings()["batch_completion_notifications_enabled"]
+    )
+
+
+def client_batch_notifications_enabled():
+    return bool(
+        get_app_settings()["client_batch_notifications_enabled"]
     )
 
 
@@ -116,6 +134,7 @@ def _normalize_notify_config(value):
 def save_app_preferences(
     timezone_name=None,
     batch_completion_notifications_enabled=None,
+    client_batch_notifications_enabled=None,
     notify_config=None,
 ):
     """Save optional app preferences without overwriting unrelated settings."""
@@ -129,6 +148,10 @@ def save_app_preferences(
         if batch_completion_notifications_enabled is not None:
             settings["batch_completion_notifications_enabled"] = bool(
                 batch_completion_notifications_enabled
+            )
+        if client_batch_notifications_enabled is not None:
+            settings["client_batch_notifications_enabled"] = bool(
+                client_batch_notifications_enabled
             )
         if notify_config is not None:
             settings["notify_config"] = _normalize_notify_config(

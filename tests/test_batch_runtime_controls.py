@@ -313,7 +313,7 @@ class BatchRuntimeControlTests(unittest.TestCase):
     def test_batch_notification_uses_configured_notifier(self):
         with mock.patch.object(
             batch_forward,
-            "batch_completion_notifications_enabled",
+            "client_batch_notifications_enabled",
             return_value=True,
         ), mock.patch.object(
             batch_forward,
@@ -338,7 +338,7 @@ class BatchRuntimeControlTests(unittest.TestCase):
     def test_batch_notification_respects_disabled_setting(self):
         with mock.patch.object(
             batch_forward,
-            "batch_completion_notifications_enabled",
+            "client_batch_notifications_enabled",
             return_value=False,
         ), mock.patch("notify.send_with_config") as send:
             batch_forward._send_batch_notification(

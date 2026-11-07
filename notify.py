@@ -1401,6 +1401,11 @@ def send_with_config(title: str, content: str, config=None):
     return send(title, content, **merged)
 
 
+def get_config_keys():
+    """Return supported notify.py parameter names for the settings form."""
+    return sorted(push_config.keys())
+
+
 def main():
     send("title", "content")
 

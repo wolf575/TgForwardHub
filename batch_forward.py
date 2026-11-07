@@ -29,7 +29,7 @@ from pyrogram.errors import (
 )
 from database import DATA_DIR
 from app_settings import (
-    batch_completion_notifications_enabled,
+    client_batch_notifications_enabled,
     get_app_timezone,
     get_notify_config,
 )
@@ -98,7 +98,7 @@ def _batch_notification_payload(task_name, job_id, status, progress, error=None)
 
 def _send_batch_notification(task_name, job_id, status, progress, error=None):
     try:
-        if not batch_completion_notifications_enabled():
+        if not client_batch_notifications_enabled():
             return
         from notify import send_with_config
 

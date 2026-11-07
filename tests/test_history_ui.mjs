@@ -101,11 +101,13 @@ test("active task controls support cross-device attach and new tasks", () => {
   assert.match(template, /id="activeTaskSelect"/);
   assert.match(template, /id="attachTaskBtn"/);
   assert.match(template, /id="newTaskBtn"/);
-  assert.match(template, /id="notifyConfigJson"/);
+  assert.match(template, /id="notifyConfigFields"/);
+  assert.match(template, /id="clientBatchNotificationsEnabled"/);
   assert.match(template, /id="botNotificationTestBtn"/);
   assert.match(source, /\/api\/batch-forward\/active/);
   assert.match(source, /\/api\/app-settings\/notify-test/);
   assert.match(source, /notificationConfigFromForm/);
+  assert.match(source, /renderNotifyConfigFields/);
   assert.match(source, /attachTaskBtn"\)\.addEventListener/);
   assert.match(source, /newTaskBtn"\)\.addEventListener/);
   assert.match(
