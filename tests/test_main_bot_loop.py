@@ -3,6 +3,7 @@ import unittest
 from unittest import mock
 
 import main
+from bot.handlers.instances import get_bot_update_stats, record_bot_update
 
 
 class _FakeLoop:
@@ -18,6 +19,14 @@ class _FakeLoop:
 
 
 class MainBotLoopTests(unittest.TestCase):
+    def test_records_bot_update_activity(self):
+        before = get_bot_update_stats()
+        record_bot_update()
+        after = get_bot_update_stats()
+
+        self.assertEqual(after["count"], before["count"] + 1)
+        self.assertIsNotNone(after["last_update_at"])
+
     def test_prepares_client_loop(self):
         client_loop = _FakeLoop()
         bot = type("Bot", (), {"loop": client_loop})()

@@ -9,7 +9,7 @@ from .messages import save
 from .auto_forward import create_auto_forward_handler
 from .instances import (
     set_bot_instance, set_acc_instance,
-    get_bot_instance, get_acc_instance
+    get_bot_instance, get_acc_instance, record_bot_update
 )
 
 logger = get_logger(__name__)
@@ -40,6 +40,13 @@ def register_all_handlers(bot, acc, message_queue):
         callback_handler(client, callback_query)
 
     logger.info("✅ 回调处理器已注册")
+
+    # 记录原始 update 到达时间，供 /__health 判断 Bot 是否真的在收消息。
+    @bot.on_raw_update()
+    def record_update(client, update, users, chats):
+        record_bot_update()
+
+    logger.info("✅ Bot update 诊断处理器已注册")
 
     # 注册私聊消息处理器
     @bot.on_message(filters.text & filters.private & ~filters.command(["start", "help", "watch"]))

@@ -3,10 +3,13 @@ Global bot and acc instances management
 Separated to avoid circular imports
 """
 import asyncio
+import time
 
 # Store bot and acc instances for use by handlers
 _bot_instance = None
 _acc_instance = None
+_bot_update_count = 0
+_bot_last_update_at = None
 
 
 def set_bot_instance(bot):
@@ -29,6 +32,21 @@ def get_bot_instance():
 def get_acc_instance():
     """Get the acc instance"""
     return _acc_instance
+
+
+def record_bot_update():
+    """Record that the Bot dispatcher received a Telegram update."""
+    global _bot_update_count, _bot_last_update_at
+    _bot_update_count += 1
+    _bot_last_update_at = time.time()
+
+
+def get_bot_update_stats():
+    """Return non-sensitive Bot update activity for diagnostics."""
+    return {
+        "count": _bot_update_count,
+        "last_update_at": _bot_last_update_at,
+    }
 
 
 def stop_and_clear_instances():
