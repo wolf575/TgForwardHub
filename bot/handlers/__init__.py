@@ -42,7 +42,7 @@ def register_all_handlers(bot, acc, message_queue):
     logger.info("✅ 回调处理器已注册")
 
     # 记录原始 update 到达时间，供 /__health 判断 Bot 是否真的在收消息。
-    @bot.on_raw_update()
+    @bot.on_raw_update(group=-1)
     def record_update(client, update, users, chats):
         record_bot_update()
 
@@ -54,6 +54,23 @@ def register_all_handlers(bot, acc, message_queue):
         save(client, message)
 
     logger.info("✅ 私聊消息处理器已注册")
+
+    @bot.on_message(
+        filters.private & filters.text & filters.regex(r"^/"),
+        group=1,
+    )
+    def handle_unknown_command(client, message):
+        command = (message.text or "").strip().split(None, 1)[0]
+        command = command.split("@", 1)[0].lower()
+        if command in {"/start", "/help", "/watch"}:
+            return
+        client.send_message(
+            message.chat.id,
+            "未知命令。请使用 /start、/help 或 /watch。",
+            reply_to_message_id=message.id,
+        )
+
+    logger.info("✅ 未知命令处理器已注册")
 
     # 注册自动转发处理器（如果acc可用）
     if acc is not None and message_queue is not None:
