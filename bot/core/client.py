@@ -109,8 +109,19 @@ def initialize_clients():
                 **update_options,
             )
 
-        # 启动User客户端
-        acc.start()
+        # User Client 与 Bot 是独立客户端；User Client 启动失败不能阻止 Bot。
+        try:
+            acc.start()
+        except Exception as exc:
+            logger.exception(
+                "User客户端启动失败，Bot将继续独立运行: %s",
+                exc,
+            )
+            try:
+                acc.stop()
+            except Exception:
+                pass
+            acc = None
 
         # Pyrogram always uses MemoryStorage when a session_string is supplied,
         # so no .session file is expected here. The client still caches resolved
