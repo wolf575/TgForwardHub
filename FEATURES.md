@@ -26,6 +26,7 @@
 - 目标为 `me` 时发送到个人收藏夹
 
 网页批量转发始终需要用户客户端 Session String。Bot 客户端只在 `cache` 模式配置了中转缓冲会话时参与受限内容中转。
+除该中转场景外，Bot Client 与 User Client 独立启动、独立运行；User Client 启动失败不会阻止 Bot 继续工作。
 
 ### 范围类型
 
