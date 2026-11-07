@@ -4,6 +4,7 @@ from unittest import mock
 
 import main
 from bot.handlers.instances import get_bot_update_stats, record_bot_update
+from bot.core.client import _update_client_options
 
 
 class _FakeLoop:
@@ -19,6 +20,27 @@ class _FakeLoop:
 
 
 class MainBotLoopTests(unittest.TestCase):
+    def test_enables_pyrofork_update_gap_recovery(self):
+        class _PyroforkClient:
+            def __init__(
+                self,
+                name,
+                api_id=None,
+                api_hash=None,
+                bot_token=None,
+                no_updates=None,
+                skip_updates=None,
+            ):
+                pass
+
+        with mock.patch("bot.core.client.Client", _PyroforkClient):
+            options = _update_client_options()
+
+        self.assertEqual(
+            options,
+            {"no_updates": False, "skip_updates": False},
+        )
+
     def test_records_bot_update_activity(self):
         before = get_bot_update_stats()
         record_bot_update()

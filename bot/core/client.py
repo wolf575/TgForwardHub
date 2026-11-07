@@ -3,6 +3,7 @@
 职责：初始化Bot客户端和User客户端
 """
 import os
+import inspect
 import pyrogram
 from pyrogram import Client
 from bot.utils.logger import get_logger
@@ -18,6 +19,18 @@ logger = get_logger(__name__)
 # fallback work, so a small bounded increase avoids serializing every file
 # transfer without changing the Bot's message-forwarding behavior.
 USER_MAX_CONCURRENT_TRANSMISSIONS = 4
+
+
+def _update_client_options():
+    """Keep update polling enabled across Pyrogram and Pyrofork versions."""
+    options = {"no_updates": False}
+    try:
+        parameters = inspect.signature(Client).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if "skip_updates" in parameters:
+        options["skip_updates"] = False
+    return options
 
 
 def initialize_clients():
@@ -48,7 +61,14 @@ def initialize_clients():
     logger.info("🤖 正在初始化Bot客户端...")
     # 使用data目录以便持久化保存
     os.makedirs("data", exist_ok=True)
-    bot = Client("data/mybot", api_id=api_id, api_hash=api_hash, bot_token=bot_token)
+    update_options = _update_client_options()
+    bot = Client(
+        "data/mybot",
+        api_id=api_id,
+        api_hash=api_hash,
+        bot_token=bot_token,
+        **update_options,
+    )
     logger.info("✅ Bot客户端初始化完成")
 
     # 创建User客户端（如果配置了session string）
@@ -74,6 +94,7 @@ def initialize_clients():
                 api_id=api_id,
                 api_hash=api_hash,
                 max_concurrent_transmissions=USER_MAX_CONCURRENT_TRANSMISSIONS,
+                **update_options,
             )
         else:
             logger.info("📝 首次启动，使用 Session String 创建 Session 文件")
@@ -85,6 +106,7 @@ def initialize_clients():
                 session_string=ss,
                 in_memory=False,
                 max_concurrent_transmissions=USER_MAX_CONCURRENT_TRANSMISSIONS,
+                **update_options,
             )
 
         # 启动User客户端
