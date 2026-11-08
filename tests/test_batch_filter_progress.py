@@ -136,6 +136,47 @@ class BatchFilterTests(unittest.TestCase):
         self.assertTrue(filtered["text_changed"])
         self.assertEqual(filtered["cleaned_texts"], ["开头\n"])
 
+    def test_regex_with_emoji_preserves_symbols_before_removal(self):
+        message = _FakeMessage(
+            1,
+            caption=(
+                "#stripchat #peeggy-fun\n"
+                "‼️永久会员限时福利价只需88元‼️👉 @zf886bot"
+            ),
+        )
+        rules = batch_forward._filter_rule_set(
+            {
+                "range_type": "id",
+                "start": 1,
+                "end": 1,
+                "remove_regex": r"(?s)‼️.*\Z",
+            }
+        )
+
+        filtered = batch_forward._apply_filter_rules([message], rules)
+
+        self.assertFalse(filtered["excluded"])
+        self.assertTrue(filtered["text_changed"])
+        self.assertEqual(filtered["cleaned_texts"], ["#stripchat #peeggy-fun\n"])
+
+    def test_exclude_regex_with_emoji_matches_visible_text(self):
+        message = _FakeMessage(
+            1,
+            caption="正常标题\n🔞仅限会员",
+        )
+        rules = batch_forward._filter_rule_set(
+            {
+                "range_type": "id",
+                "start": 1,
+                "end": 1,
+                "exclude_regex": r"(?s)🔞.*\Z",
+            }
+        )
+
+        filtered = batch_forward._apply_filter_rules([message], rules)
+
+        self.assertTrue(filtered["excluded"])
+
     def test_raw_mtproto_text_is_used_when_high_level_fields_are_empty(self):
         message = _FakeMessage(1, text=None, caption=None)
         message.raw = SimpleNamespace(message="后续内容进会员群查看 👉\n广告尾部")

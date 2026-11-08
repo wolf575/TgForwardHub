@@ -387,10 +387,11 @@ def _parse_terms(raw):
 def _matches_exclude(text, terms):
     if not terms:
         return False
+    variants = _filter_text_variants(text)
     if hasattr(terms, "search"):
-        return bool(terms.search(text or ""))
+        return any(terms.search(value) for value in variants)
     pattern = re.compile("|".join(re.escape(term) for term in terms), re.IGNORECASE)
-    return bool(pattern.search(text or ""))
+    return any(pattern.search(value) for value in variants)
 
 
 def _compile_literal_terms(terms):
@@ -428,7 +429,8 @@ def _compile_regex_patterns(raw, field_name="正则表达式"):
 
 
 def _matches_exclude_regex(text, patterns):
-    return any(pattern.search(text or "") for pattern in patterns)
+    variants = _filter_text_variants(text)
+    return any(pattern.search(value) for pattern in patterns for value in variants)
 
 
 def _caption_overrides(cleaned_texts, cleaned_text, count):
@@ -1066,11 +1068,9 @@ def _group_texts(group_messages):
     ]
 
 
-def _plain_filter_text(value):
-    """Build a normalized plain-text view before applying filter rules."""
-    # Pyrogram keeps bold/quote/custom-emoji formatting in Str.entities while
-    # str(value) exposes the underlying visible text; normalize that view.
-    text = unicodedata.normalize("NFKC", str(value or ""))
+def _visible_filter_text(value):
+    """Return visible text without changing user-visible symbols."""
+    text = str(value or "")
     text = (
         text.replace("\r\n", "\n")
         .replace("\r", "\n")
@@ -1083,8 +1083,54 @@ def _plain_filter_text(value):
         char
         for char in text
         if unicodedata.category(char) != "Cf"
-        and char not in ("\ufe0e", "\ufe0f")
     )
+
+
+def _plain_filter_text(value):
+    """Return an NFKC compatibility view for legacy/full-width rules."""
+    return _visible_filter_text(unicodedata.normalize("NFKC", str(value or "")))
+
+
+def _filter_text_variants(value):
+    """Return visible text first, then an NFKC fallback when they differ."""
+    visible = _visible_filter_text(value)
+    without_variation_selectors = visible.replace("\ufe0e", "").replace(
+        "\ufe0f",
+        "",
+    )
+    normalized = _plain_filter_text(value)
+    variants = [visible, without_variation_selectors, normalized]
+    result = []
+    for variant in variants:
+        if variant not in result:
+            result.append(variant)
+    return result
+
+
+def _remove_filter_matches(text, terms, patterns):
+    """Remove matches while preserving the original visible characters."""
+    visible = _visible_filter_text(text)
+    cleaned_visible = _remove_matches(visible, terms, patterns)
+    if cleaned_visible != visible:
+        return True, cleaned_visible
+
+    without_variation_selectors = visible.replace("\ufe0e", "").replace(
+        "\ufe0f",
+        "",
+    )
+    cleaned_without_variation_selectors = _remove_matches(
+        without_variation_selectors,
+        terms,
+        patterns,
+    )
+    if cleaned_without_variation_selectors != without_variation_selectors:
+        return True, cleaned_without_variation_selectors
+
+    normalized = _plain_filter_text(text)
+    cleaned_normalized = _remove_matches(normalized, terms, patterns)
+    if cleaned_normalized != normalized:
+        return True, cleaned_normalized
+    return False, visible
 
 
 def _unique_text_fragments(values):
@@ -1093,7 +1139,7 @@ def _unique_text_fragments(values):
     for value in values:
         if value is None:
             continue
-        text = _plain_filter_text(value)
+        text = _visible_filter_text(value)
         if not text or text in seen:
             continue
         seen.add(text)
@@ -1211,22 +1257,25 @@ def _apply_filter_rules(group_messages, rules):
             "quote_text_present": quote_text_present,
         }
 
-    cleaned_plain_texts = [
-        _remove_matches(text, remove_terms, remove_patterns)
-        for text in plain_primary_texts
-    ]
-    cleaned_filter_texts = [
-        _remove_matches(text, remove_terms, remove_patterns)
-        for text in filter_texts
-    ]
-    text_changed = any(
-        cleaned != original
-        for cleaned, original in zip(cleaned_filter_texts, filter_texts)
-    )
-    primary_changed = any(
-        cleaned != original
-        for cleaned, original in zip(cleaned_plain_texts, plain_primary_texts)
-    )
+    cleaned_plain_texts = []
+    primary_changed = False
+    for text in primary_texts:
+        changed, cleaned = _remove_filter_matches(
+            text,
+            remove_terms,
+            remove_patterns,
+        )
+        primary_changed = primary_changed or changed
+        cleaned_plain_texts.append(cleaned)
+
+    text_changed = primary_changed
+    for text in filter_texts:
+        changed, _ = _remove_filter_matches(
+            text,
+            remove_terms,
+            remove_patterns,
+        )
+        text_changed = text_changed or changed
     if primary_changed:
         cleaned_texts = cleaned_plain_texts
     elif text_changed:
