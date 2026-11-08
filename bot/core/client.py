@@ -3,9 +3,12 @@
 职责：初始化Bot客户端和User客户端
 """
 import asyncio
+import concurrent.futures
 import functools
 import inspect
 import os
+import threading
+from contextlib import contextmanager
 import pyrogram
 from pyrogram import Client
 from bot.utils.logger import get_logger
@@ -50,6 +53,29 @@ _LOOP_BRIDGE_SKIP = {
     "start",
     "stop",
 }
+_SYNC_TIMEOUT_STATE = threading.local()
+
+
+def set_client_sync_timeout(seconds):
+    """Set the synchronous bridge timeout for the current worker thread."""
+    _SYNC_TIMEOUT_STATE.timeout = float(seconds) if seconds else None
+
+
+@contextmanager
+def client_sync_timeout(seconds):
+    """Set a timeout for synchronous Pyrofork calls in the current thread."""
+    previous = getattr(_SYNC_TIMEOUT_STATE, "timeout", None)
+    _SYNC_TIMEOUT_STATE.timeout = float(seconds) if seconds else None
+    try:
+        yield
+    finally:
+        if previous is None:
+            try:
+                del _SYNC_TIMEOUT_STATE.timeout
+            except AttributeError:
+                pass
+        else:
+            _SYNC_TIMEOUT_STATE.timeout = previous
 
 
 def _invoke_on_client_loop(client, function, *args, **kwargs):
@@ -73,7 +99,17 @@ def _await_on_client_loop(client, awaitable):
         return awaitable
 
     if loop.is_running():
-        return asyncio.run_coroutine_threadsafe(awaitable, loop).result()
+        future = asyncio.run_coroutine_threadsafe(awaitable, loop)
+        timeout = getattr(_SYNC_TIMEOUT_STATE, "timeout", None)
+        if timeout is None:
+            return future.result()
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError as exc:
+            future.cancel()
+            raise TimeoutError(
+                f"Telegram operation timed out after {timeout:.0f} seconds"
+            ) from exc
     return loop.run_until_complete(awaitable)
 
 

@@ -68,6 +68,19 @@ class MessageWorker:
         self.running = True
         self.last_stats_time = time.time()
         self.loop = None
+        self.event_callback = None
+
+    def set_event_callback(self, callback):
+        """Receive structured FloodWait/lifecycle events from the worker."""
+        self.event_callback = callback
+
+    def _emit_event(self, event):
+        if self.event_callback is None:
+            return
+        try:
+            self.event_callback(event)
+        except Exception:
+            logger.exception("处理工作线程事件失败")
 
         # 初始化存储管理器
         self.storage_manager = self._init_storage_manager()
@@ -227,7 +240,12 @@ class MessageWorker:
         """
         for flood_attempt in range(max_flood_retries):
             try:
-                result = operation_func()
+                # The public Pyrofork methods are synchronous wrappers around
+                # the client-owned event loop. Give those wrappers a bounded
+                # wait so a broken connection cannot hang the whole task.
+                from bot.core.client import client_sync_timeout
+                with client_sync_timeout(max(timeout, 120)):
+                    result = operation_func()
                 # Check if result is a coroutine (async operation)
                 if asyncio.iscoroutine(result):
                     result = self._run_async_with_timeout(result, timeout=timeout)
@@ -235,13 +253,38 @@ class MessageWorker:
             except FloodWait as e:
                 wait_time = e.value
                 if flood_attempt < max_flood_retries - 1:
+                    self._emit_event(
+                        {
+                            "type": "flood_wait",
+                            "operation": operation_name,
+                            "wait_seconds": wait_time,
+                            "attempt": flood_attempt + 1,
+                            "max_attempts": max_flood_retries,
+                        }
+                    )
                     logger.warning(f"⏳ {operation_name}: 遇到限流 FLOOD_WAIT, 需等待 {wait_time} 秒")
                     logger.info(f"   将在 {wait_time + 1} 秒后重试 (FloodWait 重试 {flood_attempt + 1}/{max_flood_retries})")
                     time.sleep(wait_time + 1)
+                    self._emit_event(
+                        {
+                            "type": "flood_wait_resumed",
+                            "operation": operation_name,
+                            "attempt": flood_attempt + 1,
+                        }
+                    )
                 else:
+                    self._emit_event(
+                        {
+                            "type": "flood_wait_exhausted",
+                            "operation": operation_name,
+                            "wait_seconds": wait_time,
+                            "attempt": flood_attempt + 1,
+                            "max_attempts": max_flood_retries,
+                        }
+                    )
                     logger.error(f"❌ {operation_name}: FloodWait 重试次数已达上限，放弃操作")
                     raise UnrecoverableError(f"FloodWait retry limit exceeded for {operation_name}")
-            except asyncio.TimeoutError:
+            except (asyncio.TimeoutError, TimeoutError):
                 logger.error(f"❌ {operation_name}: 操作超时（{timeout}秒），跳过此消息")
                 raise UnrecoverableError(f"Timeout ({timeout}s) for {operation_name}")
             except TypeError as e:

@@ -42,6 +42,7 @@ from bot.handlers.messages import (
     _send_downloaded_private_media_sequentially,
 )
 from bot.handlers.instances import get_acc_instance, get_bot_instance
+from bot.core.client import client_sync_timeout, set_client_sync_timeout
 from bot.utils.helpers import get_message_type
 from bot.utils.logger import get_logger
 from bot.workers.message_worker import MessageWorker
@@ -74,6 +75,15 @@ TASKS = {}
 TASKS_LOCK = threading.Lock()
 BATCH_FETCH_CHUNK_SIZE = 100
 _EMPTY_CAPTION_SENTINEL = "\u2063"
+BATCH_SYNC_TIMEOUT_SECONDS = float(
+    os.environ.get("BATCH_SYNC_TIMEOUT_SECONDS", "120")
+)
+BATCH_DOWNLOAD_TIMEOUT_SECONDS = float(
+    os.environ.get("BATCH_DOWNLOAD_TIMEOUT_SECONDS", "900")
+)
+BATCH_STALL_TIMEOUT_SECONDS = float(
+    os.environ.get("BATCH_STALL_TIMEOUT_SECONDS", "900")
+)
 
 
 class BatchTaskStopped(Exception):
@@ -133,6 +143,8 @@ PROGRESS_PHASES = {
     "collecting": "收集消息",
     "preparing": "准备消息批次",
     "forwarding": "转发消息",
+    "flood_wait": "等待 Telegram 限流",
+    "stalled": "任务疑似卡住",
     "paused": "已暂停",
     "done": "已完成",
     "cancelled": "已取消",
@@ -614,62 +626,6 @@ def _reconcile_media_group_captions(
         log,
         indexes=mismatches,
     )
-
-
-def _reconcile_single_caption(
-    worker,
-    client,
-    destination,
-    result,
-    desired_caption,
-    log=None,
-):
-    """Verify one copied media caption and edit it only when needed."""
-    message_ids = _result_message_ids(result)
-    if not message_ids:
-        return
-    message_id = message_ids[0]
-    desired = desired_caption or ""
-    try:
-        actual = client.get_messages(destination, message_id)
-    except Exception as exc:
-        _emit_log(
-            "单条媒体 caption 校验失败，保留初次发送结果: "
-            f"{type(exc).__name__}: {exc}",
-            log,
-            "warning",
-        )
-        return
-    if isinstance(actual, list):
-        actual = actual[0] if actual else None
-    if _caption_text_equal(
-        getattr(actual, "caption", None) if actual else None,
-        desired,
-    ):
-        return
-    _emit_log(
-        "单条媒体 caption 未按初次请求生效，使用发送后编辑回退",
-        log,
-        "warning",
-    )
-    try:
-        _worker_execute(
-            worker,
-            "修正单条媒体 caption",
-            lambda: client.edit_message_caption(
-                destination,
-                message_id,
-                caption=desired,
-            ),
-        )
-    except MessageNotModified:
-        pass
-    except Exception as exc:
-        _emit_log(
-            f"单条媒体 caption 修正失败: {type(exc).__name__}: {exc}",
-            log,
-            "warning",
-        )
 
 
 def _copy_media_group_and_set_captions(
@@ -1534,7 +1490,8 @@ def _download_batch_media_with_retry(
             log,
         )
         try:
-            file_path = acc.download_media(item, file_name=file_name)
+            with client_sync_timeout(BATCH_DOWNLOAD_TIMEOUT_SECONDS):
+                file_path = acc.download_media(item, file_name=file_name)
             if file_path is None:
                 last_error = RuntimeError(
                     f"媒体 {item_id} 下载失败：Telegram 未返回文件数据"
@@ -1648,12 +1605,13 @@ def _download_batch_media_group_items(
             "Animation",
             "VideoNote",
         ):
-            thumb = _download_private_media_thumbnail(
-                acc,
-                payload,
-                work_dir,
-                index,
-            )
+            with client_sync_timeout(BATCH_DOWNLOAD_TIMEOUT_SECONDS):
+                thumb = _download_private_media_thumbnail(
+                    acc,
+                    payload,
+                    work_dir,
+                    index,
+                )
         return (item, file_path, thumb)
 
     try:
@@ -1948,12 +1906,13 @@ def _reupload_batch_single_media(
             log,
         )
         _emit_log(f"开始下载媒体 {message.id} 的重传缩略图", log)
-        thumb = _download_private_media_thumbnail(
-            acc,
-            _get_private_media_payload(message),
-            work_dir,
-            0,
-        )
+        with client_sync_timeout(BATCH_DOWNLOAD_TIMEOUT_SECONDS):
+            thumb = _download_private_media_thumbnail(
+                acc,
+                _get_private_media_payload(message),
+                work_dir,
+                0,
+            )
         if thumb:
             _emit_log(f"媒体 {message.id} 重传缩略图下载完成: {thumb}", log)
         else:
@@ -2006,7 +1965,7 @@ def _forward_batch_single_media(
                 f"{source_id} -> {dest_id}，RPC=copy_message",
                 log,
             )
-            result = _worker_execute(
+            _worker_execute(
                 worker,
                 "复制单条媒体",
                 lambda: _copy_single_private_media(
@@ -2017,15 +1976,6 @@ def _forward_batch_single_media(
                     caption=cleaned_text if text_changed else None,
                 ),
             )
-            if text_changed:
-                _reconcile_single_caption(
-                    worker,
-                    acc,
-                    dest_id,
-                    result,
-                    cleaned_text,
-                    log,
-                )
             _emit_log(
                 f"单条媒体 {message.id} 已通过缓存复制发送: "
                 f"{source_id} -> {dest_id}",
@@ -2386,15 +2336,19 @@ def _run_batch_task(job_id, spec):
     last_persist = time.monotonic()
     started_monotonic = time.monotonic()
     started_at = _now_iso()
+    last_activity = [time.monotonic()]
+    flood_wait_until = [0.0]
 
     def persist(force=False):
         nonlocal last_persist
         now = time.monotonic()
+        last_activity[0] = now
         if force or now - last_persist >= 1.0:
             _persist_task_history(job_id)
             last_persist = now
 
     def log(message, level="info"):
+        last_activity[0] = time.monotonic()
         line = f"[{_now_iso()}] {message}"
         log_lines.append(line)
         getattr(logger, level, logger.info)(
@@ -2429,6 +2383,7 @@ def _run_batch_task(job_id, spec):
         persist(force=True)
 
     def publish_progress(phase, **values):
+        last_activity[0] = time.monotonic()
         elapsed = max(0.0, time.monotonic() - started_monotonic)
         total = int(values.get("total") or 0)
         processed = int(values.get("processed") or 0)
@@ -2460,12 +2415,99 @@ def _run_batch_task(job_id, spec):
             "scanned": int(values.get("scanned") or 0),
             "collected": int(values.get("collected") or 0),
             "current_id": values.get("current_id"),
+            "wait_seconds": int(values.get("wait_seconds") or 0),
+            "stalled_seconds": int(values.get("stalled_seconds") or 0),
         }
         _update_task(job_id, progress=progress)
         persist()
         return progress
 
+    def handle_worker_event(event):
+        event_type = str(event.get("type") or "")
+        operation = str(event.get("operation") or "Telegram 操作")
+        current = get_task(job_id).get("progress") or {}
+        if event_type == "flood_wait":
+            wait_seconds = max(1, int(event.get("wait_seconds") or 0))
+            flood_wait_until[0] = time.monotonic() + wait_seconds + 2
+            publish_progress(
+                "flood_wait",
+                total=current.get("total", 0),
+                fetched=current.get("fetched", 0),
+                processed=current.get("processed", 0),
+                success=current.get("success", 0),
+                failed=current.get("failed", 0),
+                skipped=current.get("skipped", 0),
+                scanned=current.get("scanned", 0),
+                collected=current.get("collected", 0),
+                current_id=current.get("current_id"),
+                wait_seconds=wait_seconds,
+            )
+            log(
+                f"{operation} 遇到 Telegram FloodWait，需要等待 "
+                f"{wait_seconds} 秒后自动重试 "
+                f"({event.get('attempt', 1)}/{event.get('max_attempts', 1)})",
+                level="warning",
+            )
+        elif event_type == "flood_wait_resumed":
+            flood_wait_until[0] = 0.0
+            log(f"{operation} 的 FloodWait 已结束，继续执行")
+        elif event_type == "flood_wait_exhausted":
+            flood_wait_until[0] = 0.0
+            log(
+                f"{operation} 的 FloodWait 重试次数已耗尽，本条消息将记为失败",
+                level="error",
+            )
+
+    def watchdog():
+        interval = 15.0
+        while True:
+            task = get_task(job_id)
+            if (
+                not task
+                or not task.get("active")
+                or task.get("status") in ("done", "error", "cancelled")
+            ):
+                return
+            time.sleep(interval)
+            now = time.monotonic()
+            if now < flood_wait_until[0]:
+                continue
+            idle_seconds = now - last_activity[0]
+            if idle_seconds < BATCH_STALL_TIMEOUT_SECONDS:
+                continue
+            with TASKS_LOCK:
+                task = TASKS.get(job_id)
+                if not task or not task.get("active"):
+                    return
+                progress = dict(task.get("progress") or {})
+                progress.update(
+                    {
+                        "phase": "stalled",
+                        "phase_label": PROGRESS_PHASES["stalled"],
+                        "stalled_seconds": round(idle_seconds),
+                    }
+                )
+                task["progress"] = progress
+                warning = (
+                    f"[{_now_iso()}] 警告: 任务已超过 "
+                    f"{int(idle_seconds)} 秒没有进度更新，当前操作可能卡住；"
+                    "可在日志面板查看最后一条消息，必要时取消后重试"
+                )
+                task["stdoutTail"] = _tail(
+                    "\n".join([task.get("stdoutTail") or "", warning]).strip()
+                )
+                _persist_task_history(job_id)
+            logger.error("[batch:%s] %s", job_id, warning)
+            return
+
+    threading.Thread(
+        target=watchdog,
+        daemon=True,
+        name=f"BatchWatchdog-{job_id[:8]}",
+    ).start()
+
     try:
+        set_client_sync_timeout(BATCH_SYNC_TIMEOUT_SECONDS)
         acc = get_acc_instance()
         if acc is None:
             raise RuntimeError("用户客户端尚未初始化，请先完成 /setup 配置")
@@ -2473,6 +2515,8 @@ def _run_batch_task(job_id, spec):
         publish_progress("resolving")
         log("正在解析来源与目标")
         worker = MessageWorker(None, acc, max_retries=3)
+        if hasattr(worker, "set_event_callback"):
+            worker.set_event_callback(handle_worker_event)
         source_ref = spec.get("source")
         source_id = _resolve_chat(acc, source_ref)
         source_username = _resolve_source_username(acc, source_ref, source_id)
