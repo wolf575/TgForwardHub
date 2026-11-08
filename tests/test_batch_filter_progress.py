@@ -136,6 +136,19 @@ class BatchFilterTests(unittest.TestCase):
         self.assertTrue(filtered["text_changed"])
         self.assertEqual(filtered["cleaned_texts"], ["开头\n"])
 
+    def test_raw_mtproto_text_is_used_when_high_level_fields_are_empty(self):
+        message = _FakeMessage(1, text=None, caption=None)
+        message.raw = SimpleNamespace(message="后续内容进会员群查看 👉\n广告尾部")
+        rules = batch_forward._filter_rule_set(
+            {
+                "exclude_regex": r"(?s)后续内容进会员群查看",
+            }
+        )
+
+        filtered = batch_forward._apply_filter_rules([message], rules)
+
+        self.assertTrue(filtered["excluded"])
+
     def test_media_group_result_ids_preserve_returned_order(self):
         result = [
             SimpleNamespace(id=203),

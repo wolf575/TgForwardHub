@@ -1021,10 +1021,36 @@ def _filter_rule_set(spec):
     }
 
 
+def _raw_message_value(message, *names):
+    """Read a field from Pyrofork's optional raw MTProto message."""
+    try:
+        raw = getattr(message, "raw", None)
+    except Exception:
+        raw = None
+    if raw is None:
+        return None
+    for name in names:
+        try:
+            value = getattr(raw, name, None)
+        except Exception:
+            value = None
+        if value:
+            return value
+    return None
+
+
+def _message_primary_text(message):
+    """Return high-level text, falling back to raw MTProto text."""
+    value = getattr(message, "caption", None) or getattr(message, "text", None)
+    if value:
+        return value
+    return _raw_message_value(message, "message") or ""
+
+
 def _group_texts(group_messages):
     """Return every caption/text in a media group, preserving item order."""
     return [
-        str(getattr(message, "caption", None) or getattr(message, "text", None) or "")
+        str(_message_primary_text(message))
         for message in group_messages
     ]
 
@@ -1072,6 +1098,9 @@ def _message_filter_texts(message, include_reply=True):
         getattr(message, attr, None)
         for attr in ("text", "caption", "quote_text", "quote_caption")
     ]
+    raw_text = _raw_message_value(message, "message")
+    if raw_text:
+        values.append(raw_text)
 
     quote = getattr(message, "quote", None)
     if isinstance(quote, dict):
@@ -1093,6 +1122,13 @@ def _message_filter_texts(message, include_reply=True):
         values.extend(
             getattr(web_page, attr, None)
             for attr in ("title", "description")
+        )
+
+    raw_reply = _raw_message_value(message, "reply_to")
+    if raw_reply is not None:
+        values.extend(
+            getattr(raw_reply, attr, None)
+            for attr in ("text", "caption", "quote_text", "quote_caption")
         )
 
     if include_reply:
@@ -1135,6 +1171,13 @@ def _apply_filter_rules(group_messages, rules):
     filter_texts = _group_filter_texts(group_messages)
     quote_text_present = any(
         bool(getattr(getattr(message, "quote", None), "text", None))
+        or bool(
+            getattr(
+                _raw_message_value(message, "reply_to"),
+                "quote_text",
+                None,
+            )
+        )
         for message in group_messages
     )
     exclude_terms = rules["exclude_terms"]
