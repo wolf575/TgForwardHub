@@ -94,6 +94,105 @@ class PublicRangeAlbumTests(unittest.TestCase):
         self.assertIn("成功: 18/19", summary)
         self.assertIn("跳过: 1", summary)
 
+    def test_private_album_range_calls_handler_once_per_album(self):
+        class _Acc:
+            def __init__(self):
+                self.messages = {
+                    1: _PublicMessage(1, "private-album-1"),
+                    2: _PublicMessage(2, "private-album-1"),
+                    3: _PublicMessage(3, "private-album-2"),
+                    4: _PublicMessage(4, "private-album-2"),
+                }
+
+            def get_messages(self, _chatid, message_id):
+                return self.messages.get(message_id)
+
+        acc = _Acc()
+        bot = _PublicBot({})
+        command = type(
+            "_Command",
+            (),
+            {
+                "id": 999,
+                "text": "https://t.me/c/123456789/1-4",
+                "chat": type("_Destination", (), {"id": -1004348673782})(),
+                "from_user": type("_User", (), {"id": 1})(),
+            },
+        )()
+
+        with mock.patch.object(
+            messages,
+            "get_bot_instance",
+            return_value=bot,
+        ), mock.patch.object(
+            messages,
+            "get_acc_instance",
+            return_value=acc,
+        ), mock.patch.object(
+            messages,
+            "handle_private",
+        ) as handle_private, mock.patch.object(messages.time, "sleep"):
+            messages.save(None, command)
+
+        self.assertEqual(
+            [call.args[2] for call in handle_private.call_args_list],
+            [1, 3],
+        )
+
+    def test_album_copy_error_does_not_fallback_to_first_item(self):
+        first_album = [
+            _PublicMessage(message_id, "album-1")
+            for message_id in range(48829, 48838)
+        ]
+        second_album = [
+            _PublicMessage(message_id, "album-2")
+            for message_id in range(48838, 48844)
+        ]
+        plain = [
+            _PublicMessage(48844),
+            _PublicMessage(48845),
+            _PublicMessage(48847),
+        ]
+        empty = [_PublicMessage(48846, empty=True)]
+        messages_by_id = {
+            message.id: message
+            for message in first_album + second_album + plain + empty
+        }
+
+        class _FailingBot(_PublicBot):
+            def copy_media_group(self, *args, **kwargs):
+                super().copy_media_group(*args, **kwargs)
+                raise RuntimeError("post-send parse failure")
+
+        bot = _FailingBot(messages_by_id)
+        command = type(
+            "_Command",
+            (),
+            {
+                "id": 999,
+                "text": "https://t.me/kukutui2/48829-48847",
+                "chat": type("_Destination", (), {"id": -1004348673782})(),
+                "from_user": type("_User", (), {"id": 1})(),
+            },
+        )()
+
+        with mock.patch.object(
+            messages,
+            "get_bot_instance",
+            return_value=bot,
+        ), mock.patch.object(
+            messages,
+            "get_acc_instance",
+            return_value=None,
+        ), mock.patch.object(messages.time, "sleep"):
+            messages.save(None, command)
+
+        self.assertEqual(len(bot.group_copies), 2)
+        self.assertEqual(
+            [call[0][2] for call in bot.message_copies],
+            [48844, 48845, 48847],
+        )
+
 
 class MessageRangeParserTests(unittest.TestCase):
     def test_hyphenated_short_range(self):

@@ -8,6 +8,7 @@ import shutil
 import tempfile
 import time
 import threading
+from dataclasses import dataclass
 from pyrogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
@@ -37,6 +38,19 @@ from config import load_watch_config, save_watch_config
 from app_settings import batch_completion_notifications_enabled
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class _PublicCopyResult:
+    delivered_ids: tuple
+    skipped: bool = False
+    group_key: str = None
+    error: Exception = None
+    already_handled: bool = False
+
+
+class _PrivateMediaGroupCopyError(RuntimeError):
+    """A private album copy may already have reached Telegram."""
 
 
 _MESSAGE_LINK_RE = re.compile(r'https://t\.me/((?:c/|b/)?)([^/?#\s]+)/(\d+)')
@@ -286,6 +300,8 @@ def save(client: pyrogram.client.Client, message: pyrogram.types.messages_and_me
         skipped_count = 0
         public_handled_ids = set()
         public_skipped_ids = set()
+        public_handled_groups = set()
+        private_handled_groups = set()
 
         logger.info(f"📤 开始批量转发: 共 {total_messages} 条消息 (ID: {fromID}-{toID})")
 
@@ -298,6 +314,12 @@ def save(client: pyrogram.client.Client, message: pyrogram.types.messages_and_me
                 if acc is None:
                     bot.send_message(message.chat.id, f"**❌ 未设置 String Session**", reply_to_message_id=message.id)
                     return
+
+                group_key = _private_media_group_key(acc, chatid, msgid)
+                if group_key and group_key in private_handled_groups:
+                    continue
+                if group_key:
+                    private_handled_groups.add(group_key)
 
                 try:
                     handle_private(message, chatid, msgid)
@@ -314,6 +336,11 @@ def save(client: pyrogram.client.Client, message: pyrogram.types.messages_and_me
                 if acc is None:
                     bot.send_message(message.chat.id, f"**❌ 未设置 String Session**", reply_to_message_id=message.id)
                     return
+                group_key = _private_media_group_key(acc, username, msgid)
+                if group_key and group_key in private_handled_groups:
+                    continue
+                if group_key:
+                    private_handled_groups.add(group_key)
                 try:
                     handle_private(message, username, msgid)
                     success_count += 1
@@ -330,11 +357,12 @@ def save(client: pyrogram.client.Client, message: pyrogram.types.messages_and_me
                     continue
 
                 try:
-                    delivered_ids, skipped = _copy_public_message(
+                    copy_result = _copy_public_message(
                         bot,
                         message.chat.id,
                         username,
                         msgid,
+                        handled_group_ids=public_handled_groups,
                     )
                 except UsernameNotOccupied:
                     bot.send_message(message.chat.id, f"**❌ 该用户名未被占用**", reply_to_message_id=message.id)
@@ -357,21 +385,37 @@ def save(client: pyrogram.client.Client, message: pyrogram.types.messages_and_me
                         )
                     continue
 
-                if skipped:
+                if copy_result.group_key:
+                    public_handled_groups.add(copy_result.group_key)
+                public_handled_ids.update(copy_result.delivered_ids)
+
+                if copy_result.already_handled:
+                    continue
+
+                if copy_result.skipped:
                     public_skipped_ids.add(msgid)
                     skipped_count += 1
                     logger.debug(f"⏭️ 消息 {msgid} 为空或已删除，已跳过")
                     continue
 
-                public_handled_ids.update(delivered_ids)
+                if copy_result.error is not None:
+                    failed_ids.extend(copy_result.delivered_ids)
+                    logger.warning(
+                        "媒体组 %s 复制失败，已保留整组处理标记，"
+                        "不再逐条回退以免重复发送: %s",
+                        copy_result.group_key or msgid,
+                        copy_result.error,
+                    )
+                    continue
+
                 delivered_in_range = [
-                    item_id for item_id in delivered_ids
+                    item_id for item_id in copy_result.delivered_ids
                     if fromID <= item_id <= toID
                 ]
                 success_count += len(delivered_in_range)
-                if len(delivered_ids) > 1:
+                if len(copy_result.delivered_ids) > 1:
                     logger.debug(
-                        f"✅ 消息 {msgid} 所在媒体组转发成功，共 {len(delivered_ids)} 项 "
+                        f"✅ 消息 {msgid} 所在媒体组转发成功，共 {len(copy_result.delivered_ids)} 项 "
                         f"({success_count}/{total_messages})"
                     )
                 else:
@@ -416,21 +460,37 @@ def save(client: pyrogram.client.Client, message: pyrogram.types.messages_and_me
             logger.info("批量转发完成通知已关闭，跳过结果摘要")
 
 
-def _copy_public_message(bot, destination_chat_id, username, msgid):
+def _copy_public_message(
+    bot,
+    destination_chat_id,
+    username,
+    msgid,
+    handled_group_ids=None,
+):
     """Copy one public message while preserving its complete media group.
 
-    Returns ``(delivered_ids, skipped)``. Album members are copied once as a
-    group; the caller can use the returned IDs to avoid copying them again
-    when the link contains an ID range.
+    Album members are copied once as a group. The result carries source IDs
+    and the media-group key so the caller can skip the rest of the album even
+    when Telegram sent the album but returned an error while parsing the
+    response.
     """
+    handled_group_ids = handled_group_ids or set()
     msg = bot.get_messages(username, msgid)
     if msg is None or getattr(msg, "empty", False):
-        return [], True
+        return _PublicCopyResult((), skipped=True)
 
     source_chat_id = getattr(getattr(msg, "chat", None), "id", username)
+    group_key = getattr(msg, "media_group_id", None)
+    if group_key and group_key in handled_group_ids:
+        return _PublicCopyResult(
+            (msg.id,),
+            group_key=group_key,
+            already_handled=True,
+        )
+
     if not getattr(msg, "media_group_id", None):
         bot.copy_message(destination_chat_id, source_chat_id, msg.id)
-        return [msg.id], False
+        return _PublicCopyResult((msg.id,))
 
     try:
         media_group = bot.get_media_group(username, msg.id) or [msg]
@@ -449,16 +509,33 @@ def _copy_public_message(bot, destination_chat_id, username, msgid):
 
     try:
         bot.copy_media_group(destination_chat_id, source_chat_id, msg.id)
-        return group_ids, False
+        return _PublicCopyResult(
+            tuple(group_ids),
+            group_key=group_key,
+        )
     except Exception as exc:
-        logger.debug(
-            "公共媒体组整体复制失败，回退到锚点消息 %s/%s: %s",
+        logger.warning(
+            "公共媒体组整体复制失败，不回退到单条消息以避免重复 %s/%s: %s",
             username,
             msg.id,
             type(exc).__name__,
         )
-        bot.copy_message(destination_chat_id, source_chat_id, msg.id)
-        return [msg.id], False
+        return _PublicCopyResult(
+            tuple(group_ids),
+            group_key=group_key,
+            error=exc,
+        )
+
+
+def _private_media_group_key(acc, chatid, msgid):
+    """Return a private source's media-group key when it can be read."""
+    if acc is None:
+        return None
+    try:
+        source_message = acc.get_messages(chatid, msgid)
+    except Exception:
+        return None
+    return getattr(source_message, "media_group_id", None)
 
 
 def _get_bot_peer_id(bot):
@@ -520,6 +597,13 @@ def _forward_private_media_direct(bot, acc, chatid, msg):
         try:
             return acc.copy_media_group(destination, chatid, msg.id)
         except Exception as exc:
+            if not isinstance(
+                exc,
+                (ChatForwardsRestricted, FileReferenceExpired, ValueError),
+            ):
+                raise _PrivateMediaGroupCopyError(
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
             logger.debug(
                 "媒体组整体复制失败，改逐条复制 %s/%s: %s",
                 chatid,
@@ -1132,6 +1216,12 @@ def handle_private(message: pyrogram.types.messages_and_media.message.Message, c
         logger.info(
             "✅ 消息 %s 已通过缓存媒体直接从私有会话复制到 Bot 会话（未下载）",
             msgid,
+        )
+        return
+    except _PrivateMediaGroupCopyError as exc:
+        logger.warning(
+            "私有媒体组复制失败，已停止逐条回退以避免重复: %s",
+            exc,
         )
         return
     except Exception as exc:
