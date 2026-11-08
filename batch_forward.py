@@ -418,7 +418,10 @@ def _compile_regex_patterns(raw, field_name="正则表达式"):
     compiled = []
     try:
         for pattern in patterns:
-            compiled.append(re.compile(pattern))
+            # Rich-text captions commonly contain line breaks. DOTALL keeps
+            # user patterns useful even when the UI does not preserve an
+            # explicit (?s) prefix.
+            compiled.append(re.compile(pattern, re.DOTALL))
     except re.error as exc:
         raise ValueError(f"{field_name} 格式错误: {exc}") from exc
     return compiled
@@ -549,6 +552,120 @@ def _edit_media_group_captions(
             )
 
 
+def _caption_text_equal(left, right):
+    return _plain_filter_text(left or "") == _plain_filter_text(right or "")
+
+
+def _reconcile_media_group_captions(
+    worker,
+    client,
+    destination,
+    result,
+    captions,
+    log=None,
+):
+    """Verify the initial captions and edit only when the server kept originals."""
+    message_ids = _result_message_ids(result)
+    if not message_ids or not captions:
+        return
+    try:
+        actual_messages = client.get_messages(destination, message_ids)
+    except Exception as exc:
+        _emit_log(
+            "媒体组 caption 校验失败，保留初次发送结果: "
+            f"{type(exc).__name__}: {exc}",
+            log,
+            "warning",
+        )
+        return
+    if not isinstance(actual_messages, list):
+        actual_messages = [actual_messages]
+
+    mismatches = []
+    for index, message_id in enumerate(message_ids):
+        if index >= len(captions):
+            break
+        actual = actual_messages[index] if index < len(actual_messages) else None
+        desired = captions[index] or ""
+        actual_caption = getattr(actual, "caption", None) if actual else None
+        if not _caption_text_equal(actual_caption, desired):
+            mismatches.append(index)
+    if not mismatches:
+        return
+
+    _emit_log(
+        f"媒体组 caption 未按初次请求生效，使用发送后编辑回退: "
+        f"{len(mismatches)} 项",
+        log,
+        "warning",
+    )
+    _edit_media_group_captions(
+        worker,
+        client,
+        destination,
+        result,
+        [caption or "" for caption in captions],
+        log,
+        indexes=mismatches,
+    )
+
+
+def _reconcile_single_caption(
+    worker,
+    client,
+    destination,
+    result,
+    desired_caption,
+    log=None,
+):
+    """Verify one copied media caption and edit it only when needed."""
+    message_ids = _result_message_ids(result)
+    if not message_ids:
+        return
+    message_id = message_ids[0]
+    desired = desired_caption or ""
+    try:
+        actual = client.get_messages(destination, message_id)
+    except Exception as exc:
+        _emit_log(
+            "单条媒体 caption 校验失败，保留初次发送结果: "
+            f"{type(exc).__name__}: {exc}",
+            log,
+            "warning",
+        )
+        return
+    if isinstance(actual, list):
+        actual = actual[0] if actual else None
+    if _caption_text_equal(
+        getattr(actual, "caption", None) if actual else None,
+        desired,
+    ):
+        return
+    _emit_log(
+        "单条媒体 caption 未按初次请求生效，使用发送后编辑回退",
+        log,
+        "warning",
+    )
+    try:
+        _worker_execute(
+            worker,
+            "修正单条媒体 caption",
+            lambda: client.edit_message_caption(
+                destination,
+                message_id,
+                caption=desired,
+            ),
+        )
+    except MessageNotModified:
+        pass
+    except Exception as exc:
+        _emit_log(
+            f"单条媒体 caption 修正失败: {type(exc).__name__}: {exc}",
+            log,
+            "warning",
+        )
+
+
 def _copy_media_group_and_set_captions(
     worker,
     client,
@@ -594,6 +711,14 @@ def _copy_media_group_and_set_captions(
             log,
             indexes=clear_indexes,
         )
+    _reconcile_media_group_captions(
+        worker,
+        client,
+        destination,
+        result,
+        captions,
+        log,
+    )
     return result
 
 
@@ -1923,7 +2048,7 @@ def _forward_batch_single_media(
                 f"{source_id} -> {dest_id}，RPC=copy_message",
                 log,
             )
-            _worker_execute(
+            result = _worker_execute(
                 worker,
                 "复制单条媒体（缓存发送）",
                 lambda: _copy_single_private_media(
@@ -1934,6 +2059,15 @@ def _forward_batch_single_media(
                     caption=cleaned_text if text_changed else None,
                 ),
             )
+            if text_changed:
+                _reconcile_single_caption(
+                    worker,
+                    acc,
+                    dest_id,
+                    result,
+                    cleaned_text,
+                    log,
+                )
             _emit_log(
                 f"单条媒体 {message.id} 已通过缓存复制原样发送: "
                 f"{source_id} -> {dest_id}",
@@ -2039,7 +2173,7 @@ def _forward_batch_single_media(
 
     try:
         if text_changed:
-            _worker_execute(
+            result = _worker_execute(
                 worker,
                 "复制单条媒体并修改 caption",
                 lambda: acc.copy_message(
@@ -2048,6 +2182,14 @@ def _forward_batch_single_media(
                     message.id,
                     caption=cleaned_text,
                 ),
+            )
+            _reconcile_single_caption(
+                worker,
+                acc,
+                dest_id,
+                result,
+                cleaned_text,
+                log,
             )
         else:
             _worker_execute(

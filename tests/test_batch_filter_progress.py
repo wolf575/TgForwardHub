@@ -123,6 +123,19 @@ def _task(job_id):
 
 
 class BatchFilterTests(unittest.TestCase):
+    def test_multiline_regex_matches_without_explicit_dotall(self):
+        message = _FakeMessage(1, caption="开头\n后续内容进会员群查看\n广告尾部")
+        rules = batch_forward._filter_rule_set(
+            {
+                "remove_regex": "后续内容进会员群查看.*",
+            }
+        )
+
+        filtered = batch_forward._apply_filter_rules([message], rules)
+
+        self.assertTrue(filtered["text_changed"])
+        self.assertEqual(filtered["cleaned_texts"], ["开头\n"])
+
     def test_media_group_result_ids_preserve_returned_order(self):
         result = [
             SimpleNamespace(id=203),
@@ -205,6 +218,43 @@ class BatchFilterTests(unittest.TestCase):
         self.assertEqual(
             client.edited_captions,
             [(-1002, 102, "")],
+        )
+
+    def test_caption_verification_falls_back_to_post_send_edit(self):
+        messages = [
+            _FakeMessage(1, caption="原始第一条", media_group_id="group"),
+            _FakeMessage(2, caption="原始第二条", media_group_id="group"),
+        ]
+
+        class _WrongCaptionClient(_FakeClient):
+            def get_messages(self, _destination, message_ids):
+                return [
+                    SimpleNamespace(id=message_id, caption="原始文本")
+                    for message_id in message_ids
+                ]
+
+        client = _WrongCaptionClient()
+        client.copy_result = [
+            SimpleNamespace(id=101, caption="原始文本"),
+            SimpleNamespace(id=102, caption="原始文本"),
+        ]
+
+        batch_forward._copy_media_group_and_set_captions(
+            _FakeWorker(),
+            client,
+            -1002,
+            -1001,
+            messages[0].id,
+            ["过滤后第一条", "过滤后第二条"],
+            group_messages=messages,
+        )
+
+        self.assertEqual(
+            client.edited_captions,
+            [
+                (-1002, 101, "过滤后第一条"),
+                (-1002, 102, "过滤后第二条"),
+            ],
         )
 
     def test_forwarded_group_uses_cleaned_caption_for_non_first_item(self):
