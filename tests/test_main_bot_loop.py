@@ -15,6 +15,7 @@ from bot.core.client import (
     install_client_loop_bridge,
 )
 from bot.handlers.commands import register_command_handlers
+from batch_forward import _resolve_source_username
 
 
 class _FakeLoop:
@@ -119,6 +120,39 @@ class MainBotLoopTests(unittest.TestCase):
         self.assertTrue(client._tgfh_loop_bridge_installed)
         self.assertEqual(client.send_message("ok"), "ok")
         loop.close()
+
+    def test_bridges_async_generator_methods(self):
+        loop = asyncio.new_event_loop()
+
+        async def original_history(_client):
+            yield 1
+            yield 2
+
+        class _Client:
+            pass
+
+        client = _Client()
+        client.loop = loop
+        client.get_chat_history = lambda _client: None
+        client.get_chat_history.__wrapped__ = original_history
+
+        install_client_loop_bridge(client)
+
+        self.assertEqual(list(client.get_chat_history()), [1, 2])
+        loop.close()
+
+    def test_numeric_source_skips_unnecessary_chat_resolution(self):
+        class _Client:
+            def get_chat(self, _ref):
+                raise AssertionError("numeric source should not call get_chat")
+
+        self.assertIsNone(
+            _resolve_source_username(
+                _Client(),
+                "-1003113925518",
+                -1003113925518,
+            )
+        )
 
     def test_command_handlers_are_native_async_callbacks(self):
         class _Bot:

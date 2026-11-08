@@ -704,6 +704,11 @@ def _resolve_source_username(client, ref, chat_id):
         return explicit_username
 
     normalized = normalize_private_channel_ref(ref)
+    # Numeric private IDs already identify the source. Resolving them through
+    # get_chat adds a slow network round trip and is unnecessary for batch
+    # collection; the source username can be discovered from fetched messages.
+    if re.fullmatch(r"-?\d+", normalized):
+        return None
     if not re.fullmatch(r"-?\d+", normalized):
         candidates.append(normalized)
     candidates.append(chat_id)

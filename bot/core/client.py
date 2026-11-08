@@ -50,23 +50,65 @@ _LOOP_BRIDGE_SKIP = {
 
 def _invoke_on_client_loop(client, function, *args, **kwargs):
     """Invoke a Pyrofork async method on the loop owned by the client."""
+    coroutine = function(client, *args, **kwargs)
+    return _await_on_client_loop(client, coroutine)
+
+
+def _await_on_client_loop(client, awaitable):
+    """Await an awaitable on the loop owned by the client."""
     loop = getattr(client, "loop", None)
     if loop is None or loop.is_closed():
         raise RuntimeError("Telegram client event loop is unavailable")
 
-    coroutine = function(client, *args, **kwargs)
     try:
         running_loop = asyncio.get_running_loop()
     except RuntimeError:
         running_loop = None
 
-    # Async methods may be called from code already running on the client loop.
     if running_loop is loop:
-        return coroutine
+        return awaitable
 
     if loop.is_running():
-        return asyncio.run_coroutine_threadsafe(coroutine, loop).result()
-    return loop.run_until_complete(coroutine)
+        return asyncio.run_coroutine_threadsafe(awaitable, loop).result()
+    return loop.run_until_complete(awaitable)
+
+
+def _invoke_async_generator_on_client_loop(
+    client,
+    function,
+    *args,
+    **kwargs,
+):
+    """Return a sync iterator backed by the client-owned event loop."""
+    loop = getattr(client, "loop", None)
+    if loop is None or loop.is_closed():
+        raise RuntimeError("Telegram client event loop is unavailable")
+
+    generator = function(client, *args, **kwargs)
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+    if running_loop is loop:
+        return generator
+
+    def sync_iterator():
+        try:
+            while True:
+                try:
+                    yield _await_on_client_loop(
+                        client,
+                        generator.__anext__(),
+                    )
+                except StopAsyncIteration:
+                    break
+        finally:
+            try:
+                _await_on_client_loop(client, generator.aclose())
+            except Exception:
+                pass
+
+    return sync_iterator()
 
 
 def install_client_loop_bridge(client):
@@ -98,16 +140,32 @@ def install_client_loop_bridge(client):
         except Exception:
             continue
         function = getattr(wrapped, "__wrapped__", None)
-        if function is None or not inspect.iscoroutinefunction(function):
+        is_coroutine = function is not None and inspect.iscoroutinefunction(
+            function
+        )
+        is_async_generator = (
+            function is not None
+            and inspect.isasyncgenfunction(function)
+        )
+        if not is_coroutine and not is_async_generator:
             continue
 
-        def sync_bridge(*args, __function=function, **kwargs):
-            return _invoke_on_client_loop(
-                client,
-                __function,
-                *args,
-                **kwargs,
-            )
+        if is_coroutine:
+            def sync_bridge(*args, __function=function, **kwargs):
+                return _invoke_on_client_loop(
+                    client,
+                    __function,
+                    *args,
+                    **kwargs,
+                )
+        else:
+            def sync_bridge(*args, __function=function, **kwargs):
+                return _invoke_async_generator_on_client_loop(
+                    client,
+                    __function,
+                    *args,
+                    **kwargs,
+                )
 
         sync_bridge = functools.wraps(function)(sync_bridge)
         setattr(client, name, sync_bridge)
