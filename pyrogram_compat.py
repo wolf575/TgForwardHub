@@ -7,8 +7,10 @@ channel range before any peer resolution happens.
 """
 
 import re
+import inspect
+import functools
 
-from pyrogram import utils
+from pyrogram import raw, utils
 
 
 EXPANDED_MIN_CHANNEL_ID = -1009999999999
@@ -24,6 +26,46 @@ def apply_pyrogram_peer_id_compat():
     if utils.MIN_CHANNEL_ID > EXPANDED_MIN_CHANNEL_ID:
         utils.MIN_CHANNEL_ID = EXPANDED_MIN_CHANNEL_ID
     return utils.MIN_CHANNEL_ID
+
+
+def apply_pyrofork_messages_topics_compat():
+    """Default the Layer 220 ``topics`` field for Pyrofork 2.3.69.
+
+    Pyrofork 2.3.69's ``copy_media_group`` constructs ``messages.Messages``
+    without ``topics`` even though its generated Layer 220 type requires it.
+    The media group has already been sent when this constructor runs, so the
+    resulting TypeError must not be treated as a forwarding restriction.
+    """
+    messages_type = getattr(getattr(raw, "types", None), "messages", None)
+    messages_class = getattr(messages_type, "Messages", None)
+    if messages_class is None:
+        return False
+
+    original = getattr(messages_class, "__init__", None)
+    if original is None or getattr(original, "_tgfh_topics_compat", False):
+        return True
+
+    try:
+        parameters = inspect.signature(original).parameters
+    except (TypeError, ValueError):
+        return False
+    topics_parameter = parameters.get("topics")
+    if topics_parameter is None or topics_parameter.default is not inspect.Parameter.empty:
+        return True
+
+    @functools.wraps(original)
+    def init_with_topics(self, *, messages, chats, users, topics=None):
+        return original(
+            self,
+            messages=messages,
+            topics=topics or [],
+            chats=chats,
+            users=users,
+        )
+
+    init_with_topics._tgfh_topics_compat = True
+    messages_class.__init__ = init_with_topics
+    return True
 
 
 def normalize_private_channel_ref(value):

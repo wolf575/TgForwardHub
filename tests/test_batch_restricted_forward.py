@@ -98,6 +98,8 @@ class _RestrictedAcc:
         self.sent = []
         self.copied = []
         self.group_copies = []
+        self.relay_copies = []
+        self.relay_group_copies = []
         self.forwarded = []
         self.get_media_group_calls = []
         self.hidden_forwards = []
@@ -105,6 +107,8 @@ class _RestrictedAcc:
         self.invoked_queries = []
         self.cached_media_groups = []
         self._next_rnd_id = 800000000
+        self.relay_id = -1005555555555
+        self.relay_copy_error = None
         self.hidden_forward_error = (
             ChatForwardsRestricted(
                 400,
@@ -120,6 +124,12 @@ class _RestrictedAcc:
         )
 
     def copy_message(self, *args, **kwargs):
+        source_id = args[1] if len(args) > 1 else kwargs.get("from_chat_id")
+        if source_id == self.relay_id:
+            self.relay_copies.append((args, kwargs))
+            if self.relay_copy_error:
+                raise self.relay_copy_error
+            return _Message(7000, text="")
         self.copied.append((args, kwargs))
         error = self.item_copy_error
         if callable(error):
@@ -128,6 +138,15 @@ class _RestrictedAcc:
             raise error
 
     def copy_media_group(self, *args, **kwargs):
+        source_id = args[1] if len(args) > 1 else kwargs.get("from_chat_id")
+        if source_id == self.relay_id:
+            self.relay_group_copies.append((args, kwargs))
+            if self.relay_copy_error:
+                raise self.relay_copy_error
+            return [
+                _Message(message_id, text="")
+                for message_id in (7001, 7002)
+            ]
         self.group_copies.append((args, kwargs))
         error = self.album_error or self.copy_error
         if error:
@@ -732,9 +751,11 @@ class BatchRestrictedForwardTests(unittest.TestCase):
             bot.group_copies[0][0:3],
             (relay_id, source_id, 150),
         )
-        self.assertEqual(len(acc.hidden_forwards), 1)
-        self.assertEqual(list(acc.hidden_forwards[0].id), [6100, 6101])
-        self.assertIs(acc.hidden_forwards[0].drop_author, True)
+        self.assertEqual(len(acc.relay_group_copies), 1)
+        self.assertEqual(
+            acc.relay_group_copies[0][0],
+            (-1009876543210, relay_id, 6100),
+        )
 
     def test_cache_restricted_single_media_uses_bot_relay(self):
         source_id = -1001234567890
@@ -769,8 +790,11 @@ class BatchRestrictedForwardTests(unittest.TestCase):
             bot.copied[0][0:3],
             (relay_id, source_id, 152),
         )
-        self.assertEqual(len(acc.hidden_forwards), 1)
-        self.assertEqual(list(acc.hidden_forwards[0].id), [6000])
+        self.assertEqual(len(acc.relay_copies), 1)
+        self.assertEqual(
+            acc.relay_copies[0][0],
+            (-1009876543210, relay_id, 6000),
+        )
 
     def test_bot_relay_prefers_public_username_for_source(self):
         source_id = -1001234567890
@@ -838,7 +862,7 @@ class BatchRestrictedForwardTests(unittest.TestCase):
             [os.path.basename(path) for path in acc.downloaded],
             ["item_153.jpg"],
         )
-        self.assertEqual(acc.hidden_forwards, [])
+        self.assertEqual(acc.relay_copies, [])
 
     def test_cache_restricted_source_reuses_bot_relay_without_user_copy(self):
         source_id = -1001234567890
@@ -872,7 +896,8 @@ class BatchRestrictedForwardTests(unittest.TestCase):
 
         acc.copied.clear()
         bot.copied.clear()
-        acc.hidden_forwards.clear()
+        acc.relay_copies.clear()
+        acc.relay_group_copies.clear()
 
         count, used_fallback = batch_forward._forward_batch_unit(
             _Worker(),
@@ -892,7 +917,7 @@ class BatchRestrictedForwardTests(unittest.TestCase):
         self.assertEqual((count, used_fallback), (1, False))
         self.assertEqual(acc.copied, [])
         self.assertEqual(bot.copied[0][0:3], (relay_id, source_id, 155))
-        self.assertEqual(len(acc.hidden_forwards), 1)
+        self.assertEqual(len(acc.relay_copies), 1)
 
     def test_cache_media_group_uses_copy_media_group(self):
         first = _Message(141, "album", photo=_Photo("p41"), caption="原始说明")
@@ -1167,7 +1192,7 @@ class BatchRestrictedForwardTests(unittest.TestCase):
         self.assertEqual(acc.sent[0][0], "send_photo")
         self.assertTrue(acc.sent[0][1].endswith("item_30.jpg"))
 
-    def test_clone_single_media_uses_user_hidden_forward_first(self):
+    def test_clone_single_media_uses_copy_message(self):
         message = _Message(200, photo=_Photo("p28"))
         acc = _RestrictedAcc(
             item_copy_error=False,
@@ -1186,14 +1211,12 @@ class BatchRestrictedForwardTests(unittest.TestCase):
         )
 
         self.assertEqual((count, used_fallback), (1, False))
-        self.assertEqual(len(acc.hidden_forwards), 1)
-        self.assertEqual(list(acc.hidden_forwards[0].id), [200])
-        self.assertIs(acc.hidden_forwards[0].drop_author, True)
-        self.assertEqual(acc.copied, [])
+        self.assertEqual(len(acc.copied), 1)
+        self.assertEqual(acc.hidden_forwards, [])
         self.assertEqual(acc.downloaded, [])
         self.assertEqual(acc.forwarded, [])
 
-    def test_clone_media_group_uses_user_hidden_forward_first(self):
+    def test_clone_media_group_uses_copy_media_group(self):
         first = _Message(201, "album", photo=_Photo("p29"))
         second = _Message(202, "album", photo=_Photo("p30"))
         acc = _RestrictedAcc(
@@ -1215,9 +1238,8 @@ class BatchRestrictedForwardTests(unittest.TestCase):
         )
 
         self.assertEqual((count, used_fallback), (2, False))
-        self.assertEqual(len(acc.hidden_forwards), 1)
-        self.assertEqual(list(acc.hidden_forwards[0].id), [201, 202])
-        self.assertIs(acc.hidden_forwards[0].drop_author, True)
+        self.assertEqual(len(acc.group_copies), 1)
+        self.assertEqual(acc.hidden_forwards, [])
         self.assertEqual(acc.downloaded, [])
         self.assertEqual(acc.forwarded, [])
 
@@ -1240,7 +1262,7 @@ class BatchRestrictedForwardTests(unittest.TestCase):
         self.assertEqual(acc.hidden_forwards, [])
         self.assertEqual(acc.copied[0][1]["caption"], "清理后的说明")
 
-    def test_hidden_forward_failure_falls_back_to_user_cached_copy(self):
+    def test_clone_single_media_copy_does_not_download(self):
         message = _Message(204, photo=_Photo("p32"))
         acc = _RestrictedAcc(item_copy_error=False)
 
@@ -1255,15 +1277,12 @@ class BatchRestrictedForwardTests(unittest.TestCase):
             False,
         )
 
-        self.assertEqual((count, used_fallback), (1, True))
-        self.assertEqual(len(acc.hidden_forwards), 1)
-        self.assertEqual(acc.copied, [])
-        self.assertEqual(
-            [os.path.basename(path) for path in acc.downloaded],
-            ["item_204.jpg"],
-        )
+        self.assertEqual((count, used_fallback), (1, False))
+        self.assertEqual(acc.hidden_forwards, [])
+        self.assertEqual(len(acc.copied), 1)
+        self.assertEqual(acc.downloaded, [])
 
-    def test_hidden_forward_and_user_copy_failure_reuploads_without_forward(self):
+    def test_clone_single_media_copy_failure_reuploads(self):
         message = _Message(205, photo=_Photo("p33"))
         acc = _RestrictedAcc()
 
@@ -1279,8 +1298,8 @@ class BatchRestrictedForwardTests(unittest.TestCase):
         )
 
         self.assertEqual((count, used_fallback), (1, True))
-        self.assertEqual(len(acc.hidden_forwards), 1)
-        self.assertEqual(acc.copied, [])
+        self.assertEqual(acc.hidden_forwards, [])
+        self.assertEqual(len(acc.copied), 1)
         self.assertEqual(acc.forwarded, [])
         self.assertEqual(
             [os.path.basename(path) for path in acc.downloaded],
@@ -1315,8 +1334,8 @@ class BatchRestrictedForwardTests(unittest.TestCase):
 
         self.assertEqual((count, used_fallback), (2, True))
         self.assertEqual(restricted_sources, {source_id})
-        self.assertEqual(len(acc.hidden_forwards), 1)
-        self.assertEqual(len(acc.group_copies), 0)
+        self.assertEqual(acc.hidden_forwards, [])
+        self.assertEqual(len(acc.group_copies), 1)
         self.assertEqual(acc.copied, [])
         self.assertEqual(
             [os.path.basename(path) for path in acc.downloaded],

@@ -4,9 +4,11 @@ from types import SimpleNamespace
 from unittest import mock
 
 import batch_forward
+from pyrogram import raw
 from pyrogram.enums import MessageEntityType
 from pyrogram.types import MessageEntity
 from pyrogram.types.messages_and_media.message import Str
+from pyrogram_compat import apply_pyrofork_messages_topics_compat
 
 try:
     from pyrogram.types import TextQuote
@@ -123,6 +125,15 @@ def _task(job_id):
 
 
 class BatchFilterTests(unittest.TestCase):
+    def test_pyrofork_messages_topics_compat(self):
+        self.assertTrue(apply_pyrofork_messages_topics_compat())
+        result = raw.types.messages.Messages(
+            messages=[],
+            chats=[],
+            users=[],
+        )
+        self.assertEqual(list(getattr(result, "topics", [])), [])
+
     def test_multiline_regex_matches_without_explicit_dotall(self):
         message = _FakeMessage(1, caption="开头\n后续内容进会员群查看\n广告尾部")
         rules = batch_forward._filter_rule_set(

@@ -10,10 +10,14 @@ import pyrogram
 from pyrogram import Client
 from bot.utils.logger import get_logger
 from config import load_config, getenv
-from pyrogram_compat import apply_pyrogram_peer_id_compat
+from pyrogram_compat import (
+    apply_pyrofork_messages_topics_compat,
+    apply_pyrogram_peer_id_compat,
+)
 
 
 apply_pyrogram_peer_id_compat()
+apply_pyrofork_messages_topics_compat()
 
 logger = get_logger(__name__)
 

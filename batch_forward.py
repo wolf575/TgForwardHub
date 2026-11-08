@@ -18,7 +18,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
-from pyrogram import raw
 from pyrogram.errors import (
     ChatForwardsRestricted,
     FileReferenceExpired,
@@ -46,10 +45,15 @@ from bot.handlers.instances import get_acc_instance, get_bot_instance
 from bot.utils.helpers import get_message_type
 from bot.utils.logger import get_logger
 from bot.workers.message_worker import MessageWorker
-from pyrogram_compat import apply_pyrogram_peer_id_compat, normalize_private_channel_ref
+from pyrogram_compat import (
+    apply_pyrofork_messages_topics_compat,
+    apply_pyrogram_peer_id_compat,
+    normalize_private_channel_ref,
+)
 
 
 apply_pyrogram_peer_id_compat()
+apply_pyrofork_messages_topics_compat()
 
 logger = get_logger(__name__)
 
@@ -724,31 +728,6 @@ def _copy_media_group_and_set_captions(
     return result
 
 
-def _forward_media_group_and_set_captions(
-    worker,
-    client,
-    destination,
-    source_id,
-    group_messages,
-    captions,
-    preserve_source,
-    log=None,
-):
-    # Native forward RPCs cannot carry replacement captions. Copy with the
-    # filtered captions in the first request instead of forwarding the original
-    # text and issuing one edit RPC per album item.
-    return _copy_media_group_and_set_captions(
-        worker,
-        client,
-        destination,
-        source_id,
-        group_messages[0].id,
-        captions,
-        log,
-        group_messages=group_messages,
-    )
-
-
 def _strip_trailing_blocks(text, terms):
     if not text or not terms:
         return text
@@ -1303,25 +1282,6 @@ def _worker_execute(worker, name, operation):
     return worker._execute_with_flood_retry(name, operation)
 
 
-def _user_hidden_forward(acc, source_id, dest_id, message_ids, drop_author=True):
-    """Forward using the user client and Telegram's native hidden-author flag.
-
-    Pyrogram's high-level ``forward_messages`` does not expose ``drop_author``.
-    Telegram Desktop uses this flag for "forward without original sender", and
-    the raw path can preserve Telegram-cached media where ``copy_message`` is
-    rejected by a restricted source.
-    """
-    return acc.invoke(
-        raw.functions.messages.ForwardMessages(
-            from_peer=acc.resolve_peer(source_id),
-            to_peer=acc.resolve_peer(dest_id),
-            id=list(message_ids),
-            random_id=[acc.rnd_id() for _ in message_ids],
-            drop_author=drop_author,
-        )
-    )
-
-
 def _relay_message_ids(result, fallback_message_id=None):
     """Extract message IDs from a Pyrogram copy/send result.
 
@@ -1348,6 +1308,21 @@ def _relay_message_ids(result, fallback_message_id=None):
     if message_id is None:
         raise RuntimeError("Bot 中转未返回可转发的消息 ID")
     return [int(message_id)]
+
+
+def _copy_relay_messages(client, destination, relay_id, relay_message_ids):
+    """Copy relayed messages without raw ``ForwardMessages`` result parsing."""
+    if len(relay_message_ids) > 1:
+        return client.copy_media_group(
+            destination,
+            relay_id,
+            relay_message_ids[0],
+        )
+    return client.copy_message(
+        destination,
+        relay_id,
+        relay_message_ids[0],
+    )
 
 
 def _bot_source_ref(source_id, group_messages, source_username=None):
@@ -1489,19 +1464,18 @@ def _forward_cache_via_bot_relay(
             ),
         )
         _emit_log(
-            f"Bot 已复制到缓冲会话 {relay_id}，准备由用户客户端隐藏转发: "
+            f"Bot 已复制到缓冲会话 {relay_id}，准备由用户客户端复制到目标: "
             f"{relay_ids} -> {dest_id}",
             log,
         )
         _worker_execute(
             worker,
-            "用户客户端从中转缓冲会话隐藏转发",
-            lambda: _user_hidden_forward(
+            "用户客户端复制中转缓冲消息",
+            lambda: _copy_relay_messages(
                 acc,
-                relay_id,
                 dest_id,
+                relay_id,
                 relay_ids,
-                drop_author=True,
             ),
         )
         _emit_log(
@@ -1851,41 +1825,27 @@ def _forward_batch_media_group(
     wait_for_active=None,
 ):
     anchor = group_messages[0]
-
-    if cache_send:
-        try:
+    use_copy = cache_send or not preserve_source or text_changed
+    try:
+        if use_copy:
             _emit_log(
                 f"媒体组 {anchor.id} 使用用户客户端缓存复制: "
                 f"{source_id} -> {dest_id}，RPC=copy_media_group",
                 log,
             )
-            if text_changed and cleaned_texts is not None:
-                _copy_media_group_and_set_captions(
-                    worker,
-                    acc,
-                    dest_id,
-                    source_id,
-                    anchor.id,
-                    _caption_overrides(
-                        cleaned_texts,
-                        cleaned_text,
-                        len(group_messages),
-                    ),
-                    log,
-                    group_messages=group_messages,
+            if text_changed:
+                captions = _caption_overrides(
+                    cleaned_texts,
+                    cleaned_text,
+                    len(group_messages),
                 )
-            elif text_changed:
                 _copy_media_group_and_set_captions(
                     worker,
                     acc,
                     dest_id,
                     source_id,
                     anchor.id,
-                    _caption_overrides(
-                        None,
-                        cleaned_text,
-                        len(group_messages),
-                    ),
+                    captions,
                     log,
                     group_messages=group_messages,
                 )
@@ -1900,140 +1860,10 @@ def _forward_batch_media_group(
                     ),
                 )
             _emit_log(
-                f"媒体组 {anchor.id} 已通过缓存复制原样发送: "
+                f"媒体组 {anchor.id} 已通过缓存复制发送: "
                 f"{source_id} -> {dest_id}",
                 log,
             )
-            return len(group_messages), False
-        except Exception as exc:
-            restricted = isinstance(exc, ChatForwardsRestricted)
-            _emit_log(
-                f"媒体组 {anchor.id} 缓存复制"
-                f"{'受限（准备 Bot 中转）' if restricted else '失败'}: "
-                f"{type(exc).__name__}: {exc}",
-                log,
-                "info" if restricted else "warning",
-            )
-            if restricted and restricted_source_ids is not None:
-                restricted_source_ids.add(source_id)
-                _emit_log(
-                    f"来源 {source_id} 已确认限制缓存复制",
-                    log,
-                    "warning",
-                )
-            if bot is not None and relay_chat_id is not None:
-                if _forward_cache_via_bot_relay(
-                    worker,
-                    bot,
-                    acc,
-                    source_id,
-                    dest_id,
-                    relay_chat_id,
-                    group_messages,
-                    cleaned_text,
-                    text_changed,
-                    log,
-                    source_username=source_username,
-                    cleaned_texts=cleaned_texts,
-                ):
-                    return len(group_messages), False
-            reuploaded = _reupload_batch_media_group(
-                worker,
-                acc,
-                source_id,
-                dest_id,
-                group_messages,
-                cleaned_text,
-                text_changed,
-                log,
-                cleaned_texts=cleaned_texts,
-                wait_for_active=wait_for_active,
-            )
-            return len(group_messages), True
-
-    if not preserve_source and not text_changed:
-        try:
-            _emit_log(
-                "开始用户客户端原生缓存隐藏转发媒体组: "
-                f"{source_id} -> {dest_id}，"
-                "RPC=messages.ForwardMessages(drop_author=True)",
-                log,
-            )
-            _worker_execute(
-                worker,
-                "用户客户端缓存隐藏转发媒体组",
-                lambda: _user_hidden_forward(
-                    acc,
-                    source_id,
-                    dest_id,
-                    [item.id for item in group_messages],
-                ),
-            )
-            _emit_log(
-                f"媒体组 {anchor.id} 已通过用户客户端原生缓存隐藏转发: "
-                f"{source_id} -> {dest_id}，无需下载重传",
-                log,
-            )
-            return len(group_messages), False
-        except Exception as exc:
-            _emit_log(
-                f"用户客户端原生隐藏转发媒体组 {anchor.id} 失败: "
-                f"{source_id} -> {dest_id}，{type(exc).__name__}: {exc}",
-                log,
-                "warning",
-            )
-            if isinstance(exc, ChatForwardsRestricted) and restricted_source_ids is not None:
-                restricted_source_ids.add(source_id)
-                _emit_log(
-                    f"来源 {source_id} 已确认限制缓存转发，后续消息将直接下载重传",
-                    log,
-                    "warning",
-                )
-            reuploaded = _reupload_batch_media_group(
-                worker,
-                acc,
-                source_id,
-                dest_id,
-                group_messages,
-                cleaned_text,
-                text_changed,
-                log,
-                wait_for_active=wait_for_active,
-            )
-            return len(group_messages), True
-
-    try:
-        if text_changed:
-            if cleaned_texts is not None:
-                _forward_media_group_and_set_captions(
-                    worker,
-                    acc,
-                    dest_id,
-                    source_id,
-                    group_messages,
-                    _caption_overrides(
-                        cleaned_texts,
-                        cleaned_text,
-                        len(group_messages),
-                    ),
-                    preserve_source,
-                    log,
-                )
-            else:
-                _copy_media_group_and_set_captions(
-                    worker,
-                    acc,
-                    dest_id,
-                    source_id,
-                    anchor.id,
-                    _caption_overrides(
-                        None,
-                        cleaned_text,
-                        len(group_messages),
-                    ),
-                    log,
-                    group_messages=group_messages,
-                )
         else:
             _worker_execute(
                 worker,
@@ -2044,20 +1874,44 @@ def _forward_batch_media_group(
                     [item.id for item in group_messages],
                 ),
             )
+            _emit_log(
+                f"媒体组 {anchor.id} 已通过直接转发发送: "
+                f"{source_id} -> {dest_id}",
+                log,
+            )
         return len(group_messages), False
     except Exception as exc:
+        action = "缓存复制" if use_copy else "直接转发"
+        restricted = isinstance(exc, ChatForwardsRestricted)
         _emit_log(
-            f"媒体组直接发送失败，准备下载重传: {type(exc).__name__}: {exc}",
+            f"媒体组 {anchor.id} {action}失败: "
+            f"{type(exc).__name__}: {exc}",
             log,
             "warning",
         )
-        if isinstance(exc, ChatForwardsRestricted) and restricted_source_ids is not None:
+        if restricted and restricted_source_ids is not None:
             restricted_source_ids.add(source_id)
             _emit_log(
                 f"来源 {source_id} 已确认限制缓存转发，后续消息将直接下载重传",
                 log,
                 "warning",
             )
+        if cache_send and bot is not None and relay_chat_id is not None:
+            if _forward_cache_via_bot_relay(
+                worker,
+                bot,
+                acc,
+                source_id,
+                dest_id,
+                relay_chat_id,
+                group_messages,
+                cleaned_text,
+                text_changed,
+                log,
+                source_username=source_username,
+                cleaned_texts=cleaned_texts,
+            ):
+                return len(group_messages), False
         reuploaded = _reupload_batch_media_group(
             worker,
             acc,
@@ -2144,8 +1998,9 @@ def _forward_batch_single_media(
     source_username=None,
     wait_for_active=None,
 ):
-    if cache_send:
-        try:
+    use_copy = cache_send or not preserve_source or text_changed
+    try:
+        if use_copy:
             _emit_log(
                 f"单条媒体 {message.id} 使用用户客户端缓存复制: "
                 f"{source_id} -> {dest_id}，RPC=copy_message",
@@ -2153,7 +2008,7 @@ def _forward_batch_single_media(
             )
             result = _worker_execute(
                 worker,
-                "复制单条媒体（缓存发送）",
+                "复制单条媒体",
                 lambda: _copy_single_private_media(
                     acc,
                     dest_id,
@@ -2172,126 +2027,8 @@ def _forward_batch_single_media(
                     log,
                 )
             _emit_log(
-                f"单条媒体 {message.id} 已通过缓存复制原样发送: "
+                f"单条媒体 {message.id} 已通过缓存复制发送: "
                 f"{source_id} -> {dest_id}",
-                log,
-            )
-            return 1, False
-        except Exception as exc:
-            restricted = isinstance(exc, ChatForwardsRestricted)
-            _emit_log(
-                f"单条媒体 {message.id} 缓存复制"
-                f"{'受限（准备 Bot 中转）' if restricted else '失败'}: "
-                f"{type(exc).__name__}: {exc}",
-                log,
-                "info" if restricted else "warning",
-            )
-            if restricted and restricted_source_ids is not None:
-                restricted_source_ids.add(source_id)
-                _emit_log(
-                    f"来源 {source_id} 已确认限制缓存复制",
-                    log,
-                    "warning",
-                )
-            if bot is not None and relay_chat_id is not None:
-                if _forward_cache_via_bot_relay(
-                    worker,
-                    bot,
-                    acc,
-                    source_id,
-                    dest_id,
-                    relay_chat_id,
-                    [message],
-                    cleaned_text,
-                    text_changed,
-                    log,
-                    source_username=source_username,
-                ):
-                    return 1, False
-            if get_message_type(message) not in DOWNLOADABLE_MEDIA_TYPES:
-                raise
-            count = _reupload_batch_single_media(
-                worker,
-                acc,
-                dest_id,
-                message,
-                cleaned_text,
-                text_changed,
-                log,
-                wait_for_active=wait_for_active,
-            )
-            return count, True
-
-    if not preserve_source and not text_changed:
-        try:
-            _emit_log(
-                "开始用户客户端原生缓存隐藏转发单条媒体: "
-                f"{source_id} -> {dest_id}，"
-                "RPC=messages.ForwardMessages(drop_author=True)",
-                log,
-            )
-            _worker_execute(
-                worker,
-                "用户客户端缓存隐藏转发单条媒体",
-                lambda: _user_hidden_forward(
-                    acc,
-                    source_id,
-                    dest_id,
-                    [message.id],
-                ),
-            )
-            _emit_log(
-                f"单条媒体 {message.id} 已通过用户客户端原生缓存隐藏转发: "
-                f"{source_id} -> {dest_id}，无需下载重传",
-                log,
-            )
-            return 1, False
-        except Exception as exc:
-            _emit_log(
-                f"用户客户端原生隐藏转发单条媒体 {message.id} 失败: "
-                f"{source_id} -> {dest_id}，{type(exc).__name__}: {exc}",
-                log,
-                "warning",
-            )
-            if isinstance(exc, ChatForwardsRestricted) and restricted_source_ids is not None:
-                restricted_source_ids.add(source_id)
-                _emit_log(
-                    f"来源 {source_id} 已确认限制缓存转发，后续消息将直接下载重传",
-                    log,
-                    "warning",
-                )
-            if get_message_type(message) not in DOWNLOADABLE_MEDIA_TYPES:
-                raise
-            count = _reupload_batch_single_media(
-                worker,
-                acc,
-                dest_id,
-                message,
-                cleaned_text,
-                text_changed,
-                log,
-                wait_for_active=wait_for_active,
-            )
-            return count, True
-
-    try:
-        if text_changed:
-            result = _worker_execute(
-                worker,
-                "复制单条媒体并修改 caption",
-                lambda: acc.copy_message(
-                    dest_id,
-                    source_id,
-                    message.id,
-                    caption=cleaned_text,
-                ),
-            )
-            _reconcile_single_caption(
-                worker,
-                acc,
-                dest_id,
-                result,
-                cleaned_text,
                 log,
             )
         else:
@@ -2300,20 +2037,43 @@ def _forward_batch_single_media(
                 "转发单条媒体",
                 lambda: acc.forward_messages(dest_id, source_id, message.id),
             )
+            _emit_log(
+                f"单条媒体 {message.id} 已通过直接转发发送: "
+                f"{source_id} -> {dest_id}",
+                log,
+            )
         return 1, False
     except Exception as exc:
+        action = "缓存复制" if use_copy else "直接转发"
+        restricted = isinstance(exc, ChatForwardsRestricted)
         _emit_log(
-            f"单条媒体直接发送失败: {type(exc).__name__}: {exc}",
+            f"单条媒体 {message.id} {action}失败: "
+            f"{type(exc).__name__}: {exc}",
             log,
             "warning",
         )
-        if isinstance(exc, ChatForwardsRestricted) and restricted_source_ids is not None:
+        if restricted and restricted_source_ids is not None:
             restricted_source_ids.add(source_id)
             _emit_log(
                 f"来源 {source_id} 的单条缓存复制受限，后续消息将直接下载重传",
                 log,
                 "warning",
             )
+        if cache_send and bot is not None and relay_chat_id is not None:
+            if _forward_cache_via_bot_relay(
+                worker,
+                bot,
+                acc,
+                source_id,
+                dest_id,
+                relay_chat_id,
+                [message],
+                cleaned_text,
+                text_changed,
+                log,
+                source_username=source_username,
+            ):
+                return 1, False
         if get_message_type(message) not in DOWNLOADABLE_MEDIA_TYPES:
             raise
         count = _reupload_batch_single_media(
@@ -2345,108 +2105,19 @@ def _forward_batch_text(
     relay_chat_id=None,
     source_username=None,
 ):
-    if cache_send:
-        try:
-            if text_changed:
-                _worker_execute(
-                    worker,
-                    "发送修改后的文本",
-                    lambda: acc.send_message(dest_id, cleaned_text),
-                )
-            else:
-                _worker_execute(
-                    worker,
-                    "复制文本消息（缓存发送）",
-                    lambda: acc.copy_message(dest_id, source_id, message.id),
-                )
-            return 1, False
-        except Exception as exc:
-            restricted = isinstance(exc, ChatForwardsRestricted)
-            _emit_log(
-                f"文本消息 {message.id} 缓存复制"
-                f"{'受限（准备 Bot 中转）' if restricted else '失败'}: "
-                f"{type(exc).__name__}: {exc}",
-                log,
-                "info" if restricted else "warning",
-            )
-            if restricted and restricted_source_ids is not None:
-                restricted_source_ids.add(source_id)
-            if bot is not None and relay_chat_id is not None:
-                if _forward_cache_via_bot_relay(
-                    worker,
-                    bot,
-                    acc,
-                    source_id,
-                    dest_id,
-                    relay_chat_id,
-                    [message],
-                    cleaned_text,
-                    text_changed,
-                    log,
-                    source_username=source_username,
-                ):
-                    return 1, False
-            _worker_execute(
-                worker,
-                "发送受限文本消息",
-                lambda: acc.send_message(
-                    dest_id,
-                    cleaned_text if text_changed else message.text or "",
-                    entities=None if text_changed else message.entities,
-                ),
-            )
-            return 1, True
-
-    if not preserve_source and not text_changed:
-        try:
-            _emit_log(
-                "开始用户客户端原生缓存隐藏转发文本消息: "
-                f"{source_id} -> {dest_id}，"
-                "RPC=messages.ForwardMessages(drop_author=True)",
-                log,
-            )
-            _worker_execute(
-                worker,
-                "用户客户端缓存隐藏转发文本消息",
-                lambda: _user_hidden_forward(
-                    acc,
-                    source_id,
-                    dest_id,
-                    [message.id],
-                ),
-            )
-            _emit_log(
-                f"文本消息 {message.id} 已通过用户客户端原生缓存隐藏转发: "
-                f"{source_id} -> {dest_id}",
-                log,
-            )
-            return 1, False
-        except Exception as exc:
-            _emit_log(
-                f"用户客户端原生隐藏转发文本消息 {message.id} 失败: "
-                f"{source_id} -> {dest_id}，{type(exc).__name__}: {exc}",
-                log,
-                "warning",
-            )
-            if isinstance(exc, ChatForwardsRestricted) and restricted_source_ids is not None:
-                restricted_source_ids.add(source_id)
-            _worker_execute(
-                worker,
-                "发送受限文本消息",
-                lambda: acc.send_message(
-                    dest_id,
-                    cleaned_text if text_changed else message.text or "",
-                    entities=None if text_changed else message.entities,
-                ),
-            )
-            return 1, True
-
+    use_copy = cache_send or not preserve_source or text_changed
     try:
-        if text_changed:
+        if use_copy and text_changed:
             _worker_execute(
                 worker,
                 "发送修改后的文本",
                 lambda: acc.send_message(dest_id, cleaned_text),
+            )
+        elif use_copy:
+            _worker_execute(
+                worker,
+                "复制文本消息",
+                lambda: acc.copy_message(dest_id, source_id, message.id),
             )
         else:
             _worker_execute(
@@ -2454,15 +2125,44 @@ def _forward_batch_text(
                 "转发文本消息",
                 lambda: acc.forward_messages(dest_id, source_id, message.id),
             )
+        _emit_log(
+            f"文本消息 {message.id} 已通过"
+            f"{'缓存复制' if use_copy else '直接转发'}发送: "
+            f"{source_id} -> {dest_id}",
+            log,
+        )
         return 1, False
     except Exception as exc:
-        if isinstance(exc, ChatForwardsRestricted) and restricted_source_ids is not None:
+        restricted = isinstance(exc, ChatForwardsRestricted)
+        _emit_log(
+            f"文本消息 {message.id} "
+            f"{'缓存复制' if use_copy else '直接转发'}失败: "
+            f"{type(exc).__name__}: {exc}",
+            log,
+            "warning",
+        )
+        if restricted and restricted_source_ids is not None:
             restricted_source_ids.add(source_id)
             _emit_log(
                 f"来源 {source_id} 的文本缓存复制受限，后续文本将直接重新发送",
                 log,
                 "warning",
             )
+        if cache_send and bot is not None and relay_chat_id is not None:
+            if _forward_cache_via_bot_relay(
+                worker,
+                bot,
+                acc,
+                source_id,
+                dest_id,
+                relay_chat_id,
+                [message],
+                cleaned_text,
+                text_changed,
+                log,
+                source_username=source_username,
+            ):
+                return 1, False
         _worker_execute(
             worker,
             "发送受限文本消息",
@@ -2821,8 +2521,8 @@ def _run_batch_task(job_id, spec):
         }.get(forward_mode, "隐藏来源")
         log(
             f"网页批量转发身份: 用户客户端；模式: {mode}；"
-            "隐藏来源使用 messages.ForwardMessages(drop_author=True)，"
-            "缓存发送使用 copy_message/copy_media_group，"
+            "隐藏来源使用 copy_message/copy_media_group；"
+            "保留来源使用 forward_messages；"
             + (
                 f"受限时使用 Bot 中转缓冲会话 {relay_chat_id}"
                 if cache_send and bot is not None and relay_chat_id is not None

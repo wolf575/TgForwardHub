@@ -69,7 +69,7 @@ docker run -d \
 
 | 模式 | 行为 | 适用场景 |
 | --- | --- | --- |
-| `clone` | 隐藏来源。优先使用 `messages.ForwardMessages(drop_author=True)`，失败后尝试缓存复制和下载重传 | 默认模式，希望目标频道看不到原来源 |
+| `clone` | 隐藏来源。使用 `copy_message` / `copy_media_group`，失败后按需要下载重传 | 默认模式，希望目标频道看不到原来源 |
 | `direct` | 保留来源。使用 `forward_messages` | 需要显示“Forwarded from” |
 | `cache` | 缓存发送。使用 `copy_message` / `copy_media_group`，受限时可配置 Bot 中转缓冲会话 | 希望复用 Telegram 缓存，减少下载和上传 |
 
