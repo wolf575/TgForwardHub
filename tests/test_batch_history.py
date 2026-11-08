@@ -194,6 +194,46 @@ class BatchHistoryTests(unittest.TestCase):
             expected,
         )
 
+    def test_time_collection_caches_text_messages_for_filtering(self):
+        start = int(datetime(2026, 10, 24, 0, 0, tzinfo=timezone.utc).timestamp())
+        end = int(datetime(2026, 10, 25, 0, 0, tzinfo=timezone.utc).timestamp())
+        messages = [
+            type(
+                "Message",
+                (),
+                {
+                    "id": 1,
+                    "date": datetime(
+                        2026,
+                        10,
+                        24,
+                        12,
+                        0,
+                        tzinfo=timezone.utc,
+                    ),
+                    "caption": "Telegram必备的搜索引擎\n广告",
+                    "text": None,
+                },
+            )()
+        ]
+        cache = {}
+
+        ids = batch_forward._collect_message_ids(
+            _HistoryAcc(messages),
+            -1001234567890,
+            {
+                "range_type": "time",
+                "start": str(start),
+                "end": str(end),
+                "reverse": False,
+            },
+            message_cache=cache,
+        )
+
+        self.assertEqual(ids, [1])
+        self.assertIn(1, cache)
+        self.assertEqual(cache[1].caption, "Telegram必备的搜索引擎\n广告")
+
     def test_duplicate_active_task_name_is_rejected(self):
         active = {
             "id": "active-job",

@@ -921,7 +921,13 @@ def _resolve_relay_chat(worker, acc, bot, ref):
     return chat_id
 
 
-def _collect_message_ids(acc, source_id, spec, progress_callback=None):
+def _collect_message_ids(
+    acc,
+    source_id,
+    spec,
+    progress_callback=None,
+    message_cache=None,
+):
     range_type = spec.get("range_type", "id")
     start = spec.get("start")
     end = spec.get("end")
@@ -945,6 +951,11 @@ def _collect_message_ids(acc, source_id, spec, progress_callback=None):
                 break
             if ts <= end_ts:
                 ids.append(message.id)
+                if message_cache is not None:
+                    if _message_primary_text(message) or _message_filter_texts(
+                        message
+                    ):
+                        message_cache[message.id] = message
             if progress_callback and scanned % 100 == 0:
                 progress_callback(scanned, len(ids))
         if not reverse:
@@ -2732,6 +2743,7 @@ def _run_batch_task(job_id, spec):
                 )
         publish_progress("collecting", scanned=0, collected=0)
         log("正在收集消息范围")
+        collected_messages = {}
         ids = _collect_message_ids(
             acc,
             source_id,
@@ -2741,6 +2753,7 @@ def _run_batch_task(job_id, spec):
                 scanned=scanned,
                 collected=collected,
             ),
+            message_cache=collected_messages,
         )
 
         total = len(ids)
@@ -2792,28 +2805,37 @@ def _run_batch_task(job_id, spec):
                 skipped=skipped,
                 current_id=chunk_ids[0] if chunk_ids else None,
             )
-            try:
-                fetched_messages = _worker_execute(
-                    worker,
-                    "批量读取消息",
-                    lambda: acc.get_messages(source_id, chunk_ids),
-                )
-                if not isinstance(fetched_messages, list):
-                    fetched_messages = [fetched_messages]
-            except Exception as exc:
-                log(
-                    f"批量读取消息失败，回退逐条读取: "
-                    f"{type(exc).__name__}: {exc}",
-                    level="warning",
-                )
-                fetched_messages = []
-                for message_id in chunk_ids:
-                    try:
-                        fetched_messages.append(
-                            acc.get_messages(source_id, message_id)
-                        )
-                    except Exception:
-                        fetched_messages.append(None)
+            fetched_messages = []
+            missing_ids = []
+            for message_id in chunk_ids:
+                cached_message = collected_messages.get(message_id)
+                if cached_message is not None:
+                    fetched_messages.append(cached_message)
+                else:
+                    missing_ids.append(message_id)
+            if missing_ids:
+                try:
+                    batch_messages = _worker_execute(
+                        worker,
+                        "批量读取消息",
+                        lambda: acc.get_messages(source_id, missing_ids),
+                    )
+                    if not isinstance(batch_messages, list):
+                        batch_messages = [batch_messages]
+                    fetched_messages.extend(batch_messages)
+                except Exception as exc:
+                    log(
+                        f"批量读取消息失败，回退逐条读取: "
+                        f"{type(exc).__name__}: {exc}",
+                        level="warning",
+                    )
+                    for message_id in missing_ids:
+                        try:
+                            fetched_messages.append(
+                                acc.get_messages(source_id, message_id)
+                            )
+                        except Exception:
+                            fetched_messages.append(None)
 
             message_map = {
                 getattr(item, "id", None): item
@@ -2857,6 +2879,10 @@ def _run_batch_task(job_id, spec):
                             source_id,
                             message,
                         )
+                        group_messages = [
+                            collected_messages.get(item.id, item)
+                            for item in group_messages
+                        ]
                         if media_group_id:
                             group_cache[media_group_id] = group_messages
                     group_ids = [item.id for item in group_messages]
