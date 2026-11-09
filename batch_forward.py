@@ -938,6 +938,7 @@ def _iter_batch_chunks(
                         batch_messages,
                         collected,
                         collected,
+                        scanned,
                     )
                     batch_messages = []
             if progress_callback and scanned % 100 == 0:
@@ -948,6 +949,7 @@ def _iter_batch_chunks(
                 batch_messages,
                 collected,
                 collected,
+                scanned,
             )
         return
 
@@ -998,6 +1000,7 @@ def _iter_batch_chunks(
             fetched_messages,
             min(chunk_start + len(chunk_ids), total),
             total,
+            min(chunk_start + len(chunk_ids), total),
         )
 
 
@@ -2439,6 +2442,11 @@ def _run_batch_task(job_id, spec):
     started_at = _now_iso()
     last_activity = [time.monotonic()]
     flood_wait_until = [0.0]
+    stream_state = {
+        "enabled": False,
+        "scanned": 0,
+        "collected": 0,
+    }
 
     def persist(force=False):
         nonlocal last_persist
@@ -2487,6 +2495,12 @@ def _run_batch_task(job_id, spec):
         last_activity[0] = time.monotonic()
         elapsed = max(0.0, time.monotonic() - started_monotonic)
         total = int(values.get("total") or 0)
+        if stream_state["enabled"] and phase not in (
+            "done",
+            "error",
+            "cancelled",
+        ):
+            total = 0
         processed = int(values.get("processed") or 0)
         fetched = int(values.get("fetched") or 0)
         eta_seconds = None
@@ -2513,11 +2527,16 @@ def _run_batch_task(job_id, spec):
             "success": int(values.get("success") or 0),
             "failed": int(values.get("failed") or 0),
             "skipped": int(values.get("skipped") or 0),
-            "scanned": int(values.get("scanned") or 0),
-            "collected": int(values.get("collected") or 0),
+            "scanned": int(
+                values.get("scanned", stream_state["scanned"]) or 0
+            ),
+            "collected": int(
+                values.get("collected", stream_state["collected"]) or 0
+            ),
             "current_id": values.get("current_id"),
             "wait_seconds": int(values.get("wait_seconds") or 0),
             "stalled_seconds": int(values.get("stalled_seconds") or 0),
+            "streaming": bool(stream_state["enabled"]),
         }
         _update_task(job_id, progress=progress)
         persist()
@@ -2637,6 +2656,7 @@ def _run_batch_task(job_id, spec):
                 )
         publish_progress("collecting", scanned=0, collected=0)
         streaming_time = str(spec.get("range_type") or "id") == "time"
+        stream_state["enabled"] = streaming_time
         collected_messages = {}
         forward_mode = str(spec.get("forward_mode", "clone")).lower()
         preserve_source = forward_mode == "direct"
@@ -2698,23 +2718,38 @@ def _run_batch_task(job_id, spec):
             else None
         )
         total = 0
+        stream_total = 0
         logged_total = False
 
-        for chunk_ids, fetched_messages, fetched_count, chunk_total in _iter_batch_chunks(
+        def stream_progress(scanned, collected):
+            stream_state["scanned"] = scanned
+            stream_state["collected"] = collected
+            return publish_progress(
+                "collecting",
+                total=0 if streaming_time else collected,
+                scanned=scanned,
+                collected=collected,
+            )
+
+        for (
+            chunk_ids,
+            fetched_messages,
+            fetched_count,
+            chunk_total,
+            chunk_scanned,
+        ) in _iter_batch_chunks(
             acc,
             worker,
             source_id,
             spec,
             collected_messages,
             log=log,
-            progress_callback=lambda scanned, collected: publish_progress(
-                "collecting",
-                total=collected,
-                scanned=scanned,
-                collected=collected,
-            ),
+            progress_callback=stream_progress,
         ):
-            total = chunk_total
+            stream_state["scanned"] = chunk_scanned
+            stream_state["collected"] = chunk_total
+            stream_total = max(stream_total, chunk_total)
+            total = 0 if streaming_time else chunk_total
             if not streaming_time and not logged_total:
                 log(f"开始处理 {total} 条消息: {source_id} -> {dest_id}")
                 logged_total = True
@@ -2726,6 +2761,8 @@ def _run_batch_task(job_id, spec):
                 "forwarding" if streaming_time else "preparing",
                 total=total,
                 fetched=fetched_count,
+                scanned=chunk_scanned,
+                collected=chunk_total,
                 processed=processed,
                 success=success,
                 failed=failed,
@@ -2912,6 +2949,10 @@ def _run_batch_task(job_id, spec):
                         f"进度 {processed}/{total}，成功 {success}，"
                         f"失败 {failed}，跳过 {skipped}"
                     )
+
+        if streaming_time:
+            total = stream_total
+            stream_state["enabled"] = False
 
         if get_task(job_id).get("cancelled"):
             finish_cancelled()

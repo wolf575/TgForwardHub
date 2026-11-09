@@ -1067,8 +1067,9 @@ function updateMonitor(data) {
   const progressBar = $("jobProgressBar");
   const indeterminate =
     data.status === "running" &&
-    !total &&
-    ["resolving", "collecting", "preparing"].includes(progress.phase);
+    (!!progress.streaming ||
+      (!total &&
+        ["resolving", "collecting", "preparing"].includes(progress.phase)));
   progressBar.classList.toggle("indeterminate", indeterminate);
   progressBar.style.width = indeterminate
     ? ""
@@ -1085,8 +1086,11 @@ function updateMonitor(data) {
     phaseText =
       `准备消息批次 · ${progress.fetched || 0}/${progress.total || 0}`;
   } else if (progress.phase === "forwarding") {
-    phaseText =
-      `正在转发 · ${progress.processed || 0}/${progress.total || 0}`;
+    phaseText = progress.streaming
+      ? `边扫描边转发 · 已处理 ${progress.processed || 0} · 已发现 ${
+          progress.collected || 0
+        }`
+      : `正在转发 · ${progress.processed || 0}/${progress.total || 0}`;
   } else if (progress.phase === "rate_limit") {
     phaseText =
       `等待速率限制 · 约 ${progress.wait_seconds || 0} 秒后继续`;
