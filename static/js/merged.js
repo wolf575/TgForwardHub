@@ -1190,9 +1190,10 @@ async function attachBatchTask(jobId, message = "") {
     clearTimeout(pollingTimer);
     pollingTimer = null;
   }
-  batchViewToken += 1;
+  const viewToken = ++batchViewToken;
   try {
     const data = await apiFetch(`/api/batch-forward/${jobId}`);
+    if (viewToken !== batchViewToken) return;
     updateMonitor(data);
     if (["running", "paused"].includes(data.status)) {
       applyBatchSpecToForm(data.spec || {});
@@ -1207,6 +1208,7 @@ async function attachBatchTask(jobId, message = "") {
       pollBatch(jobId);
     }
   } catch (error) {
+    if (viewToken !== batchViewToken) return;
     setMessage("batchMessage", error.message);
     refreshActiveTaskList();
   }
@@ -1278,6 +1280,7 @@ async function restoreBatchTask() {
 async function submitBatch(event) {
   event.preventDefault();
   setMessage("batchMessage", "");
+  const viewToken = batchViewToken;
   $("pauseBtn").hidden = true;
   $("resumeBtn").hidden = true;
   $("cancelBtn").hidden = true;
@@ -1316,6 +1319,10 @@ async function submitBatch(event) {
       method: "POST",
       body: JSON.stringify(spec),
     });
+    if (viewToken !== batchViewToken) {
+      refreshActiveTaskList({ quiet: true });
+      return;
+    }
     if (pollingTimer) {
       clearTimeout(pollingTimer);
       pollingTimer = null;

@@ -112,6 +112,8 @@ test("active task controls support cross-device attach and new tasks", () => {
   assert.match(source, /newTaskBtn"\)\.addEventListener/);
   assert.match(source, /function resetBatchForm\(\)/);
   assert.match(source, /resetBatchForm\(\);/);
+  assert.match(source, /const viewToken = \+\+batchViewToken/);
+  assert.match(source, /if \(viewToken !== batchViewToken\)/);
   assert.match(source, /"excludeRegex",\s*"removeKeywords",\s*"removeRegex"/);
   assert.match(source, /state\.taskName \?\? spec\.task_name \?\? ""/);
   assert.match(
