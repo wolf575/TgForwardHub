@@ -14,6 +14,7 @@ import threading
 import time
 import unicodedata
 import uuid
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -74,6 +75,7 @@ DOWNLOADABLE_MEDIA_TYPES = {
 TASKS = {}
 TASKS_LOCK = threading.Lock()
 BATCH_FETCH_CHUNK_SIZE = 100
+DEFAULT_RATE_LIMIT_PER_MINUTE = 25
 _EMPTY_CAPTION_SENTINEL = "\u2063"
 BATCH_SYNC_TIMEOUT_SECONDS = float(
     os.environ.get("BATCH_SYNC_TIMEOUT_SECONDS", "120")
@@ -88,6 +90,39 @@ BATCH_STALL_TIMEOUT_SECONDS = float(
 
 class BatchTaskStopped(Exception):
     """Raised when a paused/cancelled task must not start another send."""
+
+
+class BatchRateLimiter:
+    """Rolling one-minute limiter for batch send units."""
+
+    def __init__(self, limit_per_minute, log=None, progress_callback=None):
+        self.limit_per_minute = max(1, int(limit_per_minute))
+        self.log = log
+        self.progress_callback = progress_callback
+        self.sent_at = deque()
+
+    def wait(self, units=1):
+        units = max(1, int(units))
+        while True:
+            now = time.monotonic()
+            while self.sent_at and now - self.sent_at[0] >= 60:
+                self.sent_at.popleft()
+            if len(self.sent_at) + units <= self.limit_per_minute:
+                self.sent_at.extend([now] * units)
+                return
+            wait_seconds = max(
+                0.1,
+                60 - (now - self.sent_at[0]) + 0.05,
+            )
+            if self.progress_callback is not None:
+                self.progress_callback(wait_seconds)
+            if self.log is not None:
+                self.log(
+                    f"速率限制: 每分钟最多 {self.limit_per_minute} 个发送单元，"
+                    f"等待 {wait_seconds:.1f} 秒后继续",
+                    level="warning",
+                )
+            time.sleep(wait_seconds)
 
 
 def _batch_notification_payload(task_name, job_id, status, progress, error=None):
@@ -143,6 +178,7 @@ PROGRESS_PHASES = {
     "collecting": "收集消息",
     "preparing": "准备消息批次",
     "forwarding": "转发消息",
+    "rate_limit": "等待速率限制",
     "flood_wait": "等待 Telegram 限流",
     "stalled": "任务疑似卡住",
     "paused": "已暂停",
@@ -570,64 +606,6 @@ def _edit_media_group_captions(
             )
 
 
-def _caption_text_equal(left, right):
-    return _plain_filter_text(left or "") == _plain_filter_text(right or "")
-
-
-def _reconcile_media_group_captions(
-    worker,
-    client,
-    destination,
-    result,
-    captions,
-    log=None,
-):
-    """Verify the initial captions and edit only when the server kept originals."""
-    message_ids = _result_message_ids(result)
-    if not message_ids or not captions:
-        return
-    try:
-        actual_messages = client.get_messages(destination, message_ids)
-    except Exception as exc:
-        _emit_log(
-            "媒体组 caption 校验失败，保留初次发送结果: "
-            f"{type(exc).__name__}: {exc}",
-            log,
-            "warning",
-        )
-        return
-    if not isinstance(actual_messages, list):
-        actual_messages = [actual_messages]
-
-    mismatches = []
-    for index, message_id in enumerate(message_ids):
-        if index >= len(captions):
-            break
-        actual = actual_messages[index] if index < len(actual_messages) else None
-        desired = captions[index] or ""
-        actual_caption = getattr(actual, "caption", None) if actual else None
-        if not _caption_text_equal(actual_caption, desired):
-            mismatches.append(index)
-    if not mismatches:
-        return
-
-    _emit_log(
-        f"媒体组 caption 未按初次请求生效，使用发送后编辑回退: "
-        f"{len(mismatches)} 项",
-        log,
-        "warning",
-    )
-    _edit_media_group_captions(
-        worker,
-        client,
-        destination,
-        result,
-        [caption or "" for caption in captions],
-        log,
-        indexes=mismatches,
-    )
-
-
 def _copy_media_group_and_set_captions(
     worker,
     client,
@@ -673,14 +651,6 @@ def _copy_media_group_and_set_captions(
             log,
             indexes=clear_indexes,
         )
-    _reconcile_media_group_captions(
-        worker,
-        client,
-        destination,
-        result,
-        captions,
-        log,
-    )
     return result
 
 
@@ -913,6 +883,124 @@ def _collect_message_ids(
     return ids
 
 
+def _iter_batch_chunks(
+    acc,
+    worker,
+    source_id,
+    spec,
+    collected_messages,
+    log=None,
+    progress_callback=None,
+):
+    """Yield sendable chunks; time ranges forward while history is scanned."""
+    range_type = spec.get("range_type", "id")
+    reverse = bool(spec.get("reverse"))
+
+    if range_type == "time":
+        start_ts = _parse_timestamp(spec.get("start"))
+        end_ts = _parse_timestamp(spec.get("end"), end_of_day=True)
+        if start_ts is None or end_ts is None:
+            raise ValueError("时间范围格式不正确")
+        if start_ts > end_ts:
+            start_ts, end_ts = end_ts, start_ts
+
+        offset_date = datetime.fromtimestamp(end_ts, tz=timezone.utc)
+        history_kwargs = {"offset_date": offset_date}
+        if not reverse:
+            history_kwargs["reverse"] = True
+        try:
+            history = acc.get_chat_history(source_id, **history_kwargs)
+        except TypeError:
+            # Keep compatibility with lightweight test clients and older
+            # Pyrogram versions that do not expose ``reverse``.
+            history = acc.get_chat_history(source_id, offset_date=offset_date)
+
+        batch_messages = []
+        scanned = 0
+        collected = 0
+        for message in history:
+            if message is None:
+                continue
+            scanned += 1
+            ts = message.date.timestamp()
+            if ts < start_ts:
+                break
+            if ts <= end_ts:
+                collected += 1
+                if _message_primary_text(message) or _message_filter_texts(message):
+                    collected_messages[message.id] = message
+                batch_messages.append(message)
+                if len(batch_messages) >= BATCH_FETCH_CHUNK_SIZE:
+                    if progress_callback:
+                        progress_callback(scanned, collected)
+                    yield (
+                        [item.id for item in batch_messages],
+                        batch_messages,
+                        collected,
+                        collected,
+                    )
+                    batch_messages = []
+            if progress_callback and scanned % 100 == 0:
+                progress_callback(scanned, collected)
+        if batch_messages:
+            yield (
+                [item.id for item in batch_messages],
+                batch_messages,
+                collected,
+                collected,
+            )
+        return
+
+    ids = _collect_message_ids(
+        acc,
+        source_id,
+        spec,
+        progress_callback=progress_callback,
+        message_cache=collected_messages,
+    )
+    total = len(ids)
+    for chunk_start in range(0, total, BATCH_FETCH_CHUNK_SIZE):
+        chunk_ids = ids[chunk_start:chunk_start + BATCH_FETCH_CHUNK_SIZE]
+        fetched_messages = []
+        missing_ids = []
+        for message_id in chunk_ids:
+            cached_message = collected_messages.get(message_id)
+            if cached_message is not None:
+                fetched_messages.append(cached_message)
+            else:
+                missing_ids.append(message_id)
+        if missing_ids:
+            try:
+                batch_messages = _worker_execute(
+                    worker,
+                    "批量读取消息",
+                    lambda: acc.get_messages(source_id, missing_ids),
+                )
+                if not isinstance(batch_messages, list):
+                    batch_messages = [batch_messages]
+                fetched_messages.extend(batch_messages)
+            except Exception as exc:
+                if log is not None:
+                    log(
+                        f"批量读取消息失败，回退逐条读取: "
+                        f"{type(exc).__name__}: {exc}",
+                        level="warning",
+                    )
+                for message_id in missing_ids:
+                    try:
+                        fetched_messages.append(
+                            acc.get_messages(source_id, message_id)
+                        )
+                    except Exception:
+                        fetched_messages.append(None)
+        yield (
+            chunk_ids,
+            fetched_messages,
+            min(chunk_start + len(chunk_ids), total),
+            total,
+        )
+
+
 def _validate_task_spec(spec):
     if not spec.get("source") or not spec.get("target"):
         raise ValueError("source 和 target 不能为空")
@@ -926,6 +1014,19 @@ def _validate_task_spec(spec):
 
     relay_chat = str(spec.get("relay_chat") or spec.get("buffer_chat") or "").strip()
     spec["relay_chat"] = relay_chat or None
+
+    raw_rate_limit = spec.get("rate_limit_per_minute")
+    try:
+        rate_limit = int(
+            DEFAULT_RATE_LIMIT_PER_MINUTE
+            if raw_rate_limit is None
+            else raw_rate_limit
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("每分钟转发上限必须是整数") from exc
+    if rate_limit < 1 or rate_limit > 1000:
+        raise ValueError("每分钟转发上限必须在 1 到 1000 之间")
+    spec["rate_limit_per_minute"] = rate_limit
 
     _compile_regex_patterns(spec.get("exclude_regex"), "排除正则")
     _compile_regex_patterns(spec.get("remove_regex"), "删除正则")
@@ -2535,27 +2636,8 @@ def _run_batch_task(job_id, spec):
                     level="warning",
                 )
         publish_progress("collecting", scanned=0, collected=0)
-        log("正在收集消息范围")
+        streaming_time = str(spec.get("range_type") or "id") == "time"
         collected_messages = {}
-        ids = _collect_message_ids(
-            acc,
-            source_id,
-            spec,
-            progress_callback=lambda scanned, collected: publish_progress(
-                "collecting",
-                scanned=scanned,
-                collected=collected,
-            ),
-            message_cache=collected_messages,
-        )
-
-        total = len(ids)
-        if not _wait_until_task_active(job_id, log):
-            finish_cancelled()
-            return
-        publish_progress("preparing", total=total)
-        log(f"开始处理 {total} 条消息: {source_id} -> {dest_id}")
-
         forward_mode = str(spec.get("forward_mode", "clone")).lower()
         preserve_source = forward_mode == "direct"
         mode = {
@@ -2573,6 +2655,10 @@ def _run_batch_task(job_id, spec):
                 else "不使用 Bot 身份"
             )
         )
+        if streaming_time:
+            log("开始边扫描边批量转发；每收集 100 条消息即开始处理")
+        else:
+            log("正在收集消息范围")
         processed = success = failed = skipped = 0
         handled_ids = set()
         group_cache = {}
@@ -2581,61 +2667,76 @@ def _run_batch_task(job_id, spec):
         logged_quote_filter = False
         filter_signature = None
         filter_rules = None
+        rate_limit_value = spec.get("rate_limit_per_minute")
+        rate_limit_per_minute = (
+            int(rate_limit_value) if rate_limit_value is not None else 0
+        )
 
-        for chunk_start in range(0, total, BATCH_FETCH_CHUNK_SIZE):
-            chunk_ids = ids[chunk_start:chunk_start + BATCH_FETCH_CHUNK_SIZE]
+        def rate_progress(wait_seconds):
+            current = get_task(job_id).get("progress") or {}
+            publish_progress(
+                "rate_limit",
+                total=current.get("total", 0),
+                fetched=current.get("fetched", 0),
+                processed=current.get("processed", 0),
+                success=current.get("success", 0),
+                failed=current.get("failed", 0),
+                skipped=current.get("skipped", 0),
+                scanned=current.get("scanned", 0),
+                collected=current.get("collected", 0),
+                current_id=current.get("current_id"),
+                wait_seconds=round(wait_seconds),
+            )
+
+        rate_limiter = (
+            BatchRateLimiter(
+                rate_limit_per_minute,
+                log=log,
+                progress_callback=rate_progress,
+            )
+            if rate_limit_per_minute > 0
+            else None
+        )
+        total = 0
+        logged_total = False
+
+        for chunk_ids, fetched_messages, fetched_count, chunk_total in _iter_batch_chunks(
+            acc,
+            worker,
+            source_id,
+            spec,
+            collected_messages,
+            log=log,
+            progress_callback=lambda scanned, collected: publish_progress(
+                "collecting",
+                total=collected,
+                scanned=scanned,
+                collected=collected,
+            ),
+        ):
+            total = chunk_total
+            if not streaming_time and not logged_total:
+                log(f"开始处理 {total} 条消息: {source_id} -> {dest_id}")
+                logged_total = True
             if not _wait_until_task_active(job_id, log):
                 finish_cancelled()
                 return
 
             publish_progress(
-                "preparing",
+                "forwarding" if streaming_time else "preparing",
                 total=total,
-                fetched=chunk_start,
+                fetched=fetched_count,
                 processed=processed,
                 success=success,
                 failed=failed,
                 skipped=skipped,
                 current_id=chunk_ids[0] if chunk_ids else None,
             )
-            fetched_messages = []
-            missing_ids = []
-            for message_id in chunk_ids:
-                cached_message = collected_messages.get(message_id)
-                if cached_message is not None:
-                    fetched_messages.append(cached_message)
-                else:
-                    missing_ids.append(message_id)
-            if missing_ids:
-                try:
-                    batch_messages = _worker_execute(
-                        worker,
-                        "批量读取消息",
-                        lambda: acc.get_messages(source_id, missing_ids),
-                    )
-                    if not isinstance(batch_messages, list):
-                        batch_messages = [batch_messages]
-                    fetched_messages.extend(batch_messages)
-                except Exception as exc:
-                    log(
-                        f"批量读取消息失败，回退逐条读取: "
-                        f"{type(exc).__name__}: {exc}",
-                        level="warning",
-                    )
-                    for message_id in missing_ids:
-                        try:
-                            fetched_messages.append(
-                                acc.get_messages(source_id, message_id)
-                            )
-                        except Exception:
-                            fetched_messages.append(None)
-
             message_map = {
                 getattr(item, "id", None): item
                 for item in fetched_messages
                 if item is not None and not getattr(item, "empty", False)
             }
-            fetched_count = min(chunk_start + len(chunk_ids), total)
 
             for message_id in chunk_ids:
                 if not _wait_until_task_active(job_id, log):
@@ -2751,6 +2852,8 @@ def _run_batch_task(job_id, spec):
                         )
                         continue
 
+                    if rate_limiter is not None:
+                        rate_limiter.wait(1)
                     sent_count, used_fallback = _forward_batch_unit(
                         worker,
                         acc,
@@ -2885,6 +2988,7 @@ def submit_batch_task(spec):
         "startValue": spec.get("start") or "",
         "endValue": spec.get("end") or "",
         "forwardMode": spec.get("forward_mode") or "clone",
+        "rateLimitPerMinute": spec.get("rate_limit_per_minute"),
         "relayChat": spec.get("relay_chat") or "",
         "excludeKeywords": spec.get("exclude_keywords") or "",
         "excludeRegex": spec.get("exclude_regex") or "",

@@ -285,20 +285,13 @@ class BatchFilterTests(unittest.TestCase):
             [(-1002, 102, "")],
         )
 
-    def test_caption_verification_falls_back_to_post_send_edit(self):
+    def test_media_group_does_not_verify_or_edit_nonempty_captions(self):
         messages = [
             _FakeMessage(1, caption="原始第一条", media_group_id="group"),
             _FakeMessage(2, caption="原始第二条", media_group_id="group"),
         ]
 
-        class _WrongCaptionClient(_FakeClient):
-            def get_messages(self, _destination, message_ids):
-                return [
-                    SimpleNamespace(id=message_id, caption="原始文本")
-                    for message_id in message_ids
-                ]
-
-        client = _WrongCaptionClient()
+        client = _FakeClient()
         client.copy_result = [
             SimpleNamespace(id=101, caption="原始文本"),
             SimpleNamespace(id=102, caption="原始文本"),
@@ -314,13 +307,7 @@ class BatchFilterTests(unittest.TestCase):
             group_messages=messages,
         )
 
-        self.assertEqual(
-            client.edited_captions,
-            [
-                (-1002, 101, "过滤后第一条"),
-                (-1002, 102, "过滤后第二条"),
-            ],
-        )
+        self.assertEqual(client.edited_captions, [])
 
     def test_forwarded_group_uses_cleaned_caption_for_non_first_item(self):
         messages = [

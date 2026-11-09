@@ -838,6 +838,8 @@ function historySubtitle(item) {
   const parts = [range];
   if (item.sourceId) parts.push(`来源: ${item.sourceId}`);
   if (item.targetId) parts.push(`目标: ${item.targetId}`);
+  const rateLimit = state.rateLimitPerMinute ?? spec.rate_limit_per_minute;
+  if (rateLimit) parts.push(`速率: ${rateLimit}/分钟`);
   if (item.status) parts.push(item.status);
   if (item.createdAt) parts.push(`创建: ${formatHistoryCreatedAt(item.createdAt)}`);
   return parts.join(" · ");
@@ -872,6 +874,8 @@ function applyBatchSpecToForm(spec = {}, state = {}, options = {}) {
   }
   $("forwardMode").value =
     state.forwardMode || spec.forward_mode || "clone";
+  $("rateLimitPerMinute").value =
+    state.rateLimitPerMinute ?? spec.rate_limit_per_minute ?? 25;
   $("excludeKeywords").value =
     state.excludeKeywords ?? spec.exclude_keywords ?? "";
   $("excludeRegex").value =
@@ -1083,6 +1087,9 @@ function updateMonitor(data) {
   } else if (progress.phase === "forwarding") {
     phaseText =
       `正在转发 · ${progress.processed || 0}/${progress.total || 0}`;
+  } else if (progress.phase === "rate_limit") {
+    phaseText =
+      `等待速率限制 · 约 ${progress.wait_seconds || 0} 秒后继续`;
   } else if (data.status === "paused") {
     phaseText = "已暂停，当前消息完成后停止";
   } else if (data.status === "done") {
@@ -1254,6 +1261,7 @@ async function submitBatch(event) {
     start,
     end,
     forward_mode: $("forwardMode").value,
+    rate_limit_per_minute: Number($("rateLimitPerMinute").value || 25),
     reverse: $("descFlag").checked,
     exclude_keywords: $("excludeKeywords").value,
     exclude_regex: $("excludeRegex").value,
