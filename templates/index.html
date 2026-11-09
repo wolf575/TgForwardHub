@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>TG Forward Hub</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/merged.css') }}?v=20261109-stream-rate">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/merged.css') }}?v=20261109-independent-scan">
 </head>
 <body>
   <header class="topbar">
@@ -124,7 +124,7 @@
             <div class="monitor-head-tools">
               <select id="activeTaskSelect" hidden aria-label="正在执行的任务"></select>
               <button id="attachTaskBtn" class="secondary small" type="button" hidden>接管</button>
-              <button id="newTaskBtn" class="secondary small" type="button" hidden>新任务</button>
+              <button id="newTaskBtn" class="secondary small" type="button">新任务</button>
               <span id="jobId" class="muted"></span>
             </div>
           </div>
@@ -439,6 +439,6 @@
     </section>
   </main>
 
-  <script src="{{ url_for('static', filename='js/merged.js') }}?v=20261109-stream-rate"></script>
+  <script src="{{ url_for('static', filename='js/merged.js') }}?v=20261109-independent-scan"></script>
 </body>
 </html>

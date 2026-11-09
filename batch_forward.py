@@ -6,6 +6,7 @@ Pyrogram clients.
 """
 import json
 import os
+import queue
 import re
 import shutil
 import sqlite3
@@ -77,6 +78,7 @@ TASKS_LOCK = threading.Lock()
 BATCH_FETCH_CHUNK_SIZE = 100
 DEFAULT_RATE_LIMIT_PER_MINUTE = 25
 _EMPTY_CAPTION_SENTINEL = "\u2063"
+_BATCH_SCAN_END = object()
 BATCH_SYNC_TIMEOUT_SECONDS = float(
     os.environ.get("BATCH_SYNC_TIMEOUT_SECONDS", "120")
 )
@@ -90,6 +92,11 @@ BATCH_STALL_TIMEOUT_SECONDS = float(
 
 class BatchTaskStopped(Exception):
     """Raised when a paused/cancelled task must not start another send."""
+
+
+class _BatchScanFailure:
+    def __init__(self, error):
+        self.error = error
 
 
 class BatchRateLimiter:
@@ -891,6 +898,7 @@ def _iter_batch_chunks(
     collected_messages,
     log=None,
     progress_callback=None,
+    stop_event=None,
 ):
     """Yield sendable chunks; time ranges forward while history is scanned."""
     range_type = spec.get("range_type", "id")
@@ -904,31 +912,107 @@ def _iter_batch_chunks(
         if start_ts > end_ts:
             start_ts, end_ts = end_ts, start_ts
 
-        offset_date = datetime.fromtimestamp(end_ts, tz=timezone.utc)
-        history_kwargs = {"offset_date": offset_date}
-        if not reverse:
-            history_kwargs["reverse"] = True
-        try:
-            history = acc.get_chat_history(source_id, **history_kwargs)
-        except TypeError:
-            # Keep compatibility with lightweight test clients and older
-            # Pyrogram versions that do not expose ``reverse``.
-            history = acc.get_chat_history(source_id, offset_date=offset_date)
-
         batch_messages = []
         scanned = 0
         collected = 0
-        for message in history:
-            if message is None:
-                continue
-            scanned += 1
-            ts = message.date.timestamp()
-            if ts < start_ts:
+        seen_ids = set()
+
+        # Pyrofork reverses each page when ``reverse=True`` but still advances
+        # its offset with the last message after that reversal. That repeats
+        # the same page. Fetch one explicit page at a time and move the cursor
+        # with Telegram's monotonic ID rules instead.
+        offset_id = 0
+        if reverse:
+            offset_date = datetime.fromtimestamp(end_ts + 1, tz=timezone.utc)
+            page_offset = 0
+            page_reverse = False
+        else:
+            offset_date = datetime.fromtimestamp(
+                max(0, start_ts - 1),
+                tz=timezone.utc,
+            )
+            page_offset = -BATCH_FETCH_CHUNK_SIZE
+            page_reverse = True
+
+        while stop_event is None or not stop_event.is_set():
+            kwargs = {
+                "limit": BATCH_FETCH_CHUNK_SIZE,
+                "offset_id": offset_id,
+                "offset_date": offset_date,
+            }
+            if page_offset:
+                kwargs["offset"] = page_offset
+            if page_reverse:
+                kwargs["reverse"] = True
+            try:
+                page = list(acc.get_chat_history(source_id, **kwargs) or [])
+            except TypeError:
+                # Pyrofork 2.3.x supports reverse pagination. This fallback
+                # only covers lightweight/older clients and still advances the
+                # cursor so a page cannot be replayed indefinitely.
+                kwargs.pop("offset", None)
+                kwargs.pop("reverse", None)
+                page = list(
+                    acc.get_chat_history(
+                        source_id,
+                        limit=BATCH_FETCH_CHUNK_SIZE,
+                        offset_id=offset_id,
+                        offset_date=offset_date,
+                    )
+                    or []
+                )
+
+            page = [message for message in page if message is not None]
+            if not page:
                 break
-            if ts <= end_ts:
+
+            page_ids = [
+                getattr(message, "id", None)
+                for message in page
+                if getattr(message, "id", None) is not None
+            ]
+            new_page_ids = [
+                message_id
+                for message_id in page_ids
+                if message_id not in seen_ids
+            ]
+            if page_ids and not new_page_ids:
+                if log is not None:
+                    log(
+                        "消息历史分页返回了重复内容，已停止继续扫描以避免重复转发",
+                        level="warning",
+                    )
+                break
+
+            scanned += len(new_page_ids)
+            reached_boundary = False
+            for message in page:
+                if stop_event is not None and stop_event.is_set():
+                    return
+                message_id = getattr(message, "id", None)
+                message_date = getattr(message, "date", None)
+                if message_id is None or message_date is None:
+                    continue
+                if message_id in seen_ids:
+                    continue
+                ts = message_date.timestamp()
+                if reverse:
+                    if ts < start_ts:
+                        reached_boundary = True
+                        break
+                    if ts > end_ts:
+                        continue
+                else:
+                    if ts < start_ts:
+                        continue
+                    if ts > end_ts:
+                        reached_boundary = True
+                        break
+
+                seen_ids.add(message_id)
                 collected += 1
                 if _message_primary_text(message) or _message_filter_texts(message):
-                    collected_messages[message.id] = message
+                    collected_messages[message_id] = message
                 batch_messages.append(message)
                 if len(batch_messages) >= BATCH_FETCH_CHUNK_SIZE:
                     if progress_callback:
@@ -941,8 +1025,33 @@ def _iter_batch_chunks(
                         scanned,
                     )
                     batch_messages = []
-            if progress_callback and scanned % 100 == 0:
+
+            if progress_callback:
                 progress_callback(scanned, collected)
+            if reached_boundary:
+                break
+
+            cursor_messages = [
+                message
+                for message in page
+                if getattr(message, "id", None) is not None
+                and getattr(message, "date", None) is not None
+            ]
+            if not cursor_messages:
+                break
+            ordered_page = sorted(cursor_messages, key=lambda item: item.id)
+            if reverse:
+                next_offset_id = ordered_page[0].id
+                if offset_id and next_offset_id >= offset_id:
+                    break
+                offset_date = ordered_page[0].date
+            else:
+                next_offset_id = ordered_page[-1].id + 1
+                if offset_id and next_offset_id <= offset_id:
+                    break
+                offset_date = ordered_page[-1].date
+            offset_id = next_offset_id
+
         if batch_messages:
             yield (
                 [item.id for item in batch_messages],
@@ -962,6 +1071,8 @@ def _iter_batch_chunks(
     )
     total = len(ids)
     for chunk_start in range(0, total, BATCH_FETCH_CHUNK_SIZE):
+        if stop_event is not None and stop_event.is_set():
+            return
         chunk_ids = ids[chunk_start:chunk_start + BATCH_FETCH_CHUNK_SIZE]
         fetched_messages = []
         missing_ids = []
@@ -1002,6 +1113,70 @@ def _iter_batch_chunks(
             total,
             min(chunk_start + len(chunk_ids), total),
         )
+
+
+def _start_batch_scan(
+    acc,
+    worker,
+    source_id,
+    spec,
+    collected_messages,
+    stop_event,
+    log=None,
+    progress_callback=None,
+    complete_callback=None,
+):
+    """Run history scanning independently from the forwarding consumer."""
+    scan_queue = queue.Queue()
+
+    def scan():
+        try:
+            for chunk in _iter_batch_chunks(
+                acc,
+                worker,
+                source_id,
+                spec,
+                collected_messages,
+                log=log,
+                progress_callback=progress_callback,
+                stop_event=stop_event,
+            ):
+                if stop_event.is_set():
+                    break
+                scan_queue.put(chunk)
+            if not stop_event.is_set() and complete_callback is not None:
+                complete_callback()
+        except Exception as exc:
+            if not stop_event.is_set():
+                scan_queue.put(_BatchScanFailure(exc))
+        finally:
+            scan_queue.put(_BATCH_SCAN_END)
+
+    thread = threading.Thread(
+        target=scan,
+        daemon=True,
+        name="BatchScanner",
+    )
+    thread.start()
+    return scan_queue, thread
+
+
+def _iter_scanned_chunks(scan_queue, stop_event=None, should_stop=None):
+    while True:
+        try:
+            item = scan_queue.get(timeout=0.5)
+        except queue.Empty:
+            if (
+                (stop_event is not None and stop_event.is_set())
+                or (should_stop is not None and should_stop())
+            ):
+                return
+            continue
+        if item is _BATCH_SCAN_END:
+            return
+        if isinstance(item, _BatchScanFailure):
+            raise item.error
+        yield item
 
 
 def _validate_task_spec(spec):
@@ -2444,17 +2619,23 @@ def _run_batch_task(job_id, spec):
     flood_wait_until = [0.0]
     stream_state = {
         "enabled": False,
+        "scanning": False,
+        "scan_complete": False,
         "scanned": 0,
         "collected": 0,
     }
+    persist_lock = threading.Lock()
+    scan_stop_event = threading.Event()
+    scan_thread = None
 
     def persist(force=False):
         nonlocal last_persist
-        now = time.monotonic()
-        last_activity[0] = now
-        if force or now - last_persist >= 1.0:
-            _persist_task_history(job_id)
-            last_persist = now
+        with persist_lock:
+            now = time.monotonic()
+            last_activity[0] = now
+            if force or now - last_persist >= 1.0:
+                _persist_task_history(job_id)
+                last_persist = now
 
     def log(message, level="info"):
         last_activity[0] = time.monotonic()
@@ -2537,6 +2718,15 @@ def _run_batch_task(job_id, spec):
             "wait_seconds": int(values.get("wait_seconds") or 0),
             "stalled_seconds": int(values.get("stalled_seconds") or 0),
             "streaming": bool(stream_state["enabled"]),
+            "scanning": bool(stream_state["scanning"]),
+            "scan_complete": bool(stream_state["scan_complete"]),
+            "pending": max(
+                0,
+                int(
+                    values.get("collected", stream_state["collected"]) or 0
+                )
+                - processed,
+            ),
         }
         _update_task(job_id, progress=progress)
         persist()
@@ -2657,6 +2847,8 @@ def _run_batch_task(job_id, spec):
         publish_progress("collecting", scanned=0, collected=0)
         streaming_time = str(spec.get("range_type") or "id") == "time"
         stream_state["enabled"] = streaming_time
+        stream_state["scanning"] = streaming_time
+        stream_state["scan_complete"] = not streaming_time
         collected_messages = {}
         forward_mode = str(spec.get("forward_mode", "clone")).lower()
         preserve_source = forward_mode == "direct"
@@ -2721,15 +2913,58 @@ def _run_batch_task(job_id, spec):
         stream_total = 0
         logged_total = False
 
-        def stream_progress(scanned, collected):
+        def update_scan_progress(scanned, collected):
             stream_state["scanned"] = scanned
             stream_state["collected"] = collected
-            return publish_progress(
-                "collecting",
-                total=0 if streaming_time else collected,
-                scanned=scanned,
-                collected=collected,
+            current = dict(get_task(job_id).get("progress") or {})
+            current.update(
+                {
+                    "scanned": scanned,
+                    "collected": collected,
+                    "streaming": streaming_time,
+                    "scanning": stream_state["scanning"],
+                    "scan_complete": stream_state["scan_complete"],
+                    "pending": max(
+                        0,
+                        collected - int(current.get("processed") or 0),
+                    ),
+                }
             )
+            _update_task(job_id, progress=current)
+            persist()
+
+        def mark_scan_complete():
+            stream_state["scanning"] = False
+            stream_state["scan_complete"] = True
+            current = dict(get_task(job_id).get("progress") or {})
+            current.update(
+                {
+                    "scanned": stream_state["scanned"],
+                    "collected": stream_state["collected"],
+                    "streaming": streaming_time,
+                    "scanning": False,
+                    "scan_complete": True,
+                    "pending": max(
+                        0,
+                        stream_state["collected"]
+                        - int(current.get("processed") or 0),
+                    ),
+                }
+            )
+            _update_task(job_id, progress=current)
+            persist(force=True)
+
+        scan_queue, scan_thread = _start_batch_scan(
+            acc,
+            worker,
+            source_id,
+            spec,
+            collected_messages,
+            scan_stop_event,
+            log=log,
+            progress_callback=update_scan_progress,
+            complete_callback=mark_scan_complete,
+        )
 
         for (
             chunk_ids,
@@ -2737,14 +2972,10 @@ def _run_batch_task(job_id, spec):
             fetched_count,
             chunk_total,
             chunk_scanned,
-        ) in _iter_batch_chunks(
-            acc,
-            worker,
-            source_id,
-            spec,
-            collected_messages,
-            log=log,
-            progress_callback=stream_progress,
+        ) in _iter_scanned_chunks(
+            scan_queue,
+            stop_event=scan_stop_event,
+            should_stop=lambda: bool(get_task(job_id).get("cancelled")),
         ):
             stream_state["scanned"] = chunk_scanned
             stream_state["collected"] = chunk_total
@@ -2953,6 +3184,7 @@ def _run_batch_task(job_id, spec):
         if streaming_time:
             total = stream_total
             stream_state["enabled"] = False
+            stream_state["scanning"] = False
 
         if get_task(job_id).get("cancelled"):
             finish_cancelled()
@@ -3014,6 +3246,9 @@ def _run_batch_task(job_id, spec):
             exc,
         )
     finally:
+        scan_stop_event.set()
+        if scan_thread is not None and scan_thread.is_alive():
+            scan_thread.join(timeout=2)
         _update_task(job_id, active=False)
 
 

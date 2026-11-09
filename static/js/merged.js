@@ -853,16 +853,16 @@ function formatHistoryCreatedAt(value) {
 
 function applyBatchSpecToForm(spec = {}, state = {}, options = {}) {
   const rangeType = state.rangeType || spec.range_type || "id";
-  const startValue = state.startValue || spec.start || "";
-  const endValue = state.endValue || spec.end || "";
+  const startValue = state.startValue ?? spec.start ?? "";
+  const endValue = state.endValue ?? spec.end ?? "";
   $("taskName").value =
-    state.taskName || spec.task_name || $("taskName").value || "";
+    state.taskName ?? spec.task_name ?? "";
   $("sourceId").value =
-    state.sourceId || spec.source || $("sourceId").value || "";
+    state.sourceId ?? spec.source ?? "";
   $("targetId").value =
-    state.targetId || spec.target || $("targetId").value || "";
+    state.targetId ?? spec.target ?? "";
   $("relayChat").value =
-    state.relayChat || spec.relay_chat || $("relayChat").value || "";
+    state.relayChat ?? spec.relay_chat ?? "";
   $("rangeType").value = rangeType;
   if (rangeType === "time" && options.renewTime) {
     const renewed = renewedTimeRange({ startValue, endValue });
@@ -873,7 +873,7 @@ function applyBatchSpecToForm(spec = {}, state = {}, options = {}) {
     $("endValue").value = endValue;
   }
   $("forwardMode").value =
-    state.forwardMode || spec.forward_mode || "clone";
+    state.forwardMode ?? spec.forward_mode ?? "clone";
   $("rateLimitPerMinute").value =
     state.rateLimitPerMinute ?? spec.rate_limit_per_minute ?? 25;
   $("excludeKeywords").value =
@@ -970,6 +970,7 @@ async function loadHistory() {
 }
 
 let pollingTimer = null;
+let batchViewToken = 0;
 let currentBatchJobId = "";
 let currentBatchStatus = "";
 let ruleSyncTimer = null;
@@ -1087,9 +1088,13 @@ function updateMonitor(data) {
       `准备消息批次 · ${progress.fetched || 0}/${progress.total || 0}`;
   } else if (progress.phase === "forwarding") {
     phaseText = progress.streaming
-      ? `边扫描边转发 · 已处理 ${progress.processed || 0} · 已发现 ${
-          progress.collected || 0
-        }`
+      ? progress.scan_complete
+        ? `边扫描边转发 · 已处理 ${progress.processed || 0} · 扫描完成 ${
+            progress.collected || 0
+          } 条`
+        : `边扫描边转发 · 已处理 ${progress.processed || 0} · 已扫描 ${
+            progress.scanned || 0
+          } · 待处理 ${progress.pending || 0}`
       : `正在转发 · ${progress.processed || 0}/${progress.total || 0}`;
   } else if (progress.phase === "rate_limit") {
     phaseText =
@@ -1116,9 +1121,11 @@ function updateMonitor(data) {
 }
 
 async function pollBatch(jobId) {
+  const viewToken = batchViewToken;
   if (pollingTimer) clearTimeout(pollingTimer);
   try {
     const data = await apiFetch(`/api/batch-forward/${jobId}`);
+    if (viewToken !== batchViewToken) return;
     updateMonitor(data);
     if (["done", "error", "cancelled", "interrupted"].includes(data.status)) {
       localStorage.removeItem(BATCH_JOB_KEY);
@@ -1131,6 +1138,7 @@ async function pollBatch(jobId) {
     }
     localStorage.setItem(BATCH_JOB_KEY, jobId);
   } catch (error) {
+    if (viewToken !== batchViewToken) return;
     if (/job not found|HTTP 404/.test(error.message)) {
       localStorage.removeItem(BATCH_JOB_KEY);
       refreshActiveTaskList({ quiet: true });
@@ -1159,7 +1167,7 @@ async function refreshActiveTaskList(options = {}) {
     const hasTasks = tasks.length > 0;
     select.hidden = !hasTasks;
     attachButton.hidden = !hasTasks;
-    newButton.hidden = !hasTasks;
+    newButton.hidden = false;
     if (hasTasks && tasks.some((task) => task.jobId === selected)) {
       select.value = selected;
     }
@@ -1168,7 +1176,7 @@ async function refreshActiveTaskList(options = {}) {
   } catch (error) {
     select.hidden = true;
     attachButton.hidden = true;
-    newButton.hidden = true;
+    newButton.hidden = false;
     if (!quiet) {
       setMessage("batchMessage", `任务列表读取失败：${error.message}`);
     }
@@ -1182,6 +1190,7 @@ async function attachBatchTask(jobId, message = "") {
     clearTimeout(pollingTimer);
     pollingTimer = null;
   }
+  batchViewToken += 1;
   try {
     const data = await apiFetch(`/api/batch-forward/${jobId}`);
     updateMonitor(data);
@@ -1203,11 +1212,35 @@ async function attachBatchTask(jobId, message = "") {
   }
 }
 
+function resetBatchForm() {
+  $("batchForm").reset();
+  $("rangeType").value = "id";
+  $("forwardMode").value = "clone";
+  $("rateLimitPerMinute").value = "25";
+  $("descFlag").checked = false;
+  [
+    "taskName",
+    "sourceId",
+    "targetId",
+    "relayChat",
+    "startValue",
+    "endValue",
+    "excludeKeywords",
+    "excludeRegex",
+    "removeKeywords",
+    "removeRegex",
+  ].forEach((id) => {
+    $(id).value = "";
+  });
+  updateRangeUI({ preserveValues: true });
+}
+
 function startNewBatchTask() {
   if (pollingTimer) {
     clearTimeout(pollingTimer);
     pollingTimer = null;
   }
+  batchViewToken += 1;
   currentBatchJobId = "";
   currentBatchStatus = "";
   localStorage.removeItem(BATCH_JOB_KEY);
@@ -1225,6 +1258,7 @@ function startNewBatchTask() {
   $("pauseBtn").hidden = true;
   $("resumeBtn").hidden = true;
   $("cancelBtn").hidden = true;
+  resetBatchForm();
   setMessage("batchMessage", "已切换为新任务模式，原任务仍在后台执行");
 }
 
@@ -1251,6 +1285,10 @@ async function submitBatch(event) {
   const rangeType = $("rangeType").value;
   let start = $("startValue").value.trim();
   let end = $("endValue").value.trim();
+  if (!start || !end) {
+    setMessage("batchMessage", "请填写完整的开始和结束范围");
+    return;
+  }
   if (rangeType === "time") {
     start = dateStringToMidnightTimestamp(start);
     end = dateStringToEndOfDayTimestamp(end);
@@ -1278,6 +1316,11 @@ async function submitBatch(event) {
       method: "POST",
       body: JSON.stringify(spec),
     });
+    if (pollingTimer) {
+      clearTimeout(pollingTimer);
+      pollingTimer = null;
+    }
+    batchViewToken += 1;
     localStorage.setItem(BATCH_JOB_KEY, result.jobId);
     updateMonitor({
       jobId: result.jobId,

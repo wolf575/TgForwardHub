@@ -110,6 +110,10 @@ test("active task controls support cross-device attach and new tasks", () => {
   assert.match(source, /renderNotifyConfigFields/);
   assert.match(source, /attachTaskBtn"\)\.addEventListener/);
   assert.match(source, /newTaskBtn"\)\.addEventListener/);
+  assert.match(source, /function resetBatchForm\(\)/);
+  assert.match(source, /resetBatchForm\(\);/);
+  assert.match(source, /"excludeRegex",\s*"removeKeywords",\s*"removeRegex"/);
+  assert.match(source, /state\.taskName \?\? spec\.task_name \?\? ""/);
   assert.match(
     source,
     /setInterval\(\(\) => refreshActiveTaskList\(\{ quiet: true \}\), 3000\)/,
