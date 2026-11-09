@@ -101,6 +101,7 @@ test("active task controls support cross-device attach and new tasks", () => {
   assert.match(template, /id="activeTaskSelect"/);
   assert.match(template, /id="attachTaskBtn"/);
   assert.match(template, /id="newTaskBtn"/);
+  assert.match(template, /id="saveBatchConfigBtn"/);
   assert.match(template, /id="notifyConfigFields"/);
   assert.match(template, /id="clientBatchNotificationsEnabled"/);
   assert.match(template, /id="botNotificationTestBtn"/);
@@ -110,6 +111,12 @@ test("active task controls support cross-device attach and new tasks", () => {
   assert.match(source, /renderNotifyConfigFields/);
   assert.match(source, /attachTaskBtn"\)\.addEventListener/);
   assert.match(source, /newTaskBtn"\)\.addEventListener/);
+  assert.match(source, /saveBatchConfigBtn"\)\.addEventListener/);
+  assert.match(source, /\/api\/batch-forward\/\$\{currentBatchJobId\}\/config/);
+  assert.match(source, /BATCH_CONFIG_STORAGE_KEY/);
+  assert.match(source, /let statusLoadBusy = false/);
+  assert.match(source, /let activeTaskListBusy = false/);
+  assert.match(source, /let batchSubmitBusy = false/);
   assert.match(source, /function resetBatchForm\(\)/);
   assert.match(source, /resetBatchForm\(\);/);
   assert.match(source, /const viewToken = \+\+batchViewToken/);
@@ -118,6 +125,7 @@ test("active task controls support cross-device attach and new tasks", () => {
   assert.match(source, /state\.taskName \?\? spec\.task_name \?\? ""/);
   assert.match(
     source,
-    /setInterval\(\(\) => refreshActiveTaskList\(\{ quiet: true \}\), 3000\)/,
+    /setInterval\(\(\) => refreshActiveTaskList\(\{ quiet: true \}\), 5000\)/,
   );
+  assert.doesNotMatch(source, /scheduleBatchRuleSync/);
 });

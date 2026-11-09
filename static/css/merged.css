@@ -271,6 +271,15 @@ textarea {
   gap: 12px;
 }
 
+.field-action {
+  display: flex;
+  align-items: end;
+}
+
+.field-action button {
+  width: 100%;
+}
+
 .check {
   display: flex;
   align-items: center;

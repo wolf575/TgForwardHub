@@ -781,9 +781,13 @@ function switchTab(tabId) {
   });
 }
 
+let statusLoadBusy = false;
+
 async function loadStatus() {
+  if (statusLoadBusy) return;
+  statusLoadBusy = true;
   try {
-    const status = await apiFetch("/api/status");
+    const status = await apiFetch("/api/status", { timeout: 30000 });
     const clientPill = $("clientStatus");
     clientPill.textContent = status.user_client_running
       ? "用户客户端已连接"
@@ -818,8 +822,12 @@ async function loadStatus() {
         : "未连接";
     $("statusMonitors").textContent = status.monitored_sources_count ?? 0;
   } catch (error) {
-    $("clientStatus").textContent = "状态读取失败";
-    $("dualStatus").textContent = "状态读取失败";
+    if ($("clientStatus").textContent === "连接检查中...") {
+      $("clientStatus").textContent = "状态暂时不可用";
+      $("dualStatus").textContent = "状态暂时不可用";
+    }
+  } finally {
+    statusLoadBusy = false;
   }
 }
 
@@ -971,28 +979,31 @@ async function loadHistory() {
 
 let pollingTimer = null;
 let batchViewToken = 0;
+let activeTaskListBusy = false;
+let batchSubmitBusy = false;
 let currentBatchJobId = "";
 let currentBatchStatus = "";
-let ruleSyncTimer = null;
-let ruleSyncBusy = false;
-let ruleSyncPending = false;
+let batchConfigSaveBusy = false;
 let notifyConfigKeys = [];
 let notifyConfigExtra = {};
 
-const BATCH_RULE_FIELDS = {
+const BATCH_CONFIG_STORAGE_KEY = "tg_forward_hub_batch_config";
+const BATCH_CONFIG_FIELDS = {
   excludeKeywords: "exclude_keywords",
   excludeRegex: "exclude_regex",
   removeKeywords: "remove_keywords",
   removeRegex: "remove_regex",
+  rateLimitPerMinute: "rate_limit_per_minute",
 };
 
-function batchRulePatch() {
-  return Object.fromEntries(
-    Object.entries(BATCH_RULE_FIELDS).map(([inputId, field]) => [
-      field,
-      $(inputId).value,
-    ])
+function batchConfigPatch() {
+  const patch = Object.fromEntries(
+    Object.entries(BATCH_CONFIG_FIELDS)
+      .filter(([inputId]) => inputId !== "rateLimitPerMinute")
+      .map(([inputId, field]) => [field, $(inputId).value])
   );
+  patch.rate_limit_per_minute = Number($("rateLimitPerMinute").value || 25);
+  return patch;
 }
 
 function batchTaskIsActive() {
@@ -1002,39 +1013,63 @@ function batchTaskIsActive() {
   );
 }
 
-function scheduleBatchRuleSync() {
-  if (!batchTaskIsActive()) return;
-  if (ruleSyncTimer) clearTimeout(ruleSyncTimer);
-  ruleSyncTimer = setTimeout(syncBatchRules, 600);
+function persistBatchConfigDefaults(patch) {
+  try {
+    localStorage.setItem(BATCH_CONFIG_STORAGE_KEY, JSON.stringify(patch));
+  } catch (_) {}
 }
 
-async function syncBatchRules() {
-  ruleSyncTimer = null;
-  if (!batchTaskIsActive()) return;
-  if (ruleSyncBusy) {
-    ruleSyncPending = true;
+function applySavedBatchConfig() {
+  let saved = null;
+  try {
+    saved = JSON.parse(localStorage.getItem(BATCH_CONFIG_STORAGE_KEY) || "null");
+  } catch (_) {
+    saved = null;
+  }
+  if (!saved || typeof saved !== "object") return;
+  for (const [inputId, field] of Object.entries(BATCH_CONFIG_FIELDS)) {
+    if (saved[field] !== undefined) {
+      $(inputId).value = saved[field];
+    }
+  }
+}
+
+async function saveBatchConfig() {
+  if (batchConfigSaveBusy) return;
+  const patch = batchConfigPatch();
+  if (
+    !Number.isInteger(patch.rate_limit_per_minute) ||
+    patch.rate_limit_per_minute < 1 ||
+    patch.rate_limit_per_minute > 1000
+  ) {
+    setMessage("batchMessage", "每分钟转发上限必须是 1 到 1000 的整数");
     return;
   }
 
-  ruleSyncBusy = true;
+  persistBatchConfigDefaults(patch);
+  if (!batchTaskIsActive()) {
+    setMessage("batchMessage", "配置已保存，将在下一次任务中生效");
+    return;
+  }
+
+  batchConfigSaveBusy = true;
+  const button = $("saveBatchConfigBtn");
+  button.disabled = true;
   try {
-    do {
-      ruleSyncPending = false;
-      const jobId = currentBatchJobId;
-      if (!jobId || !["running", "paused"].includes(currentBatchStatus)) break;
-      try {
-        await apiFetch(`/api/batch-forward/${jobId}/rules`, {
-          method: "PATCH",
-          body: JSON.stringify(batchRulePatch()),
-          timeout: 10000,
-        });
-        setMessage("batchMessage", "运行规则已更新，将从下一条消息生效");
-      } catch (error) {
-        setMessage("batchMessage", `规则未更新：${error.message}`);
-      }
-    } while (ruleSyncPending);
+    await apiFetch(`/api/batch-forward/${currentBatchJobId}/config`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+      timeout: 15000,
+    });
+    setMessage(
+      "batchMessage",
+      "配置已实时生效：过滤规则和每分钟上限将从下一条消息应用"
+    );
+  } catch (error) {
+    setMessage("batchMessage", `配置未生效：${error.message}`);
   } finally {
-    ruleSyncBusy = false;
+    batchConfigSaveBusy = false;
+    button.disabled = false;
   }
 }
 
@@ -1114,17 +1149,15 @@ function updateMonitor(data) {
   $("pauseBtn").hidden = data.status !== "running";
   $("resumeBtn").hidden = data.status !== "paused";
   $("cancelBtn").hidden = !["running", "paused"].includes(data.status);
-  if (!["running", "paused"].includes(data.status) && ruleSyncTimer) {
-    clearTimeout(ruleSyncTimer);
-    ruleSyncTimer = null;
-  }
 }
 
 async function pollBatch(jobId) {
   const viewToken = batchViewToken;
   if (pollingTimer) clearTimeout(pollingTimer);
   try {
-    const data = await apiFetch(`/api/batch-forward/${jobId}`);
+    const data = await apiFetch(`/api/batch-forward/${jobId}`, {
+      timeout: 15000,
+    });
     if (viewToken !== batchViewToken) return;
     updateMonitor(data);
     if (["done", "error", "cancelled", "interrupted"].includes(data.status)) {
@@ -1145,7 +1178,7 @@ async function pollBatch(jobId) {
     }
     setMessage("batchMessage", error.message);
   }
-  pollingTimer = setTimeout(() => pollBatch(jobId), 800);
+  pollingTimer = setTimeout(() => pollBatch(jobId), 1200);
 }
 
 async function refreshActiveTaskList(options = {}) {
@@ -1153,8 +1186,10 @@ async function refreshActiveTaskList(options = {}) {
   const select = $("activeTaskSelect");
   const attachButton = $("attachTaskBtn");
   const newButton = $("newTaskBtn");
+  if (activeTaskListBusy) return null;
+  activeTaskListBusy = true;
   try {
-    const tasks = await apiFetch("/api/batch-forward/active", { timeout: 10000 });
+    const tasks = await apiFetch("/api/batch-forward/active", { timeout: 30000 });
     const selected = currentBatchJobId || select.value;
     select.textContent = "";
     for (const task of tasks) {
@@ -1174,13 +1209,13 @@ async function refreshActiveTaskList(options = {}) {
     attachButton.disabled = !hasTasks;
     return tasks;
   } catch (error) {
-    select.hidden = true;
-    attachButton.hidden = true;
     newButton.hidden = false;
     if (!quiet) {
       setMessage("batchMessage", `任务列表读取失败：${error.message}`);
     }
     return null;
+  } finally {
+    activeTaskListBusy = false;
   }
 }
 
@@ -1235,6 +1270,7 @@ function resetBatchForm() {
     $(id).value = "";
   });
   updateRangeUI({ preserveValues: true });
+  applySavedBatchConfig();
 }
 
 function startNewBatchTask() {
@@ -1279,6 +1315,7 @@ async function restoreBatchTask() {
 
 async function submitBatch(event) {
   event.preventDefault();
+  if (batchSubmitBusy) return;
   setMessage("batchMessage", "");
   const viewToken = batchViewToken;
   $("pauseBtn").hidden = true;
@@ -1314,6 +1351,10 @@ async function submitBatch(event) {
     remove_regex: $("removeRegex").value,
   };
 
+  batchSubmitBusy = true;
+  const submitButton =
+    event.submitter || $("batchForm").querySelector('button[type="submit"]');
+  if (submitButton) submitButton.disabled = true;
   try {
     const result = await apiFetch("/api/batch-forward", {
       method: "POST",
@@ -1345,6 +1386,9 @@ async function submitBatch(event) {
     refreshActiveTaskList({ quiet: true });
   } catch (error) {
     setMessage("batchMessage", error.message);
+  } finally {
+    batchSubmitBusy = false;
+    if (submitButton) submitButton.disabled = false;
   }
 }
 
@@ -1700,9 +1744,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   $("batchForm").addEventListener("submit", submitBatch);
   $("rangeType").addEventListener("change", () => updateRangeUI());
-  Object.keys(BATCH_RULE_FIELDS).forEach((id) => {
-    $(id).addEventListener("input", scheduleBatchRuleSync);
-  });
+  $("saveBatchConfigBtn").addEventListener("click", saveBatchConfig);
   $("setupForm").addEventListener("submit", (event) => {
     event.preventDefault();
     if (setupState.busy) return;
@@ -1759,6 +1801,7 @@ document.addEventListener("DOMContentLoaded", () => {
   loadSetupState();
   loadAppSettings();
   updateRangeUI();
+  applySavedBatchConfig();
   restoreBatchTask();
   loadWebdavConfig();
   loadCalibrationConfig();
@@ -1766,6 +1809,6 @@ document.addEventListener("DOMContentLoaded", () => {
   loadHistory();
   loadWatchConfig();
   loadNotes();
-  setInterval(loadStatus, 3000);
-  setInterval(() => refreshActiveTaskList({ quiet: true }), 3000);
+  setInterval(loadStatus, 5000);
+  setInterval(() => refreshActiveTaskList({ quiet: true }), 5000);
 });

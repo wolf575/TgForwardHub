@@ -7,6 +7,7 @@ Pyrogram clients.
 import json
 import os
 import queue
+import random
 import re
 import shutil
 import sqlite3
@@ -74,7 +75,7 @@ DOWNLOADABLE_MEDIA_TYPES = {
 }
 
 TASKS = {}
-TASKS_LOCK = threading.Lock()
+TASKS_LOCK = threading.RLock()
 BATCH_FETCH_CHUNK_SIZE = 100
 DEFAULT_RATE_LIMIT_PER_MINUTE = 25
 _EMPTY_CAPTION_SENTINEL = "\u2063"
@@ -99,37 +100,129 @@ class _BatchScanFailure:
         self.error = error
 
 
-class BatchRateLimiter:
-    """Rolling one-minute limiter for batch send units."""
+def _normalize_rate_limit(value):
+    try:
+        limit = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("每分钟转发上限必须是整数") from exc
+    if limit < 1 or limit > 1000:
+        raise ValueError("每分钟转发上限必须在 1 到 1000 之间")
+    return limit
 
-    def __init__(self, limit_per_minute, log=None, progress_callback=None):
-        self.limit_per_minute = max(1, int(limit_per_minute))
+
+class BatchRateLimiter:
+    """Rolling limiter with live limits and per-send random jitter."""
+
+    def __init__(
+        self,
+        limit_per_minute,
+        log=None,
+        progress_callback=None,
+        jitter_ratio=0.2,
+        random_source=None,
+    ):
+        self._lock = threading.Lock()
+        self._limit = _normalize_rate_limit(limit_per_minute)
         self.log = log
         self.progress_callback = progress_callback
+        self.jitter_ratio = max(0.0, min(0.8, float(jitter_ratio)))
+        self.random_source = random_source or random.SystemRandom()
         self.sent_at = deque()
+        self._last_sent_at = None
 
-    def wait(self, units=1):
+    @property
+    def limit_per_minute(self):
+        with self._lock:
+            return self._limit
+
+    def set_limit(self, limit_per_minute):
+        new_limit = _normalize_rate_limit(limit_per_minute)
+        with self._lock:
+            changed = new_limit != self._limit
+            self._limit = new_limit
+        if changed and self.log is not None:
+            self.log(f"每分钟转发上限已实时更新为 {new_limit} 个发送单元")
+        return changed
+
+    def _jitter_interval_locked(self):
+        base_interval = 60.0 / self._limit
+        return max(
+            0.05,
+            base_interval
+            * self.random_source.uniform(
+                1.0 - self.jitter_ratio,
+                1.0 + self.jitter_ratio,
+            ),
+        )
+
+    def wait(self, units=1, wait_for_active=None):
         units = max(1, int(units))
+        jitter_interval = None
+        jitter_limit = None
+        logged_wait = False
+
         while True:
-            now = time.monotonic()
-            while self.sent_at and now - self.sent_at[0] >= 60:
-                self.sent_at.popleft()
-            if len(self.sent_at) + units <= self.limit_per_minute:
-                self.sent_at.extend([now] * units)
-                return
-            wait_seconds = max(
-                0.1,
-                60 - (now - self.sent_at[0]) + 0.05,
-            )
-            if self.progress_callback is not None:
+            if wait_for_active is not None and not wait_for_active():
+                raise BatchTaskStopped()
+
+            with self._lock:
+                now = time.monotonic()
+                while self.sent_at and now - self.sent_at[0] >= 60:
+                    self.sent_at.popleft()
+
+                if units > self._limit:
+                    raise ValueError(
+                        "单次发送单元数不能超过每分钟转发上限"
+                    )
+                if jitter_limit != self._limit:
+                    jitter_interval = self._jitter_interval_locked()
+                    jitter_limit = self._limit
+
+                spacing_wait = 0.0
+                if self._last_sent_at is not None:
+                    spacing_wait = max(
+                        0.0,
+                        self._last_sent_at + jitter_interval - now,
+                    )
+
+                remove_count = len(self.sent_at) + units - self._limit
+                window_wait = 0.0
+                if remove_count > 0:
+                    window_wait = max(
+                        0.0,
+                        self.sent_at[remove_count - 1] + 60 - now + 0.05,
+                    )
+
+                wait_seconds = max(spacing_wait, window_wait)
+                if wait_seconds <= 0.001:
+                    self.sent_at.extend([now] * units)
+                    self._last_sent_at = now
+                    return
+
+                limit_snapshot = self._limit
+                base_interval = 60.0 / limit_snapshot
+
+            if (
+                self.progress_callback is not None
+                and wait_seconds >= 0.25
+            ):
                 self.progress_callback(wait_seconds)
-            if self.log is not None:
-                self.log(
-                    f"速率限制: 每分钟最多 {self.limit_per_minute} 个发送单元，"
-                    f"等待 {wait_seconds:.1f} 秒后继续",
-                    level="warning",
+            if (
+                not logged_wait
+                and self.log is not None
+                and (
+                    window_wait > 0
+                    or wait_seconds >= max(5.0, base_interval * 1.5)
                 )
-            time.sleep(wait_seconds)
+            ):
+                reason = "分钟窗口已满" if window_wait > 0 else "发送间隔"
+                self.log(
+                    f"速率限制（{reason}）: 每分钟最多 "
+                    f"{limit_snapshot} 个发送单元，"
+                    f"等待 {wait_seconds:.1f} 秒后继续"
+                )
+                logged_wait = True
+            time.sleep(min(wait_seconds, 0.5))
 
 
 def _batch_notification_payload(task_name, job_id, status, progress, error=None):
@@ -199,11 +292,13 @@ FILTER_FIELDS = (
     "remove_keywords",
     "remove_regex",
 )
+BATCH_CONFIG_FIELDS = FILTER_FIELDS + ("rate_limit_per_minute",)
 FILTER_STATE_KEYS = {
     "exclude_keywords": "excludeKeywords",
     "exclude_regex": "excludeRegex",
     "remove_keywords": "removeKeywords",
     "remove_regex": "removeRegex",
+    "rate_limit_per_minute": "rateLimitPerMinute",
 }
 
 
@@ -433,6 +528,34 @@ def _persist_task_history(job_id):
 def get_task(job_id):
     with TASKS_LOCK:
         return dict(TASKS.get(job_id) or {})
+
+
+def _mark_task_stalled(job_id, idle_seconds):
+    warning = (
+        f"[{_now_iso()}] 警告: 任务已超过 "
+        f"{int(idle_seconds)} 秒没有进度更新，当前操作可能卡住；"
+        "可在日志面板查看最后一条消息，必要时取消后重试"
+    )
+    with TASKS_LOCK:
+        task = TASKS.get(job_id)
+        if not task or not task.get("active"):
+            return None
+        progress = dict(task.get("progress") or {})
+        progress.update(
+            {
+                "phase": "stalled",
+                "phase_label": PROGRESS_PHASES["stalled"],
+                "stalled_seconds": round(idle_seconds),
+            }
+        )
+        task["progress"] = progress
+        task["stdoutTail"] = _tail(
+            "\n".join([task.get("stdoutTail") or "", warning]).strip()
+        )
+
+    _persist_task_history(job_id)
+    logger.error("[batch:%s] %s", job_id, warning)
+    return warning
 
 
 def _parse_terms(raw):
@@ -1128,8 +1251,10 @@ def _start_batch_scan(
 ):
     """Run history scanning independently from the forwarding consumer."""
     scan_queue = queue.Queue()
+    scan_completed = False
 
     def scan():
+        nonlocal scan_completed
         try:
             for chunk in _iter_batch_chunks(
                 acc,
@@ -1144,7 +1269,12 @@ def _start_batch_scan(
                 if stop_event.is_set():
                     break
                 scan_queue.put(chunk)
-            if not stop_event.is_set() and complete_callback is not None:
+            if (
+                not stop_event.is_set()
+                and not scan_completed
+                and complete_callback is not None
+            ):
+                scan_completed = True
                 complete_callback()
         except Exception as exc:
             if not stop_event.is_set():
@@ -1179,6 +1309,19 @@ def _iter_scanned_chunks(scan_queue, stop_event=None, should_stop=None):
         yield item
 
 
+def _advance_stream_state(stream_state, scanned, collected):
+    """Keep scan counters monotonic while queued chunks are consumed."""
+    stream_state["scanned"] = max(
+        int(stream_state.get("scanned") or 0),
+        int(scanned or 0),
+    )
+    stream_state["collected"] = max(
+        int(stream_state.get("collected") or 0),
+        int(collected or 0),
+    )
+    return stream_state
+
+
 def _validate_task_spec(spec):
     if not spec.get("source") or not spec.get("target"):
         raise ValueError("source 和 target 不能为空")
@@ -1194,17 +1337,11 @@ def _validate_task_spec(spec):
     spec["relay_chat"] = relay_chat or None
 
     raw_rate_limit = spec.get("rate_limit_per_minute")
-    try:
-        rate_limit = int(
-            DEFAULT_RATE_LIMIT_PER_MINUTE
-            if raw_rate_limit is None
-            else raw_rate_limit
-        )
-    except (TypeError, ValueError) as exc:
-        raise ValueError("每分钟转发上限必须是整数") from exc
-    if rate_limit < 1 or rate_limit > 1000:
-        raise ValueError("每分钟转发上限必须在 1 到 1000 之间")
-    spec["rate_limit_per_minute"] = rate_limit
+    spec["rate_limit_per_minute"] = _normalize_rate_limit(
+        DEFAULT_RATE_LIMIT_PER_MINUTE
+        if raw_rate_limit is None
+        else raw_rate_limit
+    )
 
     _compile_regex_patterns(spec.get("exclude_regex"), "排除正则")
     _compile_regex_patterns(spec.get("remove_regex"), "删除正则")
@@ -2785,29 +2922,7 @@ def _run_batch_task(job_id, spec):
             idle_seconds = now - last_activity[0]
             if idle_seconds < BATCH_STALL_TIMEOUT_SECONDS:
                 continue
-            with TASKS_LOCK:
-                task = TASKS.get(job_id)
-                if not task or not task.get("active"):
-                    return
-                progress = dict(task.get("progress") or {})
-                progress.update(
-                    {
-                        "phase": "stalled",
-                        "phase_label": PROGRESS_PHASES["stalled"],
-                        "stalled_seconds": round(idle_seconds),
-                    }
-                )
-                task["progress"] = progress
-                warning = (
-                    f"[{_now_iso()}] 警告: 任务已超过 "
-                    f"{int(idle_seconds)} 秒没有进度更新，当前操作可能卡住；"
-                    "可在日志面板查看最后一条消息，必要时取消后重试"
-                )
-                task["stdoutTail"] = _tail(
-                    "\n".join([task.get("stdoutTail") or "", warning]).strip()
-                )
-                _persist_task_history(job_id)
-            logger.error("[batch:%s] %s", job_id, warning)
+            _mark_task_stalled(job_id, idle_seconds)
             return
 
     threading.Thread(
@@ -2879,9 +2994,11 @@ def _run_batch_task(job_id, spec):
         logged_quote_filter = False
         filter_signature = None
         filter_rules = None
-        rate_limit_value = spec.get("rate_limit_per_minute")
-        rate_limit_per_minute = (
-            int(rate_limit_value) if rate_limit_value is not None else 0
+        rate_limit_per_minute = _normalize_rate_limit(
+            spec.get(
+                "rate_limit_per_minute",
+                DEFAULT_RATE_LIMIT_PER_MINUTE,
+            )
         )
 
         def rate_progress(wait_seconds):
@@ -2900,15 +3017,15 @@ def _run_batch_task(job_id, spec):
                 wait_seconds=round(wait_seconds),
             )
 
-        rate_limiter = (
-            BatchRateLimiter(
-                rate_limit_per_minute,
-                log=log,
-                progress_callback=rate_progress,
-            )
-            if rate_limit_per_minute > 0
-            else None
+        rate_limiter = BatchRateLimiter(
+            rate_limit_per_minute,
+            log=log,
+            progress_callback=rate_progress,
         )
+        with TASKS_LOCK:
+            active_task = TASKS.get(job_id)
+            if active_task is not None:
+                active_task["rate_limiter"] = rate_limiter
         total = 0
         stream_total = 0
         logged_total = False
@@ -2936,6 +3053,11 @@ def _run_batch_task(job_id, spec):
         def mark_scan_complete():
             stream_state["scanning"] = False
             stream_state["scan_complete"] = True
+            log(
+                f"扫描完成: 已扫描 {stream_state['scanned']} 条，"
+                f"收集 {stream_state['collected']} 条；"
+                "后续只发送已收集队列，不会再次扫描历史"
+            )
             current = dict(get_task(job_id).get("progress") or {})
             current.update(
                 {
@@ -2977,8 +3099,11 @@ def _run_batch_task(job_id, spec):
             stop_event=scan_stop_event,
             should_stop=lambda: bool(get_task(job_id).get("cancelled")),
         ):
-            stream_state["scanned"] = chunk_scanned
-            stream_state["collected"] = chunk_total
+            _advance_stream_state(
+                stream_state,
+                chunk_scanned,
+                chunk_total,
+            )
             stream_total = max(stream_total, chunk_total)
             total = 0 if streaming_time else chunk_total
             if not streaming_time and not logged_total:
@@ -3057,6 +3182,12 @@ def _run_batch_task(job_id, spec):
 
                     task = get_task(job_id)
                     task_spec = task.get("spec") or spec
+                    rate_limiter.set_limit(
+                        task_spec.get(
+                            "rate_limit_per_minute",
+                            DEFAULT_RATE_LIMIT_PER_MINUTE,
+                        )
+                    )
                     next_filter_signature = tuple(
                         str(task_spec.get(field) or "")
                         for field in FILTER_FIELDS
@@ -3120,8 +3251,13 @@ def _run_batch_task(job_id, spec):
                         )
                         continue
 
-                    if rate_limiter is not None:
-                        rate_limiter.wait(1)
+                    rate_limiter.wait(
+                        1,
+                        wait_for_active=lambda: _wait_until_task_active(
+                            job_id,
+                            log,
+                        ),
+                    )
                     sent_count, used_fallback = _forward_batch_unit(
                         worker,
                         acc,
@@ -3249,6 +3385,10 @@ def _run_batch_task(job_id, spec):
         scan_stop_event.set()
         if scan_thread is not None and scan_thread.is_alive():
             scan_thread.join(timeout=2)
+        with TASKS_LOCK:
+            active_task = TASKS.get(job_id)
+            if active_task is not None:
+                active_task["rate_limiter"] = None
         _update_task(job_id, active=False)
 
 
@@ -3346,23 +3486,27 @@ def submit_batch_task(spec):
     return job_id
 
 
-def update_batch_rules(job_id, rules):
-    if not isinstance(rules, dict):
-        raise ValueError("规则格式不正确")
+def update_batch_config(job_id, values):
+    if not isinstance(values, dict):
+        raise ValueError("配置格式不正确")
 
-    updates = {
-        field: str(rules[field] or "")
-        for field in FILTER_FIELDS
-        if field in rules
-    }
+    updates = {}
+    for field in FILTER_FIELDS:
+        if field in values:
+            updates[field] = str(values[field] or "")
+    if "rate_limit_per_minute" in values:
+        updates["rate_limit_per_minute"] = _normalize_rate_limit(
+            values["rate_limit_per_minute"]
+        )
     if not updates:
-        raise ValueError("没有可更新的规则")
+        raise ValueError("没有可更新的配置")
 
     if "exclude_regex" in updates:
         _compile_regex_patterns(updates["exclude_regex"], "排除正则")
     if "remove_regex" in updates:
         _compile_regex_patterns(updates["remove_regex"], "删除正则")
 
+    runtime_limiter = None
     with TASKS_LOCK:
         task = TASKS.get(job_id)
         if not task:
@@ -3382,9 +3526,18 @@ def update_batch_rules(job_id, rules):
         )
         task["spec"] = spec
         task["state"] = state
+        if "rate_limit_per_minute" in updates:
+            runtime_limiter = task.get("rate_limiter")
 
+    if runtime_limiter is not None:
+        runtime_limiter.set_limit(updates["rate_limit_per_minute"])
     _persist_task_history(job_id)
     return spec
+
+
+def update_batch_rules(job_id, rules):
+    """Backward-compatible alias for the former rules-only endpoint."""
+    return update_batch_config(job_id, rules)
 
 
 def pause_batch_task(job_id):

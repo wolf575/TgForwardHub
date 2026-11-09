@@ -78,10 +78,9 @@ class BatchStreamRateTests(unittest.TestCase):
                 }
             )
 
-    def test_rate_limiter_waits_when_window_is_full(self):
+    def test_rate_limiter_enforces_spacing_and_rolling_window(self):
         clock = [0.0]
         sleeps = []
-        progress = []
 
         def sleep(seconds):
             sleeps.append(seconds)
@@ -98,15 +97,72 @@ class BatchStreamRateTests(unittest.TestCase):
         ):
             limiter = batch_forward.BatchRateLimiter(
                 2,
-                progress_callback=lambda seconds: progress.append(seconds),
+                jitter_ratio=0,
             )
             limiter.wait()
             limiter.wait()
             limiter.wait()
 
-        self.assertEqual(len(sleeps), 1)
-        self.assertGreater(sleeps[0], 59)
-        self.assertEqual(len(progress), 1)
+        self.assertGreaterEqual(clock[0], 59.9)
+        self.assertTrue(sleeps)
+        self.assertTrue(all(seconds <= 0.5 for seconds in sleeps))
+
+    def test_rate_limiter_live_limit_update_changes_next_interval(self):
+        clock = [0.0]
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+
+        with mock.patch.object(
+            batch_forward.time,
+            "monotonic",
+            side_effect=lambda: clock[0],
+        ), mock.patch.object(
+            batch_forward.time,
+            "sleep",
+            side_effect=sleep,
+        ):
+            limiter = batch_forward.BatchRateLimiter(
+                1,
+                jitter_ratio=0,
+            )
+            limiter.wait()
+            limiter.set_limit(60)
+            limiter.wait()
+
+        self.assertGreaterEqual(clock[0], 0.99)
+        self.assertLess(clock[0], 1.1)
+
+    def test_rate_limiter_uses_random_jitter_between_sends(self):
+        clock = [0.0]
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        random_source = mock.Mock()
+        random_source.uniform.return_value = 1.2
+        with mock.patch.object(
+            batch_forward.time,
+            "monotonic",
+            side_effect=lambda: clock[0],
+        ), mock.patch.object(
+            batch_forward.time,
+            "sleep",
+            side_effect=sleep,
+        ):
+            limiter = batch_forward.BatchRateLimiter(
+                60,
+                jitter_ratio=0.2,
+                random_source=random_source,
+            )
+            limiter.wait()
+            limiter.wait()
+
+        self.assertGreaterEqual(clock[0], 1.19)
+        self.assertLess(clock[0], 1.25)
+        random_source.uniform.assert_called_with(0.8, 1.2)
 
     def test_time_range_yields_first_batch_before_scan_finishes(self):
         base = datetime(2026, 11, 9, tzinfo=timezone.utc)
@@ -260,6 +316,17 @@ class BatchStreamRateTests(unittest.TestCase):
         self.assertEqual(progress[-1], (250, 250))
         self.assertEqual(completed, [True])
         self.assertEqual(scan_queue.qsize(), 4)
+
+    def test_consumed_chunks_never_move_scan_progress_backwards(self):
+        state = {
+            "scanned": 600,
+            "collected": 480,
+        }
+
+        batch_forward._advance_stream_state(state, 100, 80)
+
+        self.assertEqual(state["scanned"], 600)
+        self.assertEqual(state["collected"], 480)
 
 
 if __name__ == "__main__":

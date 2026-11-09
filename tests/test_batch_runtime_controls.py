@@ -162,6 +162,7 @@ def _task(job_id, spec, status="running"):
             "excludeRegex": spec.get("exclude_regex") or "",
             "removeKeywords": spec.get("remove_keywords") or "",
             "removeRegex": spec.get("remove_regex") or "",
+            "rateLimitPerMinute": spec.get("rate_limit_per_minute"),
         },
     }
 
@@ -179,6 +180,7 @@ def _base_spec(**overrides):
         "exclude_regex": "",
         "remove_keywords": "",
         "remove_regex": "",
+        "rate_limit_per_minute": 1000,
     }
     spec.update(overrides)
     return spec
@@ -458,6 +460,59 @@ class BatchRuntimeControlTests(unittest.TestCase):
         self.assertEqual(updated["exclude_keywords"], "广告")
         self.assertEqual(task["state"]["removeRegex"], USER_REGEX)
         self.assertEqual(task["state"]["excludeKeywords"], "广告")
+        persist.assert_called_once_with(job_id)
+
+    def test_update_config_changes_rate_limit_without_losing_filters(self):
+        job_id = "config-job"
+        spec = _base_spec(remove_regex=USER_REGEX)
+        task = _task(job_id, spec)
+        limiter = mock.Mock()
+        task["rate_limiter"] = limiter
+
+        with mock.patch.dict(
+            batch_forward.TASKS,
+            {job_id: task},
+            clear=True,
+        ), mock.patch.object(
+            batch_forward,
+            "_persist_task_history",
+        ) as persist:
+            updated = batch_forward.update_batch_config(
+                job_id,
+                {
+                    "remove_regex": USER_REGEX,
+                    "exclude_keywords": "广告",
+                    "rate_limit_per_minute": 80,
+                },
+            )
+
+        self.assertEqual(updated["remove_regex"], USER_REGEX)
+        self.assertEqual(updated["exclude_keywords"], "广告")
+        self.assertEqual(updated["rate_limit_per_minute"], 80)
+        self.assertEqual(task["state"]["rateLimitPerMinute"], 80)
+        limiter.set_limit.assert_called_once_with(80)
+        persist.assert_called_once_with(job_id)
+
+    def test_mark_task_stalled_releases_tasks_lock_before_persisting(self):
+        job_id = "stalled-job"
+        task = _task(job_id, _base_spec())
+
+        with mock.patch.dict(
+            batch_forward.TASKS,
+            {job_id: task},
+            clear=True,
+        ), mock.patch.object(
+            batch_forward,
+            "_persist_task_history",
+        ) as persist:
+            warning = batch_forward._mark_task_stalled(job_id, 901)
+            acquired = batch_forward.TASKS_LOCK.acquire(timeout=0.1)
+            if acquired:
+                batch_forward.TASKS_LOCK.release()
+
+        self.assertTrue(acquired)
+        self.assertIn("901", warning)
+        self.assertEqual(task["progress"]["phase"], "stalled")
         persist.assert_called_once_with(job_id)
 
     def test_invalid_runtime_regex_does_not_change_the_task(self):
@@ -744,7 +799,7 @@ class BatchRuntimeApiTests(unittest.TestCase):
             return_value={"id": "job"},
         ), mock.patch.object(
             batch_forward,
-            "update_batch_rules",
+            "update_batch_config",
             return_value={"source": "source", "remove_regex": USER_REGEX},
         ) as update:
             response = self.client.patch(
@@ -754,6 +809,32 @@ class BatchRuntimeApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         update.assert_called_once_with("job", {"remove_regex": USER_REGEX})
+
+    def test_config_endpoint_updates_filters_and_rate_limit(self):
+        payload = {
+            "remove_regex": USER_REGEX,
+            "rate_limit_per_minute": 75,
+        }
+        with mock.patch.object(
+            batch_forward,
+            "get_task",
+            return_value={"id": "job"},
+        ), mock.patch.object(
+            batch_forward,
+            "update_batch_config",
+            return_value={
+                "source": "source",
+                "remove_regex": USER_REGEX,
+                "rate_limit_per_minute": 75,
+            },
+        ) as update:
+            response = self.client.patch(
+                "/api/batch-forward/job/config",
+                json=payload,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        update.assert_called_once_with("job", payload)
 
     def test_active_tasks_endpoint(self):
         with mock.patch.object(

@@ -9,6 +9,8 @@ import os
 import threading
 import time
 
+from waitress import serve
+
 
 def _ensure_main_event_loop():
     """Create the loop before importing Pyrogram's sync wrappers."""
@@ -28,7 +30,13 @@ import main
 
 def _start_web():
     port = int(os.environ.get("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+    serve(
+        app,
+        host="0.0.0.0",
+        port=port,
+        threads=16,
+        channel_timeout=120,
+    )
 
 
 threading.Thread(target=_start_web, name="FlaskWeb", daemon=True).start()

@@ -1100,6 +1100,7 @@ def api_batch_forward_cancel(job_id):
     return jsonify({'error': 'job not found'}), 404
 
 
+@app.route('/api/batch-forward/<job_id>/config', methods=['PATCH'])
 @app.route('/api/batch-forward/<job_id>/rules', methods=['PATCH'])
 def api_batch_forward_rules(job_id):
     if 'username' not in session:
@@ -1109,7 +1110,7 @@ def api_batch_forward_rules(job_id):
         return jsonify({'error': 'job not found'}), 404
 
     try:
-        spec = batch_forward.update_batch_rules(
+        spec = batch_forward.update_batch_config(
             job_id,
             request.get_json(silent=True) or {},
         )
