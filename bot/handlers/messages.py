@@ -683,24 +683,49 @@ def _forward_private_media_via_bot(bot, destination_chat_id, chatid, msgid):
         return False
 
 
-def _get_private_media_group_messages(acc, chatid, msg):
+def _get_private_media_group_messages(acc, chatid, msg, strict=False):
     """Return the complete private media group, ordered by message ID."""
     if not getattr(msg, "media_group_id", None):
         return [msg]
 
+    last_error = None
     try:
         media_group = acc.get_media_group(chatid, msg.id) or []
     except Exception as exc:
+        last_error = exc
         logger.debug(
-            "无法获取私有媒体组 %s/%s，将仅处理当前消息: %s",
+            "无法获取私有媒体组 %s/%s（%s）: %s",
             chatid,
             msg.id,
+            "严格模式尝试邻接恢复" if strict else "将仅处理当前消息",
             exc,
         )
         media_group = []
+        if strict:
+            try:
+                nearby_ids = list(range(max(1, msg.id - 9), msg.id + 10))
+                nearby = acc.get_messages(chatid, nearby_ids) or []
+                media_group = [
+                    item
+                    for item in nearby
+                    if item is not None
+                    and not getattr(item, "empty", False)
+                    and getattr(item, "media_group_id", None)
+                    == getattr(msg, "media_group_id", None)
+                ]
+            except Exception as fallback_exc:
+                last_error = fallback_exc
 
-    by_id = {item.id: item for item in media_group}
+    by_id = {
+        item.id: item
+        for item in media_group
+        if item is not None and not getattr(item, "empty", False)
+    }
     by_id[msg.id] = msg
+    if strict and len(by_id) < 2:
+        raise RuntimeError(
+            f"媒体组 {getattr(msg, 'media_group_id', None)} 读取不完整"
+        ) from last_error
     return [by_id[message_id] for message_id in sorted(by_id)]
 
 

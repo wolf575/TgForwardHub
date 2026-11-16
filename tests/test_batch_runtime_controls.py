@@ -413,7 +413,7 @@ class BatchRuntimeControlTests(unittest.TestCase):
         ), mock.patch.object(
             batch_forward,
             "_get_private_media_group_messages",
-            side_effect=lambda _acc, _source, message: [message],
+            side_effect=lambda _acc, _source, message, **_kwargs: [message],
         ), mock.patch.object(
             batch_forward,
             "_forward_batch_unit",
@@ -433,6 +433,54 @@ class BatchRuntimeControlTests(unittest.TestCase):
             batch_forward._run_batch_task(job_id, spec)
 
         self.assertEqual(build_rules.call_count, 1)
+
+    def test_successful_send_persists_resume_checkpoint(self):
+        job_id = "checkpoint-job"
+        spec = _base_spec(start=7, end=7)
+        task = _task(job_id, spec)
+        acc = _RunAcc({7: _Message(7, text="checkpoint")})
+
+        with mock.patch.dict(
+            batch_forward.TASKS,
+            {job_id: task},
+            clear=True,
+        ), mock.patch.object(
+            batch_forward,
+            "get_acc_instance",
+            return_value=acc,
+        ), mock.patch.object(
+            batch_forward,
+            "MessageWorker",
+            _RunWorker,
+        ), mock.patch.object(
+            batch_forward,
+            "_resolve_chat",
+            side_effect=lambda _client, ref: -1001 if ref == "source" else -1002,
+        ), mock.patch.object(
+            batch_forward,
+            "_resolve_source_username",
+            return_value="source",
+        ), mock.patch.object(
+            batch_forward,
+            "_collect_message_ids",
+            return_value=[7],
+        ), mock.patch.object(
+            batch_forward,
+            "_forward_batch_unit",
+            return_value=(1, False),
+        ), mock.patch.object(
+            batch_forward,
+            "get_bot_instance",
+            return_value=None,
+        ), mock.patch.object(
+            batch_forward,
+            "_persist_task_history",
+        ):
+            batch_forward._run_batch_task(job_id, spec)
+
+        self.assertEqual(task["state"]["_resumeAfterId"], 7)
+        self.assertEqual(task["state"]["_resumeProcessed"], 1)
+        self.assertEqual(task["state"]["_resumeSuccess"], 1)
 
     def test_update_rules_changes_only_filter_fields(self):
         job_id = "rules-job"
@@ -514,6 +562,72 @@ class BatchRuntimeControlTests(unittest.TestCase):
         self.assertIn("901", warning)
         self.assertEqual(task["progress"]["phase"], "stalled")
         persist.assert_called_once_with(job_id)
+
+    def test_resume_interrupted_task_reuses_checkpoint_and_counters(self):
+        job_id = "resume-job"
+        spec = _base_spec()
+        state = {
+            "_resumeAfterId": 1200,
+            "_resumeProcessed": 1200,
+            "_resumeSuccess": 1180,
+            "_resumeFailed": 5,
+            "_resumeSkipped": 15,
+        }
+        history = {
+            "id": job_id,
+            "jobId": job_id,
+            "taskName": "resume-task",
+            "sourceId": "source",
+            "targetId": "target",
+            "createdAt": "2026-11-16T12:00:00+08:00",
+            "status": "interrupted",
+            "task_spec": spec,
+            "state": state,
+            "progress": {"phase": "interrupted", "processed": 1200},
+            "stdoutTail": "before restart",
+            "stderrTail": "",
+        }
+        thread = mock.Mock()
+        thread.start = mock.Mock()
+
+        with mock.patch.dict(batch_forward.TASKS, {}, clear=True), \
+             mock.patch.object(
+                 batch_forward,
+                 "get_history_record",
+                 return_value=history,
+             ), mock.patch.object(
+                 batch_forward,
+                 "_persist_task_history",
+             ), mock.patch.object(
+                 batch_forward.threading,
+                 "Thread",
+                 return_value=thread,
+             ) as thread_factory:
+            resumed = batch_forward.resume_interrupted_task(job_id)
+            resumed_task = batch_forward.TASKS[job_id]
+
+        self.assertTrue(resumed)
+        self.assertEqual(resumed_task["status"], "running")
+        self.assertEqual(resumed_task["state"], state)
+        thread.start.assert_called_once()
+        thread_args = thread_factory.call_args.kwargs["args"]
+        self.assertEqual(thread_args[0], job_id)
+        self.assertEqual(thread_args[2], state)
+
+    def test_id_range_resume_skips_already_processed_ids(self):
+        ids = batch_forward._collect_message_ids(
+            _RunAcc({}),
+            -1001,
+            {
+                "range_type": "id",
+                "start": 1,
+                "end": 10,
+                "reverse": False,
+                "_resumeAfterId": 4,
+            },
+        )
+
+        self.assertEqual(ids, [5, 6, 7, 8, 9, 10])
 
     def test_invalid_runtime_regex_does_not_change_the_task(self):
         job_id = "invalid-rules-job"
@@ -608,7 +722,7 @@ class BatchRuntimeControlTests(unittest.TestCase):
         ), mock.patch.object(
             batch_forward,
             "_get_private_media_group_messages",
-            side_effect=lambda _acc, _source, message: [message],
+            side_effect=lambda _acc, _source, message, **_kwargs: [message],
         ), mock.patch.object(
             batch_forward,
             "_forward_batch_unit",
@@ -692,7 +806,7 @@ class BatchRuntimeControlTests(unittest.TestCase):
         ), mock.patch.object(
             batch_forward,
             "_get_private_media_group_messages",
-            side_effect=lambda _acc, _source, message: [message],
+            side_effect=lambda _acc, _source, message, **_kwargs: [message],
         ), mock.patch.object(
             batch_forward,
             "_forward_batch_unit",
@@ -761,7 +875,7 @@ class BatchRuntimeControlTests(unittest.TestCase):
         ), mock.patch.object(
             batch_forward,
             "_get_private_media_group_messages",
-            side_effect=lambda _acc, _source, message: [message],
+            side_effect=lambda _acc, _source, message, **_kwargs: [message],
         ), mock.patch.object(
             batch_forward,
             "_forward_batch_unit",
@@ -868,6 +982,29 @@ class BatchRuntimeApiTests(unittest.TestCase):
         self.assertEqual(resumed.status_code, 200)
         self.assertEqual(paused.get_json()["status"], "paused")
         self.assertEqual(resumed.get_json()["status"], "running")
+
+    def test_resume_endpoint_recovers_interrupted_history_task(self):
+        with mock.patch.object(
+            batch_forward,
+            "get_task",
+            return_value={},
+        ), mock.patch.object(
+            batch_forward,
+            "get_history_record",
+            return_value={"id": "job", "status": "interrupted"},
+        ), mock.patch.object(
+            batch_forward,
+            "resume_batch_task",
+            return_value=False,
+        ), mock.patch.object(
+            batch_forward,
+            "resume_interrupted_task",
+            return_value=True,
+        ) as resume:
+            response = self.client.post("/api/batch-forward/job/resume")
+
+        self.assertEqual(response.status_code, 200)
+        resume.assert_called_once_with("job")
 
     def test_single_history_delete_endpoint(self):
         with mock.patch.object(

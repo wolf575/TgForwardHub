@@ -113,6 +113,9 @@ test("active task controls support cross-device attach and new tasks", () => {
   assert.match(source, /newTaskBtn"\)\.addEventListener/);
   assert.match(source, /saveBatchConfigBtn"\)\.addEventListener/);
   assert.match(source, /\/api\/batch-forward\/\$\{currentBatchJobId\}\/config/);
+  assert.match(source, /从上次保存的检查点继续任务/);
+  assert.match(source, /\/api\/batch-forward\/\$\{encodeURIComponent\(recordId\)\}\/resume/);
+  assert.match(source, /\["paused", "interrupted"\]\.includes\(data\.status\)/);
   assert.match(source, /BATCH_CONFIG_STORAGE_KEY/);
   assert.match(source, /let statusLoadBusy = false/);
   assert.match(source, /let activeTaskListBusy = false/);

@@ -199,7 +199,8 @@ class BatchStreamRateTests(unittest.TestCase):
         self.assertEqual(first[2], 2)
         self.assertEqual(acc.yielded, 2)
         self.assertTrue(acc.reverse)
-        self.assertIn(1, cache)
+        self.assertEqual(first[1], [])
+        self.assertEqual(cache, {})
 
     def test_time_range_forward_pagination_advances_without_replaying_pages(self):
         start = datetime(2026, 11, 9, tzinfo=timezone.utc)
@@ -275,6 +276,41 @@ class BatchStreamRateTests(unittest.TestCase):
         self.assertEqual(acc.calls[0]["offset_id"], 0)
         self.assertEqual(acc.calls[1]["offset_id"], 106)
         self.assertGreaterEqual(len(acc.calls), 3)
+
+    def test_time_range_resume_starts_after_saved_checkpoint(self):
+        start = datetime(2026, 11, 9, tzinfo=timezone.utc)
+        messages = [
+            SimpleNamespace(
+                id=index,
+                date=datetime.fromtimestamp(start.timestamp() + index, timezone.utc),
+                text=f"message {index}",
+                caption=None,
+                media_group_id=None,
+            )
+            for index in range(1, 206)
+        ]
+        acc = _HistoryAcc(messages)
+        spec = {
+            "range_type": "time",
+            "start": str(int(start.timestamp())),
+            "end": str(int(start.timestamp()) + 300),
+            "reverse": False,
+            "_resumeAfterId": 100,
+        }
+
+        chunks = list(
+            batch_forward._iter_batch_chunks(
+                acc,
+                None,
+                -1001,
+                spec,
+                {},
+            )
+        )
+        ids = [message_id for chunk in chunks for message_id in chunk[0]]
+
+        self.assertEqual(ids, list(range(101, 206)))
+        self.assertEqual(acc.calls[0]["offset_id"], 101)
 
     def test_scan_thread_finishes_before_queue_is_consumed(self):
         start = datetime(2026, 11, 9, tzinfo=timezone.utc)

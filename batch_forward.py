@@ -110,6 +110,14 @@ def _normalize_rate_limit(value):
     return limit
 
 
+def _optional_positive_int(value):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 class BatchRateLimiter:
     """Rolling limiter with live limits and per-send random jitter."""
 
@@ -969,6 +977,8 @@ def _collect_message_ids(
     start = spec.get("start")
     end = spec.get("end")
     reverse = bool(spec.get("reverse"))
+    resume_after_id = _optional_positive_int(spec.get("_resumeAfterId"))
+    resume_before_id = _optional_positive_int(spec.get("_resumeBeforeId"))
 
     if range_type == "time":
         start_ts = _parse_timestamp(start)
@@ -987,6 +997,18 @@ def _collect_message_ids(
             if ts < start_ts:
                 break
             if ts <= end_ts:
+                if (
+                    resume_after_id is not None
+                    and not reverse
+                    and message.id <= resume_after_id
+                ):
+                    continue
+                if (
+                    resume_before_id is not None
+                    and reverse
+                    and message.id >= resume_before_id
+                ):
+                    continue
                 ids.append(message.id)
                 if message_cache is not None:
                     if _message_primary_text(message) or _message_filter_texts(
@@ -1005,6 +1027,14 @@ def _collect_message_ids(
     end_id = int(end)
     if start_id > end_id:
         start_id, end_id = end_id, start_id
+    if resume_after_id is not None:
+        start_id = max(start_id, resume_after_id + 1)
+    if resume_before_id is not None:
+        end_id = min(end_id, resume_before_id - 1)
+    if start_id > end_id:
+        if progress_callback:
+            progress_callback(0, 0)
+        return []
     ids = list(range(start_id, end_id + 1))
     if reverse:
         ids.reverse()
@@ -1026,6 +1056,8 @@ def _iter_batch_chunks(
     """Yield sendable chunks; time ranges forward while history is scanned."""
     range_type = spec.get("range_type", "id")
     reverse = bool(spec.get("reverse"))
+    resume_after_id = _optional_positive_int(spec.get("_resumeAfterId"))
+    resume_before_id = _optional_positive_int(spec.get("_resumeBeforeId"))
 
     if range_type == "time":
         start_ts = _parse_timestamp(spec.get("start"))
@@ -1046,10 +1078,14 @@ def _iter_batch_chunks(
         # with Telegram's monotonic ID rules instead.
         offset_id = 0
         if reverse:
+            if resume_before_id is not None:
+                offset_id = max(0, resume_before_id - 1)
             offset_date = datetime.fromtimestamp(end_ts + 1, tz=timezone.utc)
             page_offset = 0
             page_reverse = False
         else:
+            if resume_after_id is not None:
+                offset_id = resume_after_id + 1
             offset_date = datetime.fromtimestamp(
                 max(0, start_ts - 1),
                 tz=timezone.utc,
@@ -1118,6 +1154,18 @@ def _iter_batch_chunks(
                     continue
                 if message_id in seen_ids:
                     continue
+                if (
+                    resume_after_id is not None
+                    and not reverse
+                    and message_id <= resume_after_id
+                ):
+                    continue
+                if (
+                    resume_before_id is not None
+                    and reverse
+                    and message_id >= resume_before_id
+                ):
+                    continue
                 ts = message_date.timestamp()
                 if reverse:
                     if ts < start_ts:
@@ -1134,15 +1182,13 @@ def _iter_batch_chunks(
 
                 seen_ids.add(message_id)
                 collected += 1
-                if _message_primary_text(message) or _message_filter_texts(message):
-                    collected_messages[message_id] = message
-                batch_messages.append(message)
+                batch_messages.append(message_id)
                 if len(batch_messages) >= BATCH_FETCH_CHUNK_SIZE:
                     if progress_callback:
                         progress_callback(scanned, collected)
                     yield (
-                        [item.id for item in batch_messages],
-                        batch_messages,
+                        list(batch_messages),
+                        [],
                         collected,
                         collected,
                         scanned,
@@ -1177,8 +1223,8 @@ def _iter_batch_chunks(
 
         if batch_messages:
             yield (
-                [item.id for item in batch_messages],
-                batch_messages,
+                list(batch_messages),
+                [],
                 collected,
                 collected,
                 scanned,
@@ -1197,45 +1243,56 @@ def _iter_batch_chunks(
         if stop_event is not None and stop_event.is_set():
             return
         chunk_ids = ids[chunk_start:chunk_start + BATCH_FETCH_CHUNK_SIZE]
-        fetched_messages = []
-        missing_ids = []
-        for message_id in chunk_ids:
-            cached_message = collected_messages.get(message_id)
-            if cached_message is not None:
-                fetched_messages.append(cached_message)
-            else:
-                missing_ids.append(message_id)
-        if missing_ids:
-            try:
-                batch_messages = _worker_execute(
-                    worker,
-                    "批量读取消息",
-                    lambda: acc.get_messages(source_id, missing_ids),
-                )
-                if not isinstance(batch_messages, list):
-                    batch_messages = [batch_messages]
-                fetched_messages.extend(batch_messages)
-            except Exception as exc:
-                if log is not None:
-                    log(
-                        f"批量读取消息失败，回退逐条读取: "
-                        f"{type(exc).__name__}: {exc}",
-                        level="warning",
-                    )
-                for message_id in missing_ids:
-                    try:
-                        fetched_messages.append(
-                            acc.get_messages(source_id, message_id)
-                        )
-                    except Exception:
-                        fetched_messages.append(None)
         yield (
             chunk_ids,
-            fetched_messages,
+            [],
             min(chunk_start + len(chunk_ids), total),
             total,
             min(chunk_start + len(chunk_ids), total),
         )
+
+
+def _fetch_chunk_messages(acc, worker, source_id, chunk_ids, log=None):
+    """Fetch one send chunk on demand so scanners never queue Message objects."""
+    if not chunk_ids:
+        return []
+    try:
+        fetched = _worker_execute(
+            worker,
+            "批量读取消息",
+            lambda: acc.get_messages(source_id, chunk_ids),
+        )
+        if not isinstance(fetched, list):
+            fetched = [fetched]
+    except Exception as exc:
+        if log is not None:
+            log(
+                "批量读取消息失败，回退逐条读取: "
+                f"{type(exc).__name__}: {exc}",
+                level="warning",
+            )
+        fetched = []
+        for message_id in chunk_ids:
+            try:
+                fetched.append(
+                    _worker_execute(
+                        worker,
+                        f"读取消息 {message_id}",
+                        lambda message_id=message_id: acc.get_messages(
+                            source_id,
+                            message_id,
+                        ),
+                    )
+                )
+            except Exception:
+                fetched.append(None)
+
+    by_id = {
+        getattr(item, "id", None): item
+        for item in fetched
+        if item is not None and not getattr(item, "empty", False)
+    }
+    return [by_id.get(message_id) for message_id in chunk_ids]
 
 
 def _start_batch_scan(
@@ -2747,7 +2804,69 @@ def _wait_until_task_active(job_id, log=None):
     return True
 
 
-def _run_batch_task(job_id, spec):
+def _load_batch_media_group(
+    acc,
+    worker,
+    source_id,
+    message,
+    log=None,
+    attempts=3,
+):
+    """Load a complete album or fail without splitting it into partial sends."""
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            group = _worker_execute(
+                worker,
+                "读取媒体组",
+                lambda: _get_private_media_group_messages(
+                    acc,
+                    source_id,
+                    message,
+                    strict=True,
+                ),
+            )
+            group = [
+                item
+                for item in (group or [])
+                if item is not None and not getattr(item, "empty", False)
+            ]
+            unique = {item.id: item for item in group}
+            unique[message.id] = message
+            if len(unique) >= 2:
+                return [unique[item_id] for item_id in sorted(unique)]
+            raise RuntimeError("媒体组读取结果不足两条")
+        except Exception as exc:
+            last_error = exc
+            if log is not None:
+                log(
+                    f"媒体组 {getattr(message, 'media_group_id', None)} "
+                    f"读取失败（{attempt}/{attempts}）: "
+                    f"{type(exc).__name__}: {exc}",
+                    level="warning",
+                )
+            if attempt < attempts:
+                time.sleep(min(2 ** (attempt - 1), 3))
+
+    raise RuntimeError(
+        "媒体组读取不完整，已停止发送该组以避免拆分、重复或顺序错误"
+    ) from last_error
+
+
+def _run_batch_task(job_id, spec, resume_state=None):
+    resume_state = dict(resume_state or {})
+    processed = max(0, int(resume_state.get("_resumeProcessed") or 0))
+    success = max(0, int(resume_state.get("_resumeSuccess") or 0))
+    failed = max(0, int(resume_state.get("_resumeFailed") or 0))
+    skipped = max(0, int(resume_state.get("_resumeSkipped") or 0))
+    resume_base_processed = processed
+    reverse = bool(spec.get("reverse"))
+    resume_after_id = _optional_positive_int(
+        resume_state.get("_resumeAfterId")
+    )
+    resume_before_id = _optional_positive_int(
+        resume_state.get("_resumeBeforeId")
+    )
     log_lines = []
     last_persist = time.monotonic()
     started_monotonic = time.monotonic()
@@ -2758,8 +2877,8 @@ def _run_batch_task(job_id, spec):
         "enabled": False,
         "scanning": False,
         "scan_complete": False,
-        "scanned": 0,
-        "collected": 0,
+        "scanned": processed,
+        "collected": processed,
     }
     persist_lock = threading.Lock()
     scan_stop_event = threading.Event()
@@ -2785,6 +2904,51 @@ def _run_batch_task(job_id, spec):
         )
         _update_task(job_id, stdoutTail=_tail("\n".join(log_lines)))
         persist()
+
+    def record_checkpoint(message_ids):
+        checkpoint_ids = [
+            int(message_id)
+            for message_id in message_ids
+            if _optional_positive_int(message_id) is not None
+        ]
+        if not checkpoint_ids:
+            return
+        with TASKS_LOCK:
+            task = TASKS.get(job_id)
+            if task is None:
+                return
+            state = dict(task.get("state") or {})
+            if reverse:
+                existing = _optional_positive_int(
+                    state.get("_resumeBeforeId")
+                )
+                candidate = min(checkpoint_ids)
+                if existing is not None:
+                    candidate = min(existing, candidate)
+                state["_resumeBeforeId"] = candidate
+                state.pop("_resumeAfterId", None)
+            else:
+                existing = _optional_positive_int(
+                    state.get("_resumeAfterId")
+                )
+                candidate = max(checkpoint_ids)
+                if existing is not None:
+                    candidate = max(existing, candidate)
+                state["_resumeAfterId"] = candidate
+                state.pop("_resumeBeforeId", None)
+            state.update(
+                {
+                    "_resumeProcessed": processed,
+                    "_resumeSuccess": success,
+                    "_resumeFailed": failed,
+                    "_resumeSkipped": skipped,
+                    "_resumeScanned": processed,
+                    "_resumeCollected": processed,
+                    "_resumeUpdatedAt": _now_iso(),
+                }
+            )
+            task["state"] = state
+        persist(force=True)
 
     def finish_cancelled():
         log("任务已取消")
@@ -2937,7 +3101,14 @@ def _run_batch_task(job_id, spec):
         if acc is None:
             raise RuntimeError("用户客户端尚未初始化，请先完成 /setup 配置")
 
-        publish_progress("resolving")
+        publish_progress(
+            "resolving",
+            total=processed,
+            processed=processed,
+            success=success,
+            failed=failed,
+            skipped=skipped,
+        )
         log("正在解析来源与目标")
         worker = MessageWorker(None, acc, max_retries=3)
         if hasattr(worker, "set_event_callback"):
@@ -2959,7 +3130,16 @@ def _run_batch_task(job_id, spec):
                     f"{type(exc).__name__}: {exc}",
                     level="warning",
                 )
-        publish_progress("collecting", scanned=0, collected=0)
+        publish_progress(
+            "collecting",
+            total=processed,
+            processed=processed,
+            success=success,
+            failed=failed,
+            skipped=skipped,
+            scanned=processed,
+            collected=processed,
+        )
         streaming_time = str(spec.get("range_type") or "id") == "time"
         stream_state["enabled"] = streaming_time
         stream_state["scanning"] = streaming_time
@@ -2986,11 +3166,10 @@ def _run_batch_task(job_id, spec):
             log("开始边扫描边批量转发；每收集 100 条消息即开始处理")
         else:
             log("正在收集消息范围")
-        processed = success = failed = skipped = 0
         handled_ids = set()
         group_cache = {}
         restricted_source_ids = set()
-        last_logged_bucket = 0
+        last_logged_bucket = processed // 10
         logged_quote_filter = False
         filter_signature = None
         filter_rules = None
@@ -3027,23 +3206,32 @@ def _run_batch_task(job_id, spec):
             if active_task is not None:
                 active_task["rate_limiter"] = rate_limiter
         total = 0
-        stream_total = 0
+        stream_total = processed
         logged_total = False
 
         def update_scan_progress(scanned, collected):
-            stream_state["scanned"] = scanned
-            stream_state["collected"] = collected
+            effective_scanned = resume_base_processed + scanned
+            effective_collected = resume_base_processed + collected
+            stream_state["scanned"] = max(
+                stream_state["scanned"],
+                effective_scanned,
+            )
+            stream_state["collected"] = max(
+                stream_state["collected"],
+                effective_collected,
+            )
             current = dict(get_task(job_id).get("progress") or {})
             current.update(
                 {
-                    "scanned": scanned,
-                    "collected": collected,
+                    "scanned": stream_state["scanned"],
+                    "collected": stream_state["collected"],
                     "streaming": streaming_time,
                     "scanning": stream_state["scanning"],
                     "scan_complete": stream_state["scan_complete"],
                     "pending": max(
                         0,
-                        collected - int(current.get("processed") or 0),
+                        stream_state["collected"]
+                        - int(current.get("processed") or 0),
                     ),
                 }
             )
@@ -3076,11 +3264,16 @@ def _run_batch_task(job_id, spec):
             _update_task(job_id, progress=current)
             persist(force=True)
 
+        scan_spec = dict(spec)
+        if resume_after_id is not None:
+            scan_spec["_resumeAfterId"] = resume_after_id
+        if resume_before_id is not None:
+            scan_spec["_resumeBeforeId"] = resume_before_id
         scan_queue, scan_thread = _start_batch_scan(
             acc,
             worker,
             source_id,
-            spec,
+            scan_spec,
             collected_messages,
             scan_stop_event,
             log=log,
@@ -3101,11 +3294,14 @@ def _run_batch_task(job_id, spec):
         ):
             _advance_stream_state(
                 stream_state,
-                chunk_scanned,
-                chunk_total,
+                resume_base_processed + chunk_scanned,
+                resume_base_processed + chunk_total,
             )
-            stream_total = max(stream_total, chunk_total)
-            total = 0 if streaming_time else chunk_total
+            stream_total = max(
+                stream_total,
+                resume_base_processed + chunk_total,
+            )
+            total = 0 if streaming_time else stream_total
             if not streaming_time and not logged_total:
                 log(f"开始处理 {total} 条消息: {source_id} -> {dest_id}")
                 logged_total = True
@@ -3125,6 +3321,14 @@ def _run_batch_task(job_id, spec):
                 skipped=skipped,
                 current_id=chunk_ids[0] if chunk_ids else None,
             )
+            if not fetched_messages:
+                fetched_messages = _fetch_chunk_messages(
+                    acc,
+                    worker,
+                    source_id,
+                    chunk_ids,
+                    log=log,
+                )
             message_map = {
                 getattr(item, "id", None): item
                 for item in fetched_messages
@@ -3140,11 +3344,15 @@ def _run_batch_task(job_id, spec):
 
                 unit_count = 1
                 group_messages = None
+                checkpoint_ids = [message_id]
+                checkpoint_recorded = False
                 try:
                     message = message_map.get(message_id)
                     if not message:
                         skipped += 1
                         processed += 1
+                        record_checkpoint(checkpoint_ids)
+                        checkpoint_recorded = True
                         publish_progress(
                             "forwarding",
                             total=total,
@@ -3160,11 +3368,13 @@ def _run_batch_task(job_id, spec):
                     media_group_id = getattr(message, "media_group_id", None)
                     if media_group_id and media_group_id in group_cache:
                         group_messages = group_cache[media_group_id]
-                    else:
-                        group_messages = _get_private_media_group_messages(
+                    elif media_group_id:
+                        group_messages = _load_batch_media_group(
                             acc,
+                            worker,
                             source_id,
                             message,
+                            log=log,
                         )
                         group_messages = [
                             collected_messages.get(item.id, item)
@@ -3172,8 +3382,11 @@ def _run_batch_task(job_id, spec):
                         ]
                         if media_group_id:
                             group_cache[media_group_id] = group_messages
+                    else:
+                        group_messages = [message]
                     group_ids = [item.id for item in group_messages]
                     handled_ids.update(group_ids)
+                    checkpoint_ids = list(group_ids)
                     unit_count = len(group_messages)
 
                     if not _wait_until_task_active(job_id, log):
@@ -3211,6 +3424,8 @@ def _run_batch_task(job_id, spec):
                     if filtered["excluded"]:
                         skipped += unit_count
                         processed += unit_count
+                        record_checkpoint(checkpoint_ids)
+                        checkpoint_recorded = True
                         publish_progress(
                             "forwarding",
                             total=total,
@@ -3239,6 +3454,8 @@ def _run_batch_task(job_id, spec):
                     ) in ("Text", None) and not cleaned_text.strip():
                         skipped += unit_count
                         processed += unit_count
+                        record_checkpoint(checkpoint_ids)
+                        checkpoint_recorded = True
                         publish_progress(
                             "forwarding",
                             total=total,
@@ -3294,11 +3511,15 @@ def _run_batch_task(job_id, spec):
                     unit_count = len(group_messages) if group_messages else 1
                     failed += unit_count
                     processed += unit_count
+                    record_checkpoint(checkpoint_ids)
+                    checkpoint_recorded = True
                     log(
                         f"消息 {message_id} 失败: {type(exc).__name__}: {exc}",
                         level="error",
                     )
 
+                if not checkpoint_recorded:
+                    record_checkpoint(checkpoint_ids)
                 publish_progress(
                     "forwarding",
                     total=total,
@@ -3574,6 +3795,49 @@ def resume_batch_task(job_id):
         if event is not None:
             event.set()
     _persist_task_history(job_id)
+    return True
+
+
+def resume_interrupted_task(job_id):
+    history = get_history_record(job_id)
+    if not history or history.get("status") != "interrupted":
+        return False
+
+    spec = dict(history.get("task_spec") or {})
+    state = dict(history.get("state") or {})
+    progress = dict(history.get("progress") or {})
+    task = {
+        "id": job_id,
+        "status": "running",
+        "active": True,
+        "exitCode": None,
+        "cancelled": False,
+        "paused": False,
+        "resume_event": threading.Event(),
+        "progress": progress,
+        "stdoutTail": history.get("stdoutTail") or "",
+        "stderrTail": history.get("stderrTail") or "",
+        "spec": spec,
+        "taskName": history.get("taskName") or spec.get("task_name") or "",
+        "sourceId": history.get("sourceId") or str(spec.get("source") or ""),
+        "targetId": history.get("targetId") or str(spec.get("target") or ""),
+        "createdAt": history.get("createdAt") or _now_iso(),
+        "state": state,
+    }
+    task["resume_event"].set()
+    with TASKS_LOCK:
+        existing = TASKS.get(job_id)
+        if existing and existing.get("active"):
+            return False
+        TASKS[job_id] = task
+
+    _persist_task_history(job_id)
+    threading.Thread(
+        target=_run_batch_task,
+        args=(job_id, spec, state),
+        daemon=True,
+        name=f"BatchResume-{job_id[:8]}",
+    ).start()
     return True
 
 

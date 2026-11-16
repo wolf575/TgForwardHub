@@ -1139,9 +1139,14 @@ def api_batch_forward_resume(job_id):
     if 'username' not in session:
         return jsonify({'error': '未登录'}), 401
 
-    if not batch_forward.get_task(job_id):
+    task_exists = bool(batch_forward.get_task(job_id))
+    history_exists = bool(batch_forward.get_history_record(job_id))
+    if not task_exists and not history_exists:
         return jsonify({'error': 'job not found'}), 404
-    if batch_forward.resume_batch_task(job_id):
+    if (
+        batch_forward.resume_batch_task(job_id)
+        or batch_forward.resume_interrupted_task(job_id)
+    ):
         return jsonify({'ok': True, 'status': 'running'})
     return jsonify({'error': '任务当前不可继续'}), 409
 

@@ -628,7 +628,7 @@ class BatchProgressTests(unittest.TestCase):
              mock.patch.object(
                  batch_forward,
                  "_get_private_media_group_messages",
-                 side_effect=lambda _client, _source, item: [item],
+                 side_effect=lambda _client, _source, item, **_kwargs: [item],
              ), \
              mock.patch.object(
                  batch_forward,
@@ -696,7 +696,9 @@ class BatchProgressTests(unittest.TestCase):
              mock.patch.object(
                  batch_forward,
                  "_get_private_media_group_messages",
-                 side_effect=lambda _client, _source, message: [message],
+                 side_effect=lambda _client, _source, message, **_kwargs: [
+                     message
+                 ],
              ), \
              mock.patch.object(
                  batch_forward,

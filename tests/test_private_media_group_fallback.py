@@ -115,6 +115,17 @@ class _Acc:
         return os.path.join(file_name, f"item_{item.id}.jpg")
 
 
+class _FallbackAcc:
+    def __init__(self, fallback_messages):
+        self.fallback_messages = fallback_messages
+
+    def get_media_group(self, chat_id, message_id):
+        raise OSError("connection lost")
+
+    def get_messages(self, chat_id, message_ids):
+        return self.fallback_messages
+
+
 class _Bot:
     def __init__(self, group_error=None):
         self.group_error = group_error
@@ -201,6 +212,32 @@ class PrivateMediaGroupFallbackTests(unittest.TestCase):
         acc = _Acc([second, first])
 
         group = _get_private_media_group_messages(acc, -1001234567890, first)
+
+        self.assertEqual([item.id for item in group], [10, 11])
+
+    def test_strict_group_resolution_rejects_incomplete_album(self):
+        first = _Message(10, "album", photo=_Photo("p1"))
+        acc = _FallbackAcc([first])
+
+        with self.assertRaisesRegex(RuntimeError, "读取不完整"):
+            _get_private_media_group_messages(
+                acc,
+                -1001234567890,
+                first,
+                strict=True,
+            )
+
+    def test_strict_group_resolution_recovers_from_neighbor_fetch(self):
+        first = _Message(10, "album", photo=_Photo("p1"))
+        second = _Message(11, "album", photo=_Photo("p2"))
+        acc = _FallbackAcc([second, first])
+
+        group = _get_private_media_group_messages(
+            acc,
+            -1001234567890,
+            first,
+            strict=True,
+        )
 
         self.assertEqual([item.id for item in group], [10, 11])
 

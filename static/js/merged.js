@@ -917,6 +917,27 @@ async function loadHistory() {
     const deleteButton = document.createElement("button");
     const recordId = item.id || item.jobId || "";
     const isActive = ["running", "paused"].includes(item.status);
+    const resumeButton = document.createElement("button");
+    resumeButton.type = "button";
+    resumeButton.className = "secondary small";
+    resumeButton.textContent = "继续";
+    resumeButton.hidden = item.status !== "interrupted" || !recordId;
+    resumeButton.title = "从上次保存的检查点继续任务";
+    resumeButton.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      resumeButton.disabled = true;
+      try {
+        await apiFetch(
+          `/api/batch-forward/${encodeURIComponent(recordId)}/resume`,
+          { method: "POST", timeout: 15000 }
+        );
+        await attachBatchTask(recordId, "已从中断检查点继续任务");
+        loadHistory();
+      } catch (error) {
+        resumeButton.disabled = false;
+        setMessage("batchMessage", `继续失败：${error.message}`);
+      }
+    });
     deleteButton.type = "button";
     deleteButton.className = "danger small history-delete";
     deleteButton.textContent = "删除";
@@ -944,7 +965,7 @@ async function loadHistory() {
         setMessage("batchMessage", `删除失败: ${error.message}`);
       }
     });
-    titleRow.append(title, deleteButton);
+    titleRow.append(title, resumeButton, deleteButton);
     const meta = document.createElement("div");
     meta.className = "meta";
     meta.textContent = historySubtitle(item);
@@ -962,6 +983,16 @@ async function loadHistory() {
       const { rangeType } = applyBatchSpecToForm(formSpec, state, {
         renewTime: true,
       });
+      if (item.status === "interrupted") {
+        updateMonitor({
+          jobId: recordId,
+          status: item.status,
+          progress: item.progress || {},
+          stdoutTail: item.stdoutTail || "",
+          stderrTail: item.stderrTail || "",
+          spec: formSpec,
+        });
+      }
       setMessage(
         "batchMessage",
         rangeType === "time"
@@ -1147,7 +1178,7 @@ function updateMonitor(data) {
       ? "正在估算剩余时间"
       : "";
   $("pauseBtn").hidden = data.status !== "running";
-  $("resumeBtn").hidden = data.status !== "paused";
+  $("resumeBtn").hidden = !["paused", "interrupted"].includes(data.status);
   $("cancelBtn").hidden = !["running", "paused"].includes(data.status);
 }
 
