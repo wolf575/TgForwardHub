@@ -76,6 +76,11 @@ DOWNLOADABLE_MEDIA_TYPES = {
 
 TASKS = {}
 TASKS_LOCK = threading.RLock()
+RUNNING_BATCH_JOBS = set()
+RUNNING_BATCH_JOBS_LOCK = threading.Lock()
+DELIVERY_LEDGER = {}
+DELIVERY_LEDGER_LOCK = threading.Lock()
+DELIVERY_LEDGER_MAX_UNITS = 20000
 BATCH_FETCH_CHUNK_SIZE = 100
 DEFAULT_RATE_LIMIT_PER_MINUTE = 25
 _EMPTY_CAPTION_SENTINEL = "\u2063"
@@ -538,6 +543,37 @@ def get_task(job_id):
         return dict(TASKS.get(job_id) or {})
 
 
+def _claim_batch_runner(job_id):
+    with RUNNING_BATCH_JOBS_LOCK:
+        if job_id in RUNNING_BATCH_JOBS:
+            return False
+        RUNNING_BATCH_JOBS.add(job_id)
+        return True
+
+
+def _release_batch_runner(job_id):
+    with RUNNING_BATCH_JOBS_LOCK:
+        RUNNING_BATCH_JOBS.discard(job_id)
+    with DELIVERY_LEDGER_LOCK:
+        DELIVERY_LEDGER.pop(job_id, None)
+
+
+def _claim_delivery_unit(job_id, unit_key):
+    with DELIVERY_LEDGER_LOCK:
+        ledger = DELIVERY_LEDGER.setdefault(
+            job_id,
+            {"order": deque(), "keys": set()},
+        )
+        if unit_key in ledger["keys"]:
+            return False
+        ledger["keys"].add(unit_key)
+        ledger["order"].append(unit_key)
+        while len(ledger["order"]) > DELIVERY_LEDGER_MAX_UNITS:
+            expired = ledger["order"].popleft()
+            ledger["keys"].discard(expired)
+        return True
+
+
 def _mark_task_stalled(job_id, idle_seconds):
     warning = (
         f"[{_now_iso()}] 警告: 任务已超过 "
@@ -660,6 +696,79 @@ def _result_message_ids(result):
     return ids
 
 
+def _message_media_identity(message):
+    message_type = get_message_type(message)
+    for attribute in (
+        "photo",
+        "video",
+        "document",
+        "audio",
+        "animation",
+        "voice",
+        "video_note",
+        "sticker",
+    ):
+        media = getattr(message, attribute, None)
+        if media is None:
+            continue
+        identity = getattr(media, "file_unique_id", None) or getattr(
+            media,
+            "file_id",
+            None,
+        )
+        if identity:
+            return (message_type, str(identity))
+    return None
+
+
+def _target_contains_media_group(
+    worker,
+    acc,
+    destination,
+    group_messages,
+    log=None,
+    attempts=3,
+):
+    """Detect an album already present in target after an ambiguous RPC error."""
+    expected = tuple(_message_media_identity(item) for item in group_messages)
+    if not expected or any(identity is None for identity in expected):
+        return False
+
+    for attempt in range(1, attempts + 1):
+        try:
+            recent = _worker_execute(
+                worker,
+                "检查目标频道是否已收到媒体组",
+                lambda: list(
+                    acc.get_chat_history(destination, limit=50) or []
+                ),
+            )
+        except Exception as exc:
+            _emit_log(
+                "发送结果不确定，检查目标媒体组失败: "
+                f"{type(exc).__name__}: {exc}",
+                log,
+                "warning",
+            )
+            recent = []
+
+        grouped = {}
+        for item in recent:
+            media_group_id = getattr(item, "media_group_id", None)
+            if media_group_id:
+                grouped.setdefault(media_group_id, []).append(item)
+        for messages in grouped.values():
+            ordered = sorted(messages, key=lambda item: item.id)
+            actual = tuple(
+                _message_media_identity(item) for item in ordered
+            )
+            if actual == expected:
+                return True
+        if attempt < attempts:
+            time.sleep(min(0.5 * attempt, 1.5))
+    return False
+
+
 def _media_group_caption_values(group_messages, captions):
     """Build copy_media_group captions without retaining filtered source text.
 
@@ -703,7 +812,13 @@ def _edit_media_group_captions(
     """Clear sentinel captions after the album itself was sent successfully."""
     message_ids = _result_message_ids(result)
     if not message_ids:
-        raise RuntimeError("媒体组发送成功但无法获取目标消息 ID")
+        _emit_log(
+            "媒体组已发送，但返回结果中没有可用的目标消息 ID；"
+            "为避免重复发送，本次不再重传，仅跳过 caption 补编辑",
+            log,
+            "warning",
+        )
+        return
     if indexes is None:
         indexes = range(len(captions))
     indexes = list(indexes)
@@ -780,15 +895,24 @@ def _copy_media_group_and_set_captions(
         if caption == _EMPTY_CAPTION_SENTINEL
     ]
     if clear_indexes:
-        _edit_media_group_captions(
-            worker,
-            client,
-            destination,
-            result,
-            [""] * len(caption_values),
-            log,
-            indexes=clear_indexes,
-        )
+        try:
+            _edit_media_group_captions(
+                worker,
+                client,
+                destination,
+                result,
+                [""] * len(caption_values),
+                log,
+                indexes=clear_indexes,
+            )
+        except Exception as exc:
+            _emit_log(
+                "媒体组本体已发送成功，caption 补编辑失败；"
+                "为避免重复发送将保留已发送媒体组: "
+                f"{type(exc).__name__}: {exc}",
+                log,
+                "warning",
+            )
     return result
 
 
@@ -2320,6 +2444,20 @@ def _forward_batch_media_group(
             log,
             "warning",
         )
+        if _target_contains_media_group(
+            worker,
+            acc,
+            dest_id,
+            group_messages,
+            log=log,
+        ):
+            _emit_log(
+                f"媒体组 {anchor.id} 的 RPC 返回异常，但目标频道已出现"
+                "完整有序媒体组；按发送成功处理并跳过重传",
+                log,
+                "warning",
+            )
+            return len(group_messages), False
         if restricted and restricted_source_ids is not None:
             restricted_source_ids.add(source_id)
             _emit_log(
@@ -2853,7 +2991,7 @@ def _load_batch_media_group(
     ) from last_error
 
 
-def _run_batch_task(job_id, spec, resume_state=None):
+def _run_batch_task_impl(job_id, spec, resume_state=None):
     resume_state = dict(resume_state or {})
     processed = max(0, int(resume_state.get("_resumeProcessed") or 0))
     success = max(0, int(resume_state.get("_resumeSuccess") or 0))
@@ -3388,6 +3526,18 @@ def _run_batch_task(job_id, spec, resume_state=None):
                     handled_ids.update(group_ids)
                     checkpoint_ids = list(group_ids)
                     unit_count = len(group_messages)
+                    unit_key = (
+                        ("group", tuple(sorted(group_ids)))
+                        if media_group_id
+                        else ("message", message_id)
+                    )
+                    if not _claim_delivery_unit(job_id, unit_key):
+                        log(
+                            f"发送单元 {checkpoint_ids} 已在本次任务处理中，"
+                            "已跳过重复发送",
+                            level="warning",
+                        )
+                        continue
 
                     if not _wait_until_task_active(job_id, log):
                         finish_cancelled()
@@ -3613,6 +3763,19 @@ def _run_batch_task(job_id, spec, resume_state=None):
         _update_task(job_id, active=False)
 
 
+def _run_batch_task(job_id, spec, resume_state=None):
+    if not _claim_batch_runner(job_id):
+        logger.error(
+            "[batch:%s] 检测到同一任务已有执行线程，拒绝启动重复执行",
+            job_id,
+        )
+        return
+    try:
+        return _run_batch_task_impl(job_id, spec, resume_state)
+    finally:
+        _release_batch_runner(job_id)
+
+
 def submit_batch_task(spec):
     spec = _validate_task_spec(dict(spec or {}))
 
@@ -3799,6 +3962,9 @@ def resume_batch_task(job_id):
 
 
 def resume_interrupted_task(job_id):
+    with RUNNING_BATCH_JOBS_LOCK:
+        if job_id in RUNNING_BATCH_JOBS:
+            return False
     history = get_history_record(job_id)
     if not history or history.get("status") != "interrupted":
         return False
